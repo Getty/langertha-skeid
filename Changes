@@ -22,7 +22,7 @@ Revision history for Langertha-Skeid
     - Use `Langertha->available_engine_ids` for engine discovery when available,
       so Skeid follows the same core/LangerthaX engine registry as Langertha
     - Tighten runtime dependency minimum versions in cpanfile:
-      `Langertha 0.307`, `Langertha::Knarr 0.006`
+      `Langertha 0.307`, `Langertha::Knarr 0.007`
     - Add dynamic admin route protection:
       `/skeid/*` returns 404 without admin key and requires bearer auth when set
     - Dockerfile: add optional `LANGERTHA_SRC` and `KNARR_SRC` build args to

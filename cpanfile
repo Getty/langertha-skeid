@@ -5,7 +5,7 @@ requires 'DBD::SQLite', '1.66';
 requires 'YAML::PP', '0.038';
 requires 'Mojolicious', '9.0';
 requires 'JSON::MaybeXS', '1.004004';
-requires 'Langertha::Knarr', '0.006';
+requires 'Langertha::Knarr', '0.007';
 
 recommends 'DBD::Pg';
 

@@ -185,7 +185,7 @@ If CPAN indexers lag behind current `Langertha`/`Knarr` releases, pass direct CP
 ```bash
 docker build -t raudssus/langertha-skeid \
   --build-arg LANGERTHA_SRC='GETTY/Langertha-0.307.tar.gz' \
-  --build-arg KNARR_SRC='GETTY/Langertha-Knarr-0.006.tar.gz' \
+  --build-arg KNARR_SRC='GETTY/Langertha-Knarr-0.007.tar.gz' \
   .
 ```
 
