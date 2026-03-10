@@ -33,3 +33,5 @@ Revision history for Langertha-Skeid
       `/archive/refs/*` source archives for dzil dists
     - dist.ini now uploads `Langertha-Skeid-%v.tar.gz` to GitHub releases
       (`Getty/langertha-skeid`) via `gh` during post-release hooks
+    - dist.ini now runs `${GH_BIN:-gh}` directly (no pre-check), so release
+      hooks use the same runtime environment/path as the invoking shell
