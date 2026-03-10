@@ -172,6 +172,25 @@ Schema SQL files (simple and explicit):
 - `sql/usage_events.sqlite.sql`
 - `sql/usage_events.postgresql.sql`
 
+## Docker Build (Temporary CPAN Indexer Bypass)
+
+Default build flow:
+
+```bash
+docker build -t raudssus/langertha-skeid .
+```
+
+If CPAN indexers lag behind current `Langertha`/`Knarr` releases, pass direct CPAN dist paths:
+
+```bash
+docker build -t raudssus/langertha-skeid \
+  --build-arg LANGERTHA_SRC='GETTY/Langertha-0.307.tar.gz' \
+  --build-arg KNARR_SRC='GETTY/Langertha-Knarr-0.006.tar.gz' \
+  .
+```
+
+Both args are forwarded to `cpanm` (for example `AUTHOR/Dist-x.yyy.tar.gz` or a tarball URL).
+
 ## Docker Quickstart (SQLite)
 
 1. Config + Data-Verzeichnis anlegen:

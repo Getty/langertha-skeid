@@ -23,3 +23,5 @@ Revision history for Langertha-Skeid
       `Langertha 0.307`, `Langertha::Knarr 0.006`
     - Add dynamic admin route protection:
       `/skeid/*` returns 404 without admin key and requires bearer auth when set
+    - Dockerfile: add optional `LANGERTHA_SRC` and `KNARR_SRC` build args to
+      inject unreleased sources when CPAN indexers lag
