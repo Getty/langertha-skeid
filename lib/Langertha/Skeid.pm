@@ -11,6 +11,7 @@ use File::Basename qw(dirname);
 use File::Path qw(make_path);
 use File::Spec;
 use YAML::PP;
+use Langertha ();
 use Langertha::Knarr::Metrics;
 
 =head1 SYNOPSIS
@@ -565,18 +566,13 @@ sub _iso8601_now {
 
 sub _discover_engine_ids {
   my %ids = %FALLBACK_ENGINE_IDS;
-
-  for my $inc (@INC) {
-    next unless defined $inc && length $inc;
-    for my $ns (['Langertha', 'Engine'], ['LangerthaX', 'Engine']) {
-      my $dir = File::Spec->catdir($inc, @$ns);
-      next unless -d $dir;
-      opendir my $dh, $dir or next;
-      while (my $entry = readdir $dh) {
-        next unless $entry =~ /\A([A-Za-z][A-Za-z0-9_]*)\.pm\z/;
-        $ids{lc $1} = 1;
+  if (Langertha->can('available_engine_ids')) {
+    my $found = eval { Langertha->available_engine_ids };
+    if (!$@ && ref($found) eq 'ARRAY') {
+      for my $id (@$found) {
+        next unless defined $id && length $id;
+        $ids{lc $id} = 1;
       }
-      closedir $dh;
     }
   }
 
