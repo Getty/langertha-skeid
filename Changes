@@ -27,3 +27,5 @@ Revision history for Langertha-Skeid
       `/skeid/*` returns 404 without admin key and requires bearer auth when set
     - Dockerfile: add optional `LANGERTHA_SRC` and `KNARR_SRC` build args to
       inject unreleased sources when CPAN indexers lag
+    - dist.ini release Docker build supports optional
+      `SKEID_DOCKER_BUILD_ARGS='...'` passthrough for temporary build overrides
