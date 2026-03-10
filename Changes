@@ -2,45 +2,16 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
-    - Initial release extracted from Knarr
-    - Add Langertha::Skeid control-plane module for dynamic node/pricing config
-    - Add normalized metrics + cost helpers via Knarr Input/Output/Metrics APIs
-    - Add Langertha::Skeid::Proxy (OpenAI + Anthropic + Ollama routes)
-    - Add weighted routing, inflight/max_conns admission, and node health control
-    - Add usage_store support with sqlite and postgresql backends
-    - Add SQL schema files: sql/usage_events.sqlite.sql and sql/usage_events.postgresql.sql
-    - Add request usage recording and summary reporting (usage.record / usage.report)
-    - Add skeid CLI subcommand: `skeid usage` for quick usage/cost readout
-    - Add configurable saturation wait behavior:
-      routing.wait_timeout_ms + routing.wait_poll_ms (429 after timeout)
-    - Make proxy request path non-blocking with Mojolicious async upstream calls
-      and non-blocking route wait polling (parallel request friendly)
-    - Add dzil post-release Docker build+push flow for `raudssus/langertha-skeid`
-      (`%v`, major, and `latest` tags)
-    - Normalize Skeid engine IDs to Langertha class naming (lowercase)
-      and reject legacy aliases like `openai-compatible`
-    - Use `Langertha->available_engine_ids` for engine discovery when available,
-      so Skeid follows the same core/LangerthaX engine registry as Langertha
-    - Tighten runtime dependency minimum versions in cpanfile:
-      `Langertha 0.307`, `Langertha::Knarr 0.007`
-    - Add dynamic admin route protection:
-      `/skeid/*` returns 404 without admin key and requires bearer auth when set
-    - Dockerfile: add optional `LANGERTHA_SRC` and `KNARR_SRC` build args to
-      inject unreleased sources when CPAN indexers lag
-    - dist.ini release Docker build supports optional
-      `SKEID_DOCKER_BUILD_ARGS='...'` passthrough for temporary build overrides,
-      including GitHub release-dist URL examples and a note against
-      `/archive/refs/*` source archives for dzil dists
-    - dist.ini now uploads `Langertha-Skeid-%v.tar.gz` to GitHub releases
-      (`Getty/langertha-skeid`) via `gh` during post-release hooks
-    - dist.ini now runs `${GH_BIN:-gh}` directly in separate
-      `run_after_release` steps (no pre-check, no chained `&&`), so hooks use
-      invoking-shell runtime environment/path
-    - Add script metadata headers (`PODNAME`, `ABSTRACT`) to `bin/skeid` so
-      PodWeaver can derive document name cleanly during release builds
-    - Move usage SQL schema files into `share/sql` and resolve them via
-      `File::ShareDir::dist_dir('Langertha-Skeid')` at runtime
-    - Add `Test::File::ShareDir` usage in tests to provide dist sharedir mapping
-      during test runs
-    - Add `.gitignore` entries for dist/build artifacts (`.build/`,
-      `Langertha-Skeid-*`, `*.tar.gz`, `*.sqlite`, `*.db`)
+    - Initial release extracted from Knarr as `Langertha::Skeid`
+    - Add Skeid control-plane + proxy with OpenAI, Anthropic, and Ollama routes
+    - Add weighted node routing with health checks, inflight/max_conns admission,
+      and configurable wait timeout/poll behavior (`429` after timeout)
+    - Add metrics/cost helpers via Knarr Input/Output/Metrics APIs
+    - Add usage store support for SQLite/PostgreSQL, automatic schema setup from
+      `share/sql`, and usage APIs (`usage.record`, `usage.report`)
+    - Add `skeid usage` CLI subcommand for usage/cost reporting
+    - Add admin routes with bearer-token protection (`/skeid/*`), hidden when
+      no admin key is configured
+    - Add engine ID mapping based on Langertha engine registry
+      (`Langertha->available_engine_ids`) and reject legacy aliases
+    - Make proxy request handling non-blocking with Mojolicious async upstream calls
