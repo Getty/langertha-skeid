@@ -169,8 +169,8 @@ usage_store:
 
 Schema SQL files (simple and explicit):
 
-- `sql/usage_events.sqlite.sql`
-- `sql/usage_events.postgresql.sql`
+- `share/sql/usage_events.sqlite.sql`
+- `share/sql/usage_events.postgresql.sql`
 
 ## Docker Build (Temporary CPAN Indexer Bypass)
 

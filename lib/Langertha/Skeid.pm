@@ -10,6 +10,7 @@ use POSIX qw(strftime);
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
 use File::Spec;
+use File::ShareDir qw(dist_dir);
 use YAML::PP;
 use Langertha ();
 use Langertha::Knarr::Metrics;
@@ -361,7 +362,29 @@ sub _dist_root {
 sub _schema_file_for_backend {
   my ($self, $backend) = @_;
   my $name = ($backend eq 'postgresql') ? 'usage_events.postgresql.sql' : 'usage_events.sqlite.sql';
-  return File::Spec->catfile(_dist_root(), 'sql', $name);
+  my @candidates;
+
+  # Installed/runtime lookup via dist sharedir.
+  my $share_dir = eval { dist_dir('Langertha-Skeid') };
+  if (!$@ && defined($share_dir) && length($share_dir)) {
+    push @candidates, File::Spec->catfile($share_dir, 'sql', $name);
+  }
+
+  # Dev + dzil test fallback from repository/build paths.
+  my $dir = _dist_root();
+  for (1 .. 6) {
+    push @candidates, File::Spec->catfile($dir, 'share', 'sql', $name);
+    push @candidates, File::Spec->catfile($dir, 'sql', $name);
+    my $parent = dirname($dir);
+    last if !defined($parent) || $parent eq $dir;
+    $dir = $parent;
+  }
+
+  for my $path (@candidates) {
+    return $path if -f $path;
+  }
+
+  return $candidates[0];
 }
 
 sub _read_text_file {

@@ -38,3 +38,9 @@ Revision history for Langertha-Skeid
       invoking-shell runtime environment/path
     - Add script metadata headers (`PODNAME`, `ABSTRACT`) to `bin/skeid` so
       PodWeaver can derive document name cleanly during release builds
+    - Move usage SQL schema files into `share/sql` and resolve them via
+      `File::ShareDir::dist_dir('Langertha-Skeid')` at runtime
+    - Add `Test::File::ShareDir` usage in tests to provide dist sharedir mapping
+      during test runs
+    - Add `.gitignore` entries for dist/build artifacts (`.build/`,
+      `Langertha-Skeid-*`, `*.tar.gz`, `*.sqlite`, `*.db`)

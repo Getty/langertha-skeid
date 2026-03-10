@@ -1,0 +1,5 @@
+.build/
+Langertha-Skeid-*
+*.tar.gz
+*.sqlite
+*.db

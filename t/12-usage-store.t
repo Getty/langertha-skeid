@@ -2,6 +2,9 @@ use strict;
 use warnings;
 use Test::More;
 use File::Temp qw(tempdir);
+use Test::File::ShareDir -share => {
+  -dist => { 'Langertha-Skeid' => 'share' },
+};
 use Langertha::Skeid;
 
 my $tmp = tempdir(CLEANUP => 1);

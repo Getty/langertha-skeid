@@ -12,4 +12,5 @@ recommends 'DBD::Pg';
 on test => sub {
   requires 'Test2::Suite';
   requires 'Test::Mojo';
+  requires 'Test::File::ShareDir';
 };
