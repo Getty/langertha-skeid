@@ -36,3 +36,5 @@ Revision history for Langertha-Skeid
     - dist.ini now runs `${GH_BIN:-gh}` directly in separate
       `run_after_release` steps (no pre-check, no chained `&&`), so hooks use
       invoking-shell runtime environment/path
+    - Add script metadata headers (`PODNAME`, `ABSTRACT`) to `bin/skeid` so
+      PodWeaver can derive document name cleanly during release builds
