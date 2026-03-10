@@ -1,0 +1,964 @@
+package Langertha::Skeid;
+our $VERSION = '0.001';
+# ABSTRACT: Dynamic routing control-plane for multi-node LLM serving with normalized metrics and cost accounting
+use Moo;
+use strict;
+use warnings;
+use Carp qw(croak);
+use DBI;
+use POSIX qw(strftime);
+use File::Basename qw(dirname);
+use File::Path qw(make_path);
+use File::Spec;
+use YAML::PP;
+use Langertha::Knarr::Metrics;
+
+=head1 SYNOPSIS
+
+  use Langertha::Skeid;
+
+  my $skeid = Langertha::Skeid->new(
+    config_file => '/etc/skeid/config.yaml',
+  );
+
+  my $cost = $skeid->call_function('metrics.estimate_cost', {
+    model => 'gpt-4o-mini',
+    usage => { prompt_tokens => 1000, completion_tokens => 200 },
+  });
+
+=head1 DESCRIPTION
+
+Langertha::Skeid is a routing control-plane for provider-style LLM operations.
+It keeps a live node table, routes by model/health/capacity, and records
+normalized token/cost usage.
+
+Skeid is commonly used as one API edge in front of many upstream APIs
+(cloud + local). With C<pricing> and C<usage.record/report>, you can build
+tenant billing from one consistent ledger.
+
+=head2 Multi-API Billing Flow
+
+1. Define multiple nodes in config (for example OpenAI-compatible cloud APIs
+   and local vLLM/SGLang).
+2. Set model pricing via C<pricing> or C<pricing.set>.
+3. Forward tenant identity via C<x-skeid-key-id> (or C<x-api-key-id>).
+4. Read totals by key/model/time with C<usage.report>.
+
+=cut
+
+has nodes => (
+  is      => 'rw',
+  default => sub { [] },
+);
+
+has model_pricing => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+has route_wait_timeout_ms => (
+  is      => 'rw',
+  default => sub {
+    return (defined($ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}) && length($ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}))
+      ? 0 + $ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}
+      : 2000;
+  },
+);
+
+has route_wait_poll_ms => (
+  is      => 'rw',
+  default => sub {
+    return (defined($ENV{SKEID_ROUTE_WAIT_POLL_MS}) && length($ENV{SKEID_ROUTE_WAIT_POLL_MS}))
+      ? 0 + $ENV{SKEID_ROUTE_WAIT_POLL_MS}
+      : 25;
+  },
+);
+
+has usage_db_path => (
+  is        => 'rw',
+  predicate => 'has_usage_db_path',
+  clearer   => 'clear_usage_db_path',
+  default   => sub {
+    return (defined($ENV{SKEID_USAGE_DB}) && length($ENV{SKEID_USAGE_DB}))
+      ? $ENV{SKEID_USAGE_DB}
+      : undef;
+  },
+);
+
+has usage_store => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+has config_file => (
+  is        => 'ro',
+  predicate => 'has_config_file',
+);
+
+has config_loader => (
+  is        => 'ro',
+  predicate => 'has_config_loader',
+);
+
+has _config_mtime => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+has _rr_cursor => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+has _inflight => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+has _stats => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+has _usage_dbh_cached => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+sub BUILD {
+  my ($self) = @_;
+  if ($self->has_config_loader || $self->has_config_file) {
+    $self->reload_config;
+  }
+  if (ref($self->usage_store) eq 'HASH' && keys %{$self->usage_store}) {
+    $self->_configure_usage_store($self->usage_store);
+  } else {
+    my $path = $self->usage_db_path;
+    if (defined $path && length $path) {
+      $self->_set_usage_db_path($path);
+    }
+  }
+  $self->_ensure_usage_schema_if_enabled;
+}
+
+sub add_node {
+  my ($self, %node) = @_;
+  my $id  = $node{id}  // croak 'node id required';
+  my $url = $node{url} // croak 'node url required';
+
+  $self->remove_node($id);
+  push @{$self->nodes}, {
+    id        => $id,
+    url       => $url,
+    model     => ($node{model} // ''),
+    engine    => ($node{engine} // 'openai-compatible'),
+    weight    => (defined $node{weight} ? 0 + $node{weight} : 1),
+    max_conns => (defined $node{max_conns} ? 0 + $node{max_conns} : 0),
+    healthy   => (exists $node{healthy} ? ($node{healthy} ? 1 : 0) : 1),
+    metadata  => (ref($node{metadata}) eq 'HASH' ? $node{metadata} : {}),
+  };
+  return 1;
+}
+
+sub remove_node {
+  my ($self, $id) = @_;
+  return 0 unless defined $id && length $id;
+  my @keep = grep { ($_->{id} // '') ne $id } @{$self->nodes};
+  my $removed = @{$self->nodes} - @keep;
+  $self->nodes(\@keep);
+  return $removed ? 1 : 0;
+}
+
+sub list_nodes {
+  my ($self) = @_;
+  return [ map { +{%$_} } @{$self->nodes} ];
+}
+
+sub set_node_health {
+  my ($self, $id, $healthy) = @_;
+  return 0 unless defined $id && length $id;
+  my $found = 0;
+  for my $n (@{$self->nodes}) {
+    next unless ($n->{id} // '') eq $id;
+    $n->{healthy} = $healthy ? 1 : 0;
+    $found = 1;
+    last;
+  }
+  return $found;
+}
+
+sub set_model_pricing {
+  my ($self, $model, $pricing) = @_;
+  croak 'model required' unless defined $model && length $model;
+  croak 'pricing hash required' unless ref($pricing) eq 'HASH';
+  $self->model_pricing->{$model} = {
+    input_per_million  => 0 + ($pricing->{input_per_million}  // 0),
+    output_per_million => 0 + ($pricing->{output_per_million} // 0),
+  };
+  return $self->model_pricing->{$model};
+}
+
+sub pricing_for_model {
+  my ($self, $model) = @_;
+  return $self->model_pricing->{$model}
+    || $self->model_pricing->{'*'}
+    || { input_per_million => 0, output_per_million => 0 };
+}
+
+sub reload_config {
+  my ($self) = @_;
+  my $cfg = {};
+
+  if ($self->has_config_loader) {
+    my $loaded = $self->config_loader->($self);
+    $cfg = $loaded if ref($loaded) eq 'HASH';
+  } elsif ($self->has_config_file) {
+    my $file = $self->config_file;
+    if (-f $file) {
+      my $ypp = YAML::PP->new;
+      my $loaded = $ypp->load_file($file);
+      $cfg = $loaded if ref($loaded) eq 'HASH';
+      $self->_config_mtime((stat($file))[9] || time);
+    }
+  }
+
+  if (ref($cfg->{pricing}) eq 'HASH') {
+    for my $model (keys %{$cfg->{pricing}}) {
+      my $p = $cfg->{pricing}{$model};
+      next unless ref($p) eq 'HASH';
+      $self->set_model_pricing($model, $p);
+    }
+  }
+
+  if (ref($cfg->{nodes}) eq 'ARRAY') {
+    $self->nodes([]);
+    for my $n (@{$cfg->{nodes}}) {
+      next unless ref($n) eq 'HASH';
+      next unless defined $n->{id} && defined $n->{url};
+      $self->add_node(%$n);
+    }
+  }
+
+  if (ref($cfg->{routing}) eq 'HASH') {
+    if (defined $cfg->{routing}{wait_timeout_ms}) {
+      $self->route_wait_timeout_ms(0 + $cfg->{routing}{wait_timeout_ms});
+    }
+    if (defined $cfg->{routing}{wait_poll_ms}) {
+      my $poll = 0 + $cfg->{routing}{wait_poll_ms};
+      $poll = 1 if $poll < 1;
+      $self->route_wait_poll_ms($poll);
+    }
+  }
+
+  my $usage_cfg = $cfg->{usage_store};
+  if (ref($usage_cfg) eq 'HASH') {
+    $self->_configure_usage_store($usage_cfg);
+  } elsif (exists $cfg->{usage_db_path}) {
+    $self->_configure_usage_store({
+      backend     => 'sqlite',
+      sqlite_path => $cfg->{usage_db_path},
+    });
+  }
+
+  return $cfg;
+}
+
+sub maybe_reload_config {
+  my ($self) = @_;
+
+  if ($self->has_config_loader && !$self->has_config_file) {
+    # Loader-based configs are treated as dynamic and refreshed every task.
+    $self->reload_config;
+    return 1;
+  }
+
+  return 0 unless $self->has_config_file;
+  my $file = $self->config_file;
+  return 0 unless -f $file;
+
+  my $mtime = (stat($file))[9] || 0;
+  my $last  = $self->_config_mtime;
+  if (!defined($last) || $mtime > $last) {
+    $self->reload_config;
+    return 1;
+  }
+  return 0;
+}
+
+sub configure_usage_store {
+  my ($self, $cfg) = @_;
+  return $self->_configure_usage_store($cfg);
+}
+
+sub _dist_root {
+  my $root = dirname(dirname(dirname(__FILE__)));
+  return $root;
+}
+
+sub _schema_file_for_backend {
+  my ($self, $backend) = @_;
+  my $name = ($backend eq 'postgresql') ? 'usage_events.postgresql.sql' : 'usage_events.sqlite.sql';
+  return File::Spec->catfile(_dist_root(), 'sql', $name);
+}
+
+sub _read_text_file {
+  my ($path) = @_;
+  open my $fh, '<', $path or die "Cannot open $path: $!";
+  local $/;
+  my $text = <$fh>;
+  close $fh;
+  return $text;
+}
+
+sub _apply_schema_sql {
+  my ($dbh, $sql) = @_;
+  my @stmts = grep { /\S/ } map {
+    my $s = $_;
+    $s =~ s/^\s+//;
+    $s =~ s/\s+$//;
+    $s;
+  } split /;\s*(?:\n|$)/, $sql;
+  for my $stmt (@stmts) {
+    $dbh->do($stmt);
+  }
+  return 1;
+}
+
+sub _configure_usage_store {
+  my ($self, $cfg) = @_;
+  $cfg ||= {};
+  croak 'usage_store must be a hashref' unless ref($cfg) eq 'HASH';
+
+  my $backend = lc($cfg->{backend} // '');
+  $backend = 'sqlite' if !$backend && (defined($cfg->{sqlite_path}) || defined($cfg->{path}) || defined($cfg->{db_path}));
+  $backend = 'postgresql' if !$backend && defined($cfg->{dsn}) && $cfg->{dsn} =~ /^dbi:Pg:/i;
+  $backend = 'sqlite' unless length $backend;
+  $backend = 'postgresql' if $backend =~ /^postgres/;
+
+  my $normalized;
+  if ($backend eq 'sqlite') {
+    my $path = $cfg->{sqlite_path} // $cfg->{path} // $cfg->{db_path} // ($self->has_usage_db_path ? $self->usage_db_path : undef);
+    if (!defined($path) || !length($path)) {
+      croak 'usage_store.sqlite_path (or path/db_path) is required for sqlite backend';
+    }
+    $normalized = {
+      backend      => 'sqlite',
+      path         => $path,
+      dsn          => "dbi:SQLite:dbname=$path",
+      user         => '',
+      password     => '',
+      schema_file  => ($cfg->{schema_file} // ''),
+      auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
+    };
+  } elsif ($backend eq 'postgresql') {
+    my $dsn = $cfg->{dsn};
+    if (!defined($dsn) || !length($dsn)) {
+      my $host = $cfg->{host} // '127.0.0.1';
+      my $port = $cfg->{port} // 5432;
+      my $name = $cfg->{dbname} // $cfg->{database} // 'skeid';
+      $dsn = "dbi:Pg:dbname=$name;host=$host;port=$port";
+    }
+    my $user = $cfg->{user} // '';
+    my $password = defined($cfg->{password}) ? $cfg->{password} : '';
+    if (!length($password) && defined($cfg->{password_env}) && length($cfg->{password_env})) {
+      $password = $ENV{$cfg->{password_env}} // '';
+    }
+    $normalized = {
+      backend      => 'postgresql',
+      path         => '',
+      dsn          => $dsn,
+      user         => $user,
+      password     => $password,
+      schema_file  => ($cfg->{schema_file} // ''),
+      auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
+    };
+  } else {
+    croak "unsupported usage_store backend '$backend'";
+  }
+
+  my $old = $self->usage_store || {};
+  my $same = ref($old) eq 'HASH'
+    && (($old->{backend} // '') eq ($normalized->{backend} // ''))
+    && (($old->{dsn} // '') eq ($normalized->{dsn} // ''))
+    && (($old->{user} // '') eq ($normalized->{user} // ''))
+    && (($old->{password} // '') eq ($normalized->{password} // ''))
+    && (($old->{schema_file} // '') eq ($normalized->{schema_file} // ''))
+    && ((($old->{auto_migrate} // 1) ? 1 : 0) == (($normalized->{auto_migrate} // 1) ? 1 : 0));
+
+  my $changed = $same ? 0 : 1;
+  unless ($same) {
+    $self->_disconnect_usage_dbh;
+    $self->usage_store($normalized);
+  }
+
+  if ($normalized->{backend} eq 'sqlite') {
+    $self->usage_db_path($normalized->{path});
+  } else {
+    $self->clear_usage_db_path if $self->has_usage_db_path;
+  }
+
+  $self->_ensure_usage_schema_if_enabled if $changed || !$self->_usage_dbh_cached;
+  return $self->usage_store;
+}
+
+sub _set_usage_db_path {
+  my ($self, $path) = @_;
+  return $self->_configure_usage_store({
+    backend     => 'sqlite',
+    sqlite_path => $path,
+  });
+}
+
+sub _usage_backend {
+  my ($self) = @_;
+  my $store = $self->usage_store || {};
+  if (ref($store) eq 'HASH' && defined($store->{backend}) && length($store->{backend})) {
+    return $store->{backend};
+  }
+  my $path = $self->usage_db_path;
+  return (defined($path) && length($path)) ? 'sqlite' : '';
+}
+
+sub _usage_dsn {
+  my ($self) = @_;
+  my $store = $self->usage_store || {};
+  if (ref($store) eq 'HASH' && defined($store->{dsn}) && length($store->{dsn})) {
+    return $store->{dsn};
+  }
+  my $path = $self->usage_db_path;
+  return (defined($path) && length($path)) ? ('dbi:SQLite:dbname=' . $path) : '';
+}
+
+sub _usage_dbh {
+  my ($self) = @_;
+  my $cached = $self->_usage_dbh_cached;
+  return $cached if $cached;
+
+  my $backend = $self->_usage_backend;
+  my $dsn = $self->_usage_dsn;
+  return unless length($backend) && length($dsn);
+
+  my $store = $self->usage_store || {};
+  my $user = (ref($store) eq 'HASH' ? ($store->{user} // '') : '');
+  my $password = (ref($store) eq 'HASH' ? ($store->{password} // '') : '');
+
+  if ($backend eq 'sqlite') {
+    my $path = (ref($store) eq 'HASH' ? ($store->{path} // $self->usage_db_path) : $self->usage_db_path);
+    my $dir = dirname($path);
+    if (defined $dir && length $dir && $dir ne '.' && !-d $dir) {
+      make_path($dir);
+    }
+  }
+
+  my %connect_attr = (
+    RaiseError => 1,
+    PrintError => 0,
+    AutoCommit => 1,
+  );
+  $connect_attr{sqlite_unicode} = 1 if $backend eq 'sqlite';
+
+  my $dbh = DBI->connect($dsn, $user, $password, \%connect_attr);
+  $self->_usage_dbh_cached($dbh);
+  return $dbh;
+}
+
+sub _disconnect_usage_dbh {
+  my ($self) = @_;
+  my $dbh = $self->_usage_dbh_cached or return;
+  eval { $dbh->disconnect };
+  $self->_usage_dbh_cached(undef);
+  return;
+}
+
+sub _ensure_usage_schema_if_enabled {
+  my ($self) = @_;
+  my $backend = $self->_usage_backend;
+  return unless length $backend;
+  my $dbh = $self->_usage_dbh or return;
+
+  my $store = $self->usage_store || {};
+  my $auto_migrate = (ref($store) eq 'HASH' && exists($store->{auto_migrate}))
+    ? ($store->{auto_migrate} ? 1 : 0)
+    : 1;
+  return 1 unless $auto_migrate;
+
+  my $schema_file = (ref($store) eq 'HASH' ? ($store->{schema_file} // '') : '');
+  $schema_file = $self->_schema_file_for_backend($backend) unless length $schema_file;
+  croak "usage schema file not found: $schema_file" unless -f $schema_file;
+
+  my $sql = _read_text_file($schema_file);
+  _apply_schema_sql($dbh, $sql);
+  return 1;
+}
+
+sub _num {
+  my ($v) = @_;
+  return 0 unless defined $v;
+  return 0 + $v;
+}
+
+sub _iso8601_now {
+  return strftime('%Y-%m-%dT%H:%M:%SZ', gmtime());
+}
+
+sub record_usage {
+  my ($self, %args) = @_;
+  my $backend = $self->_usage_backend;
+  return { ok => 0, error => 'usage_store not configured' } unless length $backend;
+
+  my $dbh = eval { $self->_usage_dbh };
+  if (!$dbh || $@) {
+    my $err = $@ || 'failed to connect usage database';
+    $err =~ s/\s+$//;
+    return { ok => 0, error => $err };
+  }
+
+  my $metrics = ref($args{metrics}) eq 'HASH' ? $args{metrics} : {};
+  my $usage = ref($metrics->{usage}) eq 'HASH' ? $metrics->{usage} : {};
+  my $tool_calls = ref($metrics->{tool_names}) eq 'ARRAY'
+    ? scalar(@{$metrics->{tool_names}})
+    : _num($metrics->{tool_calls});
+  my $input_tokens  = _num($usage->{input}) || _num($usage->{prompt_tokens}) || _num($metrics->{input_tokens});
+  my $output_tokens = _num($usage->{output}) || _num($usage->{completion_tokens}) || _num($metrics->{output_tokens});
+  my $total_tokens  = _num($usage->{total}) || _num($metrics->{total_tokens}) || ($input_tokens + $output_tokens);
+  my $cost_input    = _num($metrics->{cost_input_usd}) || _num($metrics->{input_cost_usd});
+  my $cost_output   = _num($metrics->{cost_output_usd}) || _num($metrics->{output_cost_usd});
+  my $cost_total    = _num($metrics->{cost_total_usd}) || _num($metrics->{total_cost_usd});
+
+  my $created_at = $args{created_at} // _iso8601_now();
+  my $request_id = $args{request_id} // '';
+
+  my $sth = $dbh->prepare_cached(q{
+    INSERT INTO usage_events (
+      created_at, request_id, api_format, endpoint, api_key_id, provider, engine, model, node_id, route_url,
+      status_code, ok, duration_ms, input_tokens, output_tokens, total_tokens, tool_calls,
+      cost_input_usd, cost_output_usd, cost_total_usd, error_type, error_message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  });
+  $sth->execute(
+    $created_at,
+    $request_id,
+    ($args{api_format} // ''),
+    ($args{endpoint} // ''),
+    ($args{api_key_id} // ''),
+    ($args{provider} // ''),
+    ($args{engine} // ''),
+    ($args{model} // ''),
+    ($args{node_id} // ''),
+    ($args{route_url} // ''),
+    (_num($args{status_code}) || 0),
+    ($args{ok} ? 1 : 0),
+    (_num($args{duration_ms}) || 0),
+    $input_tokens,
+    $output_tokens,
+    $total_tokens,
+    (_num($tool_calls)),
+    $cost_input,
+    $cost_output,
+    $cost_total,
+    ($args{error_type} // ''),
+    ($args{error_message} // ''),
+  );
+
+  my %out = (ok => 1);
+  if ($backend eq 'sqlite' && $dbh->can('sqlite_last_insert_rowid')) {
+    $out{id} = _num($dbh->sqlite_last_insert_rowid);
+  }
+  return \%out;
+}
+
+sub usage_report {
+  my ($self, %args) = @_;
+  my $backend = $self->_usage_backend;
+  return { ok => 0, enabled => 0, error => 'usage_store not configured' } unless length $backend;
+
+  my $dbh = eval { $self->_usage_dbh };
+  if (!$dbh || $@) {
+    my $err = $@ || 'failed to connect usage database';
+    $err =~ s/\s+$//;
+    return { ok => 0, enabled => 0, error => $err };
+  }
+
+  my $limit = _num($args{limit});
+  $limit = 20 if $limit < 1;
+  $limit = 500 if $limit > 500;
+
+  my @where;
+  my @bind;
+  if (defined $args{since} && length $args{since}) {
+    push @where, 'created_at >= ?';
+    push @bind, $args{since};
+  }
+  if (defined $args{api_key_id} && length $args{api_key_id}) {
+    push @where, 'api_key_id = ?';
+    push @bind, $args{api_key_id};
+  }
+  if (defined $args{model} && length $args{model}) {
+    push @where, 'model = ?';
+    push @bind, $args{model};
+  }
+
+  my $where_sql = @where ? ('WHERE ' . join(' AND ', @where)) : '';
+
+  my $totals = $dbh->selectrow_hashref(
+    "SELECT
+       COUNT(*) AS requests,
+       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+       COALESCE(SUM(tool_calls), 0) AS tool_calls,
+       COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
+     FROM usage_events $where_sql",
+    undef,
+    @bind,
+  ) || {};
+
+  my $by_key = $dbh->selectall_arrayref(
+    "SELECT
+       COALESCE(api_key_id, '') AS api_key_id,
+       COUNT(*) AS requests,
+       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+       COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
+     FROM usage_events
+     $where_sql
+     GROUP BY api_key_id
+     ORDER BY total_cost_usd DESC, requests DESC",
+    { Slice => {} },
+    @bind,
+  ) || [];
+
+  my $by_model = $dbh->selectall_arrayref(
+    "SELECT
+       COALESCE(model, '') AS model,
+       COUNT(*) AS requests,
+       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+       COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
+     FROM usage_events
+     $where_sql
+     GROUP BY model
+     ORDER BY total_cost_usd DESC, requests DESC",
+    { Slice => {} },
+    @bind,
+  ) || [];
+
+  my $recent = $dbh->selectall_arrayref(
+    "SELECT
+       id, created_at, api_format, endpoint, api_key_id, model, node_id, status_code, ok,
+       input_tokens, output_tokens, total_tokens, tool_calls, cost_total_usd
+     FROM usage_events
+     $where_sql
+     ORDER BY id DESC
+     LIMIT ?",
+    { Slice => {} },
+    @bind,
+    $limit,
+  ) || [];
+
+  return {
+    ok        => 1,
+    enabled   => 1,
+    backend   => $backend,
+    db_path   => ($backend eq 'sqlite' ? ($self->usage_db_path // '') : ''),
+    since     => ($args{since} // ''),
+    totals    => {
+      requests       => _num($totals->{requests}),
+      input_tokens   => _num($totals->{input_tokens}),
+      output_tokens  => _num($totals->{output_tokens}),
+      total_tokens   => _num($totals->{total_tokens}),
+      tool_calls     => _num($totals->{tool_calls}),
+      total_cost_usd => _num($totals->{total_cost_usd}),
+    },
+    by_key   => [ map {
+      +{
+        api_key_id     => ($_->{api_key_id} // ''),
+        requests       => _num($_->{requests}),
+        total_tokens   => _num($_->{total_tokens}),
+        total_cost_usd => _num($_->{total_cost_usd}),
+      }
+    } @$by_key ],
+    by_model => [ map {
+      +{
+        model          => ($_->{model} // ''),
+        requests       => _num($_->{requests}),
+        total_tokens   => _num($_->{total_tokens}),
+        total_cost_usd => _num($_->{total_cost_usd}),
+      }
+    } @$by_model ],
+    recent   => [ map {
+      +{
+        id            => _num($_->{id}),
+        created_at    => ($_->{created_at} // ''),
+        api_format    => ($_->{api_format} // ''),
+        endpoint      => ($_->{endpoint} // ''),
+        api_key_id    => ($_->{api_key_id} // ''),
+        model         => ($_->{model} // ''),
+        node_id       => ($_->{node_id} // ''),
+        status_code   => _num($_->{status_code}),
+        ok            => ($_->{ok} ? 1 : 0),
+        input_tokens  => _num($_->{input_tokens}),
+        output_tokens => _num($_->{output_tokens}),
+        total_tokens  => _num($_->{total_tokens}),
+        tool_calls    => _num($_->{tool_calls}),
+        cost_total_usd => _num($_->{cost_total_usd}),
+      }
+    } @$recent ],
+  };
+}
+
+sub estimate_cost {
+  my ($self, %args) = @_;
+  my $model = $args{model} // '';
+  my $usage = $args{usage}
+    || Langertha::Knarr::Metrics->usage_from_response($args{response});
+  my $pricing = $args{pricing} || $self->pricing_for_model($model);
+
+  return Langertha::Knarr::Metrics->estimate_cost_usd(
+    usage   => $usage,
+    pricing => $pricing,
+  );
+}
+
+sub normalize_metrics {
+  my ($self, %args) = @_;
+  my $model = $args{model} // '';
+  my $usage = $args{usage}
+    || Langertha::Knarr::Metrics->usage_from_response($args{response});
+  my $pricing = $args{pricing} || $self->pricing_for_model($model);
+
+  return Langertha::Knarr::Metrics->build_record(
+    provider        => $args{provider},
+    engine          => $args{engine},
+    model           => $model,
+    route           => $args{route},
+    duration_ms     => $args{duration_ms},
+    started_at      => $args{started_at},
+    finished_at     => $args{finished_at},
+    usage           => $usage,
+    tool_calls      => ($args{tool_calls} || []),
+    pricing         => $pricing,
+    pricing_version => $args{pricing_version},
+  );
+}
+
+sub _route_key {
+  my ($self, %args) = @_;
+  my $model  = $args{model}  // '';
+  my $engine = $args{engine} // '';
+  return join('|', $model, $engine);
+}
+
+sub _node_can_take {
+  my ($self, $node) = @_;
+  return 0 unless ref($node) eq 'HASH';
+  return 0 unless ($node->{healthy} // 0);
+  my $id = $node->{id} // '';
+  return 0 unless length $id;
+  my $max = 0 + ($node->{max_conns} // 0);
+  my $inflight = 0 + ($self->_inflight->{$id} // 0);
+  return 1 if $max <= 0;
+  return $inflight < $max ? 1 : 0;
+}
+
+sub _eligible_nodes {
+  my ($self, %args) = @_;
+  my $model  = $args{model};
+  my $engine = $args{engine};
+  my @nodes = @{$self->nodes || []};
+
+  @nodes = grep {
+    !defined($model) || !length($model) || !defined($_->{model}) || !length($_->{model}) || $_->{model} eq $model
+  } @nodes;
+  @nodes = grep {
+    !defined($engine) || !length($engine) || !defined($_->{engine}) || !length($_->{engine}) || $_->{engine} eq $engine
+  } @nodes;
+  @nodes = grep { ($_->{healthy} // 0) ? 1 : 0 } @nodes;
+
+  return [ map { +{%$_} } @nodes ];
+}
+
+sub pick_node {
+  my ($self, %args) = @_;
+  my $eligible = $self->_eligible_nodes(%args);
+  return unless @$eligible;
+
+  my @nodes = sort { ($a->{id} // '') cmp ($b->{id} // '') } @$eligible;
+  my @weights = map {
+    my $w = 0 + ($_->{weight} // 1);
+    $w = 1 if $w < 1;
+    int($w);
+  } @nodes;
+  my $total_weight = 0;
+  $total_weight += $_ for @weights;
+  return unless $total_weight > 0;
+
+  my $key = $self->_route_key(%args);
+  my $cursor = 0 + ($self->_rr_cursor->{$key} // 0);
+
+  # Weighted round-robin with admission checks.
+  for my $step (0 .. $total_weight - 1) {
+    my $target = ($cursor + $step) % $total_weight;
+    my $acc = 0;
+    for my $idx (0 .. $#nodes) {
+      $acc += $weights[$idx];
+      next if $target >= $acc;
+      my $candidate = $nodes[$idx];
+      next unless $self->_node_can_take($candidate);
+      $self->_rr_cursor->{$key} = ($cursor + $step + 1) % $total_weight;
+      my $id = $candidate->{id};
+      my $inflight = 0 + ($self->_inflight->{$id} // 0);
+      return {
+        %$candidate,
+        inflight => $inflight,
+        route_key => $key,
+      };
+    }
+  }
+
+  return;
+}
+
+sub route_state {
+  my ($self, %args) = @_;
+  my $eligible = $self->_eligible_nodes(%args);
+  my $available = [ grep { $self->_node_can_take($_) } @$eligible ];
+
+  return {
+    model          => ($args{model} // ''),
+    engine         => ($args{engine} // ''),
+    eligible_count => scalar(@$eligible),
+    available_count => scalar(@$available),
+    has_eligible   => @$eligible ? 1 : 0,
+    has_available  => @$available ? 1 : 0,
+  };
+}
+
+sub start_request {
+  my ($self, $node_id) = @_;
+  croak 'node_id required' unless defined $node_id && length $node_id;
+  my $node = (grep { ($_->{id} // '') eq $node_id } @{$self->nodes})[0];
+  return 0 unless $node && $self->_node_can_take($node);
+
+  $self->_inflight->{$node_id} = 1 + ($self->_inflight->{$node_id} // 0);
+  $self->_stats->{$node_id}{started} = 1 + ($self->_stats->{$node_id}{started} // 0);
+  return 1;
+}
+
+sub finish_request {
+  my ($self, $node_id, %args) = @_;
+  croak 'node_id required' unless defined $node_id && length $node_id;
+  my $cur = 0 + ($self->_inflight->{$node_id} // 0);
+  $cur--;
+  $cur = 0 if $cur < 0;
+  $self->_inflight->{$node_id} = $cur;
+
+  if ($args{ok}) {
+    $self->_stats->{$node_id}{ok} = 1 + ($self->_stats->{$node_id}{ok} // 0);
+  } else {
+    $self->_stats->{$node_id}{error} = 1 + ($self->_stats->{$node_id}{error} // 0);
+  }
+
+  if (defined $args{duration_ms}) {
+    $self->_stats->{$node_id}{duration_ms_total}
+      = (0 + ($self->_stats->{$node_id}{duration_ms_total} // 0)) + (0 + $args{duration_ms});
+  }
+
+  return 1;
+}
+
+sub node_metrics {
+  my ($self, $node_id) = @_;
+  if (defined $node_id && length $node_id) {
+    my $s = $self->_stats->{$node_id} || {};
+    return {
+      node_id => $node_id,
+      inflight => 0 + ($self->_inflight->{$node_id} // 0),
+      started => 0 + ($s->{started} // 0),
+      ok => 0 + ($s->{ok} // 0),
+      error => 0 + ($s->{error} // 0),
+      duration_ms_total => 0 + ($s->{duration_ms_total} // 0),
+    };
+  }
+
+  my @rows;
+  for my $n (@{$self->nodes}) {
+    push @rows, $self->node_metrics($n->{id});
+  }
+  return \@rows;
+}
+
+sub call_function {
+  my ($self, $name, $args) = @_;
+  $args ||= {};
+  croak 'function name required' unless defined $name && length $name;
+  croak 'function args must be hashref' unless ref($args) eq 'HASH';
+
+  # Dynamic config refresh on each task/function dispatch.
+  $self->maybe_reload_config;
+
+  if ($name eq 'metrics.estimate_cost') {
+    return $self->estimate_cost(%$args);
+  }
+  if ($name eq 'metrics.normalize') {
+    return $self->normalize_metrics(%$args);
+  }
+  if ($name eq 'pricing.set') {
+    my $model = $args->{model} // croak 'pricing.set: model required';
+    my $pricing = $args->{pricing} // croak 'pricing.set: pricing required';
+    return $self->set_model_pricing($model, $pricing);
+  }
+  if ($name eq 'nodes.add') {
+    return { ok => $self->add_node(%$args) ? 1 : 0 };
+  }
+  if ($name eq 'nodes.remove') {
+    return { ok => $self->remove_node($args->{id}) ? 1 : 0 };
+  }
+  if ($name eq 'nodes.list') {
+    return { nodes => $self->list_nodes };
+  }
+  if ($name eq 'nodes.set_health') {
+    return { ok => $self->set_node_health($args->{id}, $args->{healthy}) ? 1 : 0 };
+  }
+  if ($name eq 'nodes.metrics') {
+    return { metrics => $self->node_metrics($args->{id}) };
+  }
+  if ($name eq 'route.next') {
+    my $node = $self->pick_node(model => ($args->{model} // ''), engine => ($args->{engine} // ''));
+    return { node => $node };
+  }
+  if ($name eq 'route.state') {
+    return $self->route_state(
+      model  => ($args->{model} // ''),
+      engine => ($args->{engine} // ''),
+    );
+  }
+  if ($name eq 'request.start') {
+    my $id = $args->{id} // croak 'request.start: id required';
+    return { ok => $self->start_request($id) ? 1 : 0 };
+  }
+  if ($name eq 'request.finish') {
+    my $id = $args->{id} // croak 'request.finish: id required';
+    return { ok => $self->finish_request($id, %$args) ? 1 : 0 };
+  }
+  if ($name eq 'config.reload') {
+    return { config => $self->reload_config };
+  }
+  if ($name eq 'usage.record') {
+    return $self->record_usage(%$args);
+  }
+  if ($name eq 'usage.report') {
+    return $self->usage_report(%$args);
+  }
+  if ($name eq 'usage.configure') {
+    my $store = $args->{usage_store} // $args;
+    return { usage_store => $self->configure_usage_store($store) };
+  }
+
+  croak "unknown function: $name";
+}
+
+sub DEMOLISH {
+  my ($self) = @_;
+  $self->_disconnect_usage_dbh;
+}
+
+1;
