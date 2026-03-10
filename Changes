@@ -1,20 +1,25 @@
 Revision history for Langertha-Skeid
 
-0.001  2026-03-10
-  - Initial release extracted from Knarr
-  - Add Langertha::Skeid control-plane module for dynamic node/pricing config
-  - Add normalized metrics + cost helpers via Knarr Input/Output/Metrics APIs
-  - Add Langertha::Skeid::Proxy (OpenAI + Anthropic + Ollama routes)
-  - Add weighted routing, inflight/max_conns admission, and node health control
-  - Add admin endpoints for live node/health/metrics control
-  - Add usage_store support with sqlite and postgresql backends
-  - Add SQL schema files: sql/usage_events.sqlite.sql and sql/usage_events.postgresql.sql
-  - Add request usage recording and summary reporting (usage.record / usage.report)
-  - Add skeid CLI subcommand: `skeid usage` for quick usage/cost readout
-  - Add configurable saturation wait behavior:
-    routing.wait_timeout_ms + routing.wait_poll_ms (429 after timeout)
-  - Make proxy request path non-blocking with Mojolicious async upstream calls
-    and non-blocking route wait polling (parallel request friendly)
-  - Add dzil post-release Docker build+push flow for `raudssus/langertha-skeid`
-    (`%v`, major, and `latest` tags)
-  - Tighten runtime dependency minimum versions in cpanfile
+{{$NEXT}}
+
+    - Initial release extracted from Knarr
+    - Add Langertha::Skeid control-plane module for dynamic node/pricing config
+    - Add normalized metrics + cost helpers via Knarr Input/Output/Metrics APIs
+    - Add Langertha::Skeid::Proxy (OpenAI + Anthropic + Ollama routes)
+    - Add weighted routing, inflight/max_conns admission, and node health control
+    - Add usage_store support with sqlite and postgresql backends
+    - Add SQL schema files: sql/usage_events.sqlite.sql and sql/usage_events.postgresql.sql
+    - Add request usage recording and summary reporting (usage.record / usage.report)
+    - Add skeid CLI subcommand: `skeid usage` for quick usage/cost readout
+    - Add configurable saturation wait behavior:
+      routing.wait_timeout_ms + routing.wait_poll_ms (429 after timeout)
+    - Make proxy request path non-blocking with Mojolicious async upstream calls
+      and non-blocking route wait polling (parallel request friendly)
+    - Add dzil post-release Docker build+push flow for `raudssus/langertha-skeid`
+      (`%v`, major, and `latest` tags)
+    - Normalize Skeid engine IDs to Langertha class naming (lowercase)
+      and reject legacy aliases like `openai-compatible`
+    - Tighten runtime dependency minimum versions in cpanfile:
+      `Langertha 0.307`, `Langertha::Knarr 0.006`
+    - Add dynamic admin route protection:
+      `/skeid/*` returns 404 without admin key and requires bearer auth when set
