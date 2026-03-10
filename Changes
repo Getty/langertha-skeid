@@ -15,3 +15,6 @@ Revision history for Langertha-Skeid
     - Add engine ID mapping based on Langertha engine registry
       (`Langertha->available_engine_ids`) and reject legacy aliases
     - Make proxy request handling non-blocking with Mojolicious async upstream calls
+    - Add Avatar smoke benchmark examples:
+      `examples/avatar-skeid-single.yaml`, `examples/avatar-skeid-2nodes.yaml`,
+      and `examples/skeid-parallel-smoke.pl`

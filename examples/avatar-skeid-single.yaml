@@ -1,0 +1,24 @@
+pricing:
+  "*":
+    input_per_million: 0.10
+    output_per_million: 0.40
+
+usage_store:
+  backend: sqlite
+  sqlite_path: /tmp/skeid-avatar-single.sqlite
+
+routing:
+  wait_timeout_ms: 6000
+  wait_poll_ms: 25
+
+nodes:
+  - id: avatar-primary
+    # Point this to the winner from direct vLLM vs SGLang smoke tests.
+    # Current Avatar NodePorts:
+    #   vLLM:   http://5.9.97.19:32080/v1
+    #   SGLang: http://5.9.97.19:32081/v1
+    url: http://5.9.97.19:32080/v1
+    model: Qwen/Qwen2.5-0.5B-Instruct
+    engine: vllm
+    weight: 1
+    max_conns: 4

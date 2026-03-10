@@ -257,6 +257,77 @@ docker run -d --name skeid \
 
 Wenn deine Ports anders sind, nur die `url`-Felder in der YAML anpassen.
 
+## Avatar 2-Node Smoke (vLLM + SGLang)
+
+Empfohlener Ablauf:
+
+1. vLLM vs SGLang direkt vergleichen (gleiche Last, gleiche Prompt).
+2. Gewinner als Single-Engine in Skeid fahren.
+3. Erst danach optional Multi-Node/Mix testen.
+
+Direkter Vergleich (ohne Skeid) mit dem gleichen Smoke-Tool:
+
+```bash
+# vLLM direkt
+perl ./examples/skeid-parallel-smoke.pl \
+  --base-url http://5.9.97.19:32080/v1 \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --requests 100 \
+  --concurrency 20 \
+  --json
+
+# SGLang direkt
+perl ./examples/skeid-parallel-smoke.pl \
+  --base-url http://5.9.97.19:32081/v1 \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --requests 100 \
+  --concurrency 20 \
+  --json
+```
+
+Dann Single-Engine-Konfig verwenden:
+
+- `examples/avatar-skeid-single.yaml`
+
+Optionaler Mix/Verteilungstest mit zwei Targets:
+
+- `examples/avatar-skeid-2nodes.yaml`
+- `examples/skeid-parallel-smoke.pl`
+
+1. Config kopieren und zwei URL-Felder setzen:
+
+```bash
+cp ./examples/avatar-skeid-2nodes.yaml ./skeid.avatar.yaml
+# edit ./skeid.avatar.yaml
+```
+
+2. Skeid lokal starten:
+
+```bash
+bin/skeid serve --listen 127.0.0.1:8090 --config ./skeid.avatar.yaml
+```
+
+3. Smoke mit 10 parallelen Requests:
+
+```bash
+perl ./examples/skeid-parallel-smoke.pl \
+  --base-url http://127.0.0.1:8090 \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --requests 10 \
+  --concurrency 10 \
+  --show-errors
+```
+
+4. Danach Last hochdrehen:
+
+```bash
+perl ./examples/skeid-parallel-smoke.pl \
+  --base-url http://127.0.0.1:8090 \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --requests 200 \
+  --concurrency 40
+```
+
 ## Docker: Usage aus SQLite abrufen
 
 Skeid intern:
