@@ -31,3 +31,5 @@ Revision history for Langertha-Skeid
       `SKEID_DOCKER_BUILD_ARGS='...'` passthrough for temporary build overrides,
       including GitHub release-dist URL examples and a note against
       `/archive/refs/*` source archives for dzil dists
+    - dist.ini now uploads `Langertha-Skeid-%v.tar.gz` to GitHub releases
+      (`Getty/langertha-skeid`) via `gh` during post-release hooks
