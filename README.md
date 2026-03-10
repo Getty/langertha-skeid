@@ -35,6 +35,12 @@ Admin routes:
 - `GET /skeid/metrics/nodes`
 - `GET /skeid/usage`
 
+Admin route protection:
+
+- If no admin key is configured, `/skeid/*` returns `404` (effectively disabled).
+- If configured, all `/skeid/*` routes require `Authorization: Bearer <admin-key>`.
+- Admin key is dynamic config (`admin.api_key` or `admin_api_key`) and is reloaded on request dispatch.
+
 ## Cloud Provider Scenario (Multi-API + Billing)
 
 Skeid can run as a provider gateway in front of many upstream APIs (cloud + local),
@@ -115,10 +121,18 @@ usage_store:
   backend: sqlite
   sqlite_path: /data/skeid/usage.sqlite
 
+admin:
+  api_key: change-me
+
 routing:
   wait_timeout_ms: 2000
   wait_poll_ms: 25
 ```
+
+Equivalent env/CLI options:
+
+- `SKEID_ADMIN_API_KEY=...`
+- `bin/skeid serve --admin-api-key ...`
 
 Cloud-mix example:
 

@@ -18,6 +18,9 @@ sub build_app {
   my $skeid = $opts{skeid} || Langertha::Skeid->new(
     ($opts{config_file} ? (config_file => $opts{config_file}) : ()),
   );
+  if (exists $opts{admin_api_key}) {
+    $skeid->admin_api_key(defined($opts{admin_api_key}) ? $opts{admin_api_key} : '');
+  }
 
   my $app = Mojolicious->new;
   $app->secrets(['skeid-proxy']);
@@ -99,12 +102,17 @@ sub build_app {
   });
 
   # Lightweight admin API for live control-plane updates.
-  $r->get('/skeid/nodes' => sub {
+  my $admin = $r->under('/skeid' => sub {
+    my ($c) = @_;
+    return _authorize_admin($c);
+  });
+
+  $admin->get('/nodes' => sub {
     my ($c) = @_;
     $c->render(json => { nodes => $c->skeid->list_nodes });
   });
 
-  $r->post('/skeid/nodes' => sub {
+  $admin->post('/nodes' => sub {
     my ($c) = @_;
     my $body = $c->req->json || {};
     my $ok = eval { $c->skeid->call_function('nodes.add', $body)->{ok} };
@@ -117,7 +125,7 @@ sub build_app {
     $c->render(json => { ok => 1, nodes => $c->skeid->list_nodes });
   });
 
-  $r->post('/skeid/nodes/:id/health' => sub {
+  $admin->post('/nodes/:id/health' => sub {
     my ($c) = @_;
     my $body = $c->req->json || {};
     my $id = $c->param('id');
@@ -128,12 +136,12 @@ sub build_app {
     $c->render(json => { ok => $ok ? 1 : 0 });
   });
 
-  $r->get('/skeid/metrics/nodes' => sub {
+  $admin->get('/metrics/nodes' => sub {
     my ($c) = @_;
     $c->render(json => { metrics => $c->skeid->node_metrics });
   });
 
-  $r->get('/skeid/usage' => sub {
+  $admin->get('/usage' => sub {
     my ($c) = @_;
     my $report = $c->skeid->call_function('usage.report', {
       (defined($c->param('since')) && length($c->param('since')) ? (since => $c->param('since')) : ()),
@@ -146,6 +154,34 @@ sub build_app {
   });
 
   return $app;
+}
+
+sub _authorize_admin {
+  my ($c) = @_;
+  $c->skeid->maybe_reload_config;
+
+  my $admin_api_key = $c->skeid->admin_api_key // '';
+  if (!length($admin_api_key)) {
+    $c->render(status => 404, text => 'Not Found');
+    return undef;
+  }
+
+  my $auth = $c->req->headers->authorization // '';
+  my ($scheme, $token) = $auth =~ /\A(\S+)\s+(.+)\z/;
+  if (!defined($scheme) || lc($scheme) ne 'bearer' || !defined($token) || $token ne $admin_api_key) {
+    $c->res->headers->header('WWW-Authenticate' => 'Bearer realm="skeid-admin"');
+    $c->render(
+      status => 401,
+      json   => {
+        error => {
+          type    => 'unauthorized',
+          message => 'Missing or invalid admin bearer token',
+        },
+      },
+    );
+    return undef;
+  }
+  return 1;
 }
 
 sub _handle_openai_chat {

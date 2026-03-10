@@ -51,6 +51,13 @@ Examples: C<OpenAI =E<gt> openai>, C<OpenAIBase =E<gt> openaibase>,
 C<vLLM =E<gt> vllm>. Legacy aliases like C<openai-compatible> are intentionally
 rejected.
 
+=head2 Admin API Key
+
+C<admin.api_key> (or C<admin_api_key>) controls access to proxy admin routes.
+If empty, admin routes are effectively disabled by returning C<404>. If set,
+the proxy expects C<Authorization: Bearer ...>. This value can be changed
+through dynamic config reload.
+
 =cut
 
 has nodes => (
@@ -95,6 +102,15 @@ has usage_db_path => (
 has usage_store => (
   is      => 'rw',
   default => sub { {} },
+);
+
+has admin_api_key => (
+  is      => 'rw',
+  default => sub {
+    return (defined($ENV{SKEID_ADMIN_API_KEY}) && length($ENV{SKEID_ADMIN_API_KEY}))
+      ? $ENV{SKEID_ADMIN_API_KEY}
+      : '';
+  },
 );
 
 has config_file => (
@@ -285,6 +301,15 @@ sub reload_config {
       $poll = 1 if $poll < 1;
       $self->route_wait_poll_ms($poll);
     }
+  }
+
+  if (exists $cfg->{admin_api_key}) {
+    $self->admin_api_key(defined($cfg->{admin_api_key}) ? "$cfg->{admin_api_key}" : '');
+  } elsif (ref($cfg->{admin}) eq 'HASH') {
+    $self->admin_api_key(defined($cfg->{admin}{api_key}) ? "$cfg->{admin}{api_key}" : '');
+  } elsif ($self->has_config_loader || $self->has_config_file) {
+    # Config-managed mode: absent key means admin API is disabled.
+    $self->admin_api_key('');
   }
 
   my $usage_cfg = $cfg->{usage_store};

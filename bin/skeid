@@ -23,14 +23,17 @@ if ($cmd ne 'serve') {
 
 my $listen = '127.0.0.1:8090';
 my $config = 'skeid.yaml';
+my $admin_api_key = '';
 
 GetOptions(
   'listen|l=s' => \$listen,
   'config|c=s' => \$config,
+  'admin-api-key=s' => \$admin_api_key,
 ) or die _usage_text();
 
 my %opts;
 $opts{config_file} = $config if defined($config) && -f $config;
+$opts{admin_api_key} = $admin_api_key if defined($admin_api_key) && length($admin_api_key);
 
 my $app = Langertha::Skeid::Proxy->build_app(%opts);
 
@@ -177,7 +180,7 @@ sub _run_usage {
 sub _usage_text {
   return <<'USAGE';
 Usage:
-  skeid serve [--listen host:port] [--config skeid.yaml]
+  skeid serve [--listen host:port] [--config skeid.yaml] [--admin-api-key KEY]
   skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
               [--backend sqlite|postgresql] [--db /path/to.sqlite]
               [--dsn dbi:Pg:...] [--db-user USER] [--db-pass PASS|--db-pass-env ENV]
