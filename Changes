@@ -28,4 +28,6 @@ Revision history for Langertha-Skeid
     - Dockerfile: add optional `LANGERTHA_SRC` and `KNARR_SRC` build args to
       inject unreleased sources when CPAN indexers lag
     - dist.ini release Docker build supports optional
-      `SKEID_DOCKER_BUILD_ARGS='...'` passthrough for temporary build overrides
+      `SKEID_DOCKER_BUILD_ARGS='...'` passthrough for temporary build overrides,
+      including GitHub release-dist URL examples and a note against
+      `/archive/refs/*` source archives for dzil dists
