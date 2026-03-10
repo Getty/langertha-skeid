@@ -44,6 +44,13 @@ tenant billing from one consistent ledger.
 3. Forward tenant identity via C<x-skeid-key-id> (or C<x-api-key-id>).
 4. Read totals by key/model/time with C<usage.report>.
 
+=head2 Engine IDs
+
+C<nodes[].engine> uses lowercased engine class names from L<Langertha>.
+Examples: C<OpenAI =E<gt> openai>, C<OpenAIBase =E<gt> openaibase>,
+C<vLLM =E<gt> vllm>. Legacy aliases like C<openai-compatible> are intentionally
+rejected.
+
 =cut
 
 has nodes => (
@@ -125,6 +132,36 @@ has _usage_dbh_cached => (
   default => sub { undef },
 );
 
+my %FALLBACK_ENGINE_IDS = map { $_ => 1 } qw(
+  aki
+  akiopenai
+  anthropic
+  anthropicbase
+  cerebras
+  deepseek
+  gemini
+  groq
+  huggingface
+  lmstudio
+  lmstudioanthropic
+  lmstudioopenai
+  llamacpp
+  minimax
+  mistral
+  nousresearch
+  ollama
+  ollamaopenai
+  openai
+  openaibase
+  openrouter
+  perplexity
+  remote
+  replicate
+  sglang
+  vllm
+  whisper
+);
+
 sub BUILD {
   my ($self) = @_;
   if ($self->has_config_loader || $self->has_config_file) {
@@ -151,7 +188,7 @@ sub add_node {
     id        => $id,
     url       => $url,
     model     => ($node{model} // ''),
-    engine    => ($node{engine} // 'openai-compatible'),
+    engine    => $self->normalize_engine_id((defined($node{engine}) && length($node{engine})) ? $node{engine} : 'OpenAIBase'),
     weight    => (defined $node{weight} ? 0 + $node{weight} : 1),
     max_conns => (defined $node{max_conns} ? 0 + $node{max_conns} : 0),
     healthy   => (exists $node{healthy} ? ($node{healthy} ? 1 : 0) : 1),
@@ -501,6 +538,52 @@ sub _iso8601_now {
   return strftime('%Y-%m-%dT%H:%M:%SZ', gmtime());
 }
 
+sub _discover_engine_ids {
+  my %ids = %FALLBACK_ENGINE_IDS;
+
+  for my $inc (@INC) {
+    next unless defined $inc && length $inc;
+    for my $ns (['Langertha', 'Engine'], ['LangerthaX', 'Engine']) {
+      my $dir = File::Spec->catdir($inc, @$ns);
+      next unless -d $dir;
+      opendir my $dh, $dir or next;
+      while (my $entry = readdir $dh) {
+        next unless $entry =~ /\A([A-Za-z][A-Za-z0-9_]*)\.pm\z/;
+        $ids{lc $1} = 1;
+      }
+      closedir $dh;
+    }
+  }
+
+  return \%ids;
+}
+
+sub supported_engine_ids {
+  my ($self) = @_;
+  my $ids = _discover_engine_ids();
+  return [ sort keys %$ids ];
+}
+
+sub normalize_engine_id {
+  my ($self, $value) = @_;
+  return '' unless defined $value;
+
+  my $raw = "$value";
+  $raw =~ s/^\s+//;
+  $raw =~ s/\s+$//;
+  return '' unless length $raw;
+
+  my $id = lc($raw);
+  $id =~ s/\Alangertha::engine:://;
+  $id =~ s/\Alangerthax::engine:://;
+
+  my $ids = _discover_engine_ids();
+  return $id if $ids->{$id};
+
+  my $known = join(', ', sort keys %$ids);
+  croak "unknown engine '$raw' (expected one of: $known)";
+}
+
 sub record_usage {
   my ($self, %args) = @_;
   my $backend = $self->_usage_backend;
@@ -743,7 +826,7 @@ sub normalize_metrics {
 sub _route_key {
   my ($self, %args) = @_;
   my $model  = $args{model}  // '';
-  my $engine = $args{engine} // '';
+  my $engine = $self->normalize_engine_id($args{engine} // '');
   return join('|', $model, $engine);
 }
 
@@ -762,7 +845,7 @@ sub _node_can_take {
 sub _eligible_nodes {
   my ($self, %args) = @_;
   my $model  = $args{model};
-  my $engine = $args{engine};
+  my $engine = $self->normalize_engine_id($args{engine} // '');
   my @nodes = @{$self->nodes || []};
 
   @nodes = grep {
@@ -819,12 +902,13 @@ sub pick_node {
 
 sub route_state {
   my ($self, %args) = @_;
+  my $engine = $self->normalize_engine_id($args{engine} // '');
   my $eligible = $self->_eligible_nodes(%args);
   my $available = [ grep { $self->_node_can_take($_) } @$eligible ];
 
   return {
     model          => ($args{model} // ''),
-    engine         => ($args{engine} // ''),
+    engine         => $engine,
     eligible_count => scalar(@$eligible),
     available_count => scalar(@$available),
     has_eligible   => @$eligible ? 1 : 0,
@@ -921,14 +1005,21 @@ sub call_function {
   if ($name eq 'nodes.metrics') {
     return { metrics => $self->node_metrics($args->{id}) };
   }
+  if ($name eq 'engines.list') {
+    return { engines => $self->supported_engine_ids };
+  }
   if ($name eq 'route.next') {
-    my $node = $self->pick_node(model => ($args->{model} // ''), engine => ($args->{engine} // ''));
+    my $node = $self->pick_node(
+      model  => ($args->{model} // ''),
+      engine => $self->normalize_engine_id($args->{engine} // ''),
+    );
     return { node => $node };
   }
   if ($name eq 'route.state') {
+    my $engine = $self->normalize_engine_id($args->{engine} // '');
     return $self->route_state(
       model  => ($args->{model} // ''),
-      engine => ($args->{engine} // ''),
+      engine => $engine,
     );
   }
   if ($name eq 'request.start') {

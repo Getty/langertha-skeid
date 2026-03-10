@@ -83,7 +83,7 @@ sub build_app {
         size       => 0,
         digest     => '',
         details    => {
-          family             => ($_->{engine} || 'openai-compatible'),
+          family             => ($_->{engine} || 'openaibase'),
           parameter_size     => 'unknown',
           quantization_level => 'unknown',
         },
@@ -168,7 +168,7 @@ sub _handle_openai_chat {
       endpoint   => '/v1/chat/completions',
       api_key_id => $api_key_id,
       provider   => 'skeid',
-      engine     => ($route->{engine} // 'openai-compatible'),
+      engine     => ($route->{engine} // 'openaibase'),
       model      => $model,
       route_url  => ($route->{url} // ''),
     };
@@ -207,7 +207,7 @@ sub _handle_openai_embeddings {
       endpoint   => '/v1/embeddings',
       api_key_id => $api_key_id,
       provider   => 'skeid',
-      engine     => ($route->{engine} // 'openai-compatible'),
+      engine     => ($route->{engine} // 'openaibase'),
       model      => $model,
       route_url  => ($route->{url} // ''),
     };
@@ -252,7 +252,7 @@ sub _handle_anthropic_messages {
       endpoint   => '/v1/messages',
       api_key_id => $api_key_id,
       provider   => 'skeid',
-      engine     => ($route->{engine} // 'openai-compatible'),
+      engine     => ($route->{engine} // 'openaibase'),
       model      => $model,
       route_url  => ($route->{url} // ''),
     };
@@ -301,7 +301,7 @@ sub _handle_ollama_chat {
       endpoint   => '/api/chat',
       api_key_id => _request_api_key_id($c),
       provider   => 'skeid',
-      engine     => ($route->{engine} // 'openai-compatible'),
+      engine     => ($route->{engine} // 'openaibase'),
       model      => ($openai_body->{model} // ''),
       route_url  => ($route->{url} // ''),
     };
@@ -490,7 +490,7 @@ sub _proxy_openai_json {
     $metrics = eval {
       $c->skeid->call_function('metrics.normalize', {
         provider    => ($meta->{provider} || 'skeid'),
-        engine      => ($meta->{engine} || 'openai-compatible'),
+        engine      => ($meta->{engine} || 'openaibase'),
         model       => ($meta->{model} || ($body->{model} // '')),
         route       => ($meta->{endpoint} || ''),
         duration_ms => $duration_ms,
@@ -568,7 +568,7 @@ sub _proxy_openai_json_async {
       $metrics = eval {
         $c->skeid->call_function('metrics.normalize', {
           provider    => ($meta->{provider} || 'skeid'),
-          engine      => ($meta->{engine} || 'openai-compatible'),
+          engine      => ($meta->{engine} || 'openaibase'),
           model       => ($meta->{model} || ($body->{model} // '')),
           route       => ($meta->{endpoint} || ''),
           duration_ms => $duration_ms,

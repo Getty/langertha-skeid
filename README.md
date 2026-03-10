@@ -4,6 +4,7 @@
 
 - Live node inventory and weighted routing
 - OpenAI/Anthropic/Ollama proxy frontends
+- Engine IDs map 1:1 to Langertha engines
 - Normalized usage + cost accounting
 - Dynamic YAML reload on each task dispatch
 - Built-in usage store: `sqlite` or `postgresql`
@@ -50,6 +51,52 @@ This gives you one unified API edge and one usage ledger for invoice/export work
 
 ## YAML Config
 
+`nodes[].engine` uses the same engine naming as Langertha engine classes:
+lowercased class short name.
+
+Examples:
+
+- `Langertha::Engine::OpenAIBase` -> `openaibase`
+- `Langertha::Engine::Anthropic` -> `anthropic`
+- `Langertha::Engine::vLLM` -> `vllm`
+
+Use the concrete engine when known (`openai`, `groq`, `anthropic`, ...).
+Use `openaibase` for generic OpenAI-compatible backends.
+
+Legacy aliases like `openai-compatible` are intentionally not supported.
+
+### Engine Matrix (Langertha -> Skeid ID)
+
+| Langertha Engine Class | Skeid `engine` |
+| --- | --- |
+| `AKI` | `aki` |
+| `AKIOpenAI` | `akiopenai` |
+| `Anthropic` | `anthropic` |
+| `AnthropicBase` | `anthropicbase` |
+| `Cerebras` | `cerebras` |
+| `DeepSeek` | `deepseek` |
+| `Gemini` | `gemini` |
+| `Groq` | `groq` |
+| `HuggingFace` | `huggingface` |
+| `LMStudio` | `lmstudio` |
+| `LMStudioAnthropic` | `lmstudioanthropic` |
+| `LMStudioOpenAI` | `lmstudioopenai` |
+| `LlamaCpp` | `llamacpp` |
+| `MiniMax` | `minimax` |
+| `Mistral` | `mistral` |
+| `NousResearch` | `nousresearch` |
+| `Ollama` | `ollama` |
+| `OllamaOpenAI` | `ollamaopenai` |
+| `OpenAI` | `openai` |
+| `OpenAIBase` | `openaibase` |
+| `OpenRouter` | `openrouter` |
+| `Perplexity` | `perplexity` |
+| `Remote` | `remote` |
+| `Replicate` | `replicate` |
+| `SGLang` | `sglang` |
+| `vLLM` | `vllm` |
+| `Whisper` | `whisper` |
+
 ```yaml
 pricing:
   "*":
@@ -60,7 +107,7 @@ nodes:
   - id: vllm-a
     url: http://127.0.0.1:21001/v1
     model: qwen2.5-7b-instruct
-    engine: openai-compatible
+    engine: vllm
     weight: 1
     max_conns: 128
 
@@ -80,17 +127,17 @@ nodes:
   - id: cloud-openai
     url: https://api.openai.com/v1
     model: gpt-4o-mini
-    engine: openai-compatible
+    engine: openai
     max_conns: 64
   - id: cloud-groq
     url: https://api.groq.com/openai/v1
     model: llama-3.3-70b-versatile
-    engine: openai-compatible
+    engine: groq
     max_conns: 64
   - id: local-vllm-a
     url: http://vllm-a:8000/v1
     model: qwen2.5-7b-instruct
-    engine: openai-compatible
+    engine: vllm
     max_conns: 128
 ```
 
@@ -127,7 +174,7 @@ nodes:
   - id: vllm-a
     url: http://host.docker.internal:21001/v1
     model: qwen2.5-7b-instruct
-    engine: openai-compatible
+    engine: vllm
 
 usage_store:
   backend: sqlite

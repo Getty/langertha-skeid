@@ -1,0 +1,8 @@
+.git
+.gitignore
+.build
+*.tar.gz
+Langertha-Skeid-*
+docker-compose*.yml
+*.sqlite
+*.db

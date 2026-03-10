@@ -11,6 +11,7 @@ ok $skeid->add_node(
 ), 'node added';
 
 is scalar(@{$skeid->list_nodes}), 1, 'one node';
+is $skeid->list_nodes->[0]{engine}, 'openaibase', 'default engine normalized to openaibase';
 
 my $pricing = $skeid->set_model_pricing('qwen2.5', {
   input_per_million => 0.2,
@@ -27,7 +28,7 @@ my $cost = $skeid->estimate_cost(
 ok $cost->{total_cost_usd} > 0, 'cost estimated';
 
 my $metrics = $skeid->normalize_metrics(
-  provider => 'openai-compatible',
+  provider => 'skeid',
   engine   => 'vllm',
   model    => 'qwen2.5',
   usage    => { prompt_tokens => 100, completion_tokens => 20 },
@@ -40,6 +41,32 @@ is_deeply $metrics->{tool_names}, ['lookup'], 'tool names normalized';
 is $skeid->call_function('nodes.list', {})->{nodes}[0]{id}, 'n1', 'function dispatch works';
 
 ok $skeid->remove_node('n1'), 'node removed';
+is scalar(@{$skeid->list_nodes}), 0, 'no nodes left';
+
+{
+  my $ok = $skeid->add_node(
+    id     => 'n2',
+    url    => 'http://127.0.0.1:21001/v1',
+    model  => 'qwen2.5',
+    engine => 'OpenAIBase',
+  );
+  ok $ok, 'node added with class-like engine';
+  is $skeid->list_nodes->[0]{engine}, 'openaibase', 'class-like engine normalized';
+}
+
+{
+  eval {
+    $skeid->add_node(
+      id     => 'bad',
+      url    => 'http://127.0.0.1:21001/v1',
+      model  => 'qwen2.5',
+      engine => 'openai-compatible',
+    );
+  };
+  like $@, qr/unknown engine 'openai-compatible'/, 'legacy engine id rejected';
+}
+
+ok $skeid->remove_node('n2'), 'n2 removed';
 is scalar(@{$skeid->list_nodes}), 0, 'no nodes left';
 
 ok $skeid->add_node(id => 'route-a', url => 'http://a', model => 'qwen2.5', weight => 1, max_conns => 1), 'route-a added';

@@ -14,27 +14,27 @@ nodes:
   - id: vllm-a
     url: http://host.docker.internal:21001/v1
     model: qwen2.5-7b-instruct
-    engine: openai-compatible
+    engine: vllm
     weight: 1
     max_conns: 128
 
   - id: vllm-b
     url: http://host.docker.internal:21002/v1
     model: qwen2.5-7b-instruct
-    engine: openai-compatible
+    engine: vllm
     weight: 1
     max_conns: 128
 
   - id: sglang-a
     url: http://host.docker.internal:22001/v1
     model: qwen2.5-7b-instruct
-    engine: openai-compatible
+    engine: sglang
     weight: 1
     max_conns: 128
 
   - id: sglang-b
     url: http://host.docker.internal:22002/v1
     model: qwen2.5-7b-instruct
-    engine: openai-compatible
+    engine: sglang
     weight: 1
     max_conns: 128

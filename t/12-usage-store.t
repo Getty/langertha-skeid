@@ -18,7 +18,7 @@ ok(-f $db, 'sqlite usage db created');
 
 my $metrics = $skeid->call_function('metrics.normalize', {
   provider    => 'skeid',
-  engine      => 'openai-compatible',
+  engine      => 'openaibase',
   model       => 'qwen2.5-7b-instruct',
   route       => '/v1/chat/completions',
   duration_ms => 37,
@@ -31,7 +31,7 @@ my $saved = $skeid->call_function('usage.record', {
   endpoint     => '/v1/chat/completions',
   api_key_id   => 'k_demo',
   provider     => 'skeid',
-  engine       => 'openai-compatible',
+  engine       => 'openaibase',
   model        => 'qwen2.5-7b-instruct',
   node_id      => 'n1',
   status_code  => 200,
