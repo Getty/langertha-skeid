@@ -8,6 +8,7 @@
 - Normalized usage + cost accounting
 - Dynamic YAML reload on each task dispatch
 - Built-in usage store: `sqlite` or `postgresql`
+- Pluggable usage backend: override via callback or subclass
 
 ## Install
 
@@ -156,6 +157,45 @@ nodes:
 ```
 
 `sqlite_path` is required for `backend: sqlite`. Skeid creates the SQLite file and applies schema automatically.
+
+DBI and DBD::SQLite are optional (`recommends`). When no backend is configured and no override is provided, usage tracking is gracefully disabled.
+
+### Custom Usage Backend
+
+You can replace the storage layer without subclassing — pass callbacks as constructor parameters:
+
+```perl
+my $skeid = Langertha::Skeid->new(
+  store_usage_event => sub {
+    my ($self, $event) = @_;
+    # $event has all 22 normalized columns (created_at, api_key_id,
+    # model, input_tokens, output_tokens, cost_total_usd, ...)
+    publish_to_nats($event);
+    return { ok => 1 };
+  },
+  query_usage_report => sub {
+    my ($self, $filters) = @_;
+    # $filters: since, api_key_id, model, limit
+    return { ok => 1, enabled => 1, totals => { ... } };
+  },
+);
+```
+
+Or subclass and override `_store_usage_event` / `_query_usage_report`:
+
+```perl
+package MyApp::Skeid;
+use Moo;
+extends 'Langertha::Skeid';
+
+sub _store_usage_event {
+  my ($self, $event) = @_;
+  # custom storage logic
+  return { ok => 1 };
+}
+```
+
+When a callback or override is active, no DBI connection is created.
 
 PostgreSQL option:
 
@@ -326,6 +366,151 @@ perl ./examples/skeid-parallel-smoke.pl \
   --model Qwen/Qwen2.5-0.5B-Instruct \
   --requests 200 \
   --concurrency 40
+```
+
+## One-Box Flush (prepare + run + cleanup)
+
+Wenn du alles in einem Schritt auf einer einzelnen Kiste testen willst:
+
+```bash
+# Default: vLLM backend on 5.9.97.19:32080
+./examples/skeid-onebox-flush.sh
+```
+
+Mit explizitem Backend/Engine:
+
+```bash
+# vLLM
+BACKEND_URL=http://5.9.97.19:32080/v1 \
+ENGINE=vllm \
+MODEL=Qwen/Qwen2.5-0.5B-Instruct \
+./examples/skeid-onebox-flush.sh
+
+# SGLang
+BACKEND_URL=http://5.9.97.19:32081/v1 \
+ENGINE=sglang \
+MODEL=Qwen/Qwen2.5-0.5B-Instruct \
+./examples/skeid-onebox-flush.sh
+```
+
+Das Script macht:
+
+1. temp YAML + SQLite usage DB vorbereiten
+2. `bin/skeid serve` starten und `/health` abwarten
+3. `examples/skeid-parallel-smoke.pl` mit Parallel-Requests fahren
+4. Skeid beenden und temp Daten behalten
+
+Nützliche Env-Parameter:
+
+- `REQUESTS` (default `10`)
+- `CONCURRENCY` (default `10`)
+- `MAX_CONNS` (default `4`)
+- `LISTEN` (default `127.0.0.1:8090`)
+- `KEEP_RUNNING=1` (lässt Skeid nach dem Smoke laufen)
+
+Vast.ai one-box Beispiel (Skeid + Backend auf derselben Maschine):
+
+```bash
+BACKEND_URL=http://127.0.0.1:8000/v1 \
+ENGINE=vllm \
+MODEL=Qwen/Qwen2.5-0.5B-Instruct \
+LISTEN=0.0.0.0:8090 \
+REQUESTS=100 \
+CONCURRENCY=20 \
+./examples/skeid-onebox-flush.sh
+```
+
+Vast.ai “dickeres Modell” Beispiel (wenn das Modell auf dem Host geladen ist):
+
+```bash
+BACKEND_URL=http://127.0.0.1:8000/v1 \
+ENGINE=sglang \
+MODEL=Qwen/Qwen2.5-32B-Instruct \
+LISTEN=0.0.0.0:8090 \
+REQUESTS=60 \
+CONCURRENCY=8 \
+MAX_CONNS=8 \
+MAX_TOKENS=64 \
+./examples/skeid-onebox-flush.sh
+```
+
+Vast.ai mit API-Key (CLI oder optional Override) + optionalem Docker-Backend-Start:
+
+```bash
+# Vast CLI installieren (einmalig)
+python3 -m pip install --user vastai
+
+# vLLM backend + Skeid smoke in einem Ablauf
+./examples/skeid-vast-onebox.sh \
+  --start-backend \
+  --backend vllm \
+  --model Qwen/Qwen2.5-32B-Instruct \
+  --hf-token "$HF_TOKEN" \
+  --requests 60 \
+  --concurrency 8 \
+  --max-conns 8
+```
+
+Der Vast-Runner macht standardmäßig 3 Phasen:
+
+1. Direct backend baseline auf safe concurrency (ohne Proxy-Overload)
+2. Skeid proxy run auf derselben safe concurrency
+3. Skeid proxy overload run (Queue sichtbar), danach Delta-Ausgabe
+
+Wichtige Tuning-Flags:
+
+- `--overload-factor 2`
+- `--baseline-min-req 20`
+- `--probe-max-conc 32` (optional, default `0` = aus)
+- `--no-queue-test` (nur Single-Pass)
+
+Vast Offer/Instance Übersicht (inkl. VRAM):
+
+```bash
+# Unterstützte GPU-Typen für --gpu-type
+./examples/skeid-vast-onebox.sh --list-gpu-types
+
+# Markt-Angebote (id, GPU, VRAM, Preis)
+./examples/skeid-vast-onebox.sh --list-offers
+
+# Nur ein GPU-Typ (z. B. H100-SXM), plus günstigste Offer-Hinweiszeile
+./examples/skeid-vast-onebox.sh --list-offers --gpu-type h100-sxm
+
+# Eigene Instanzen (id, GPU, VRAM, Status)
+./examples/skeid-vast-onebox.sh --list-instances
+
+# Rohes vastai JSON (falls du selbst parsen willst)
+./examples/skeid-vast-onebox.sh --list-offers --list-raw
+```
+
+Provision mit automatischer günstigster Offer pro GPU-Typ:
+
+```bash
+./examples/skeid-vast-onebox.sh \
+  --provision \
+  --gpu-type h100-sxm \
+  --num-gpus 1 \
+  --rent-limit 50 \
+  --rent-disk-gb 120 \
+  --rent-label skeid-h100
+```
+
+Hinweise:
+
+- `--backend vllm` ist Default.
+- `--start-backend` ist standardmäßig **aus** (nur aktiv, wenn explizit gesetzt).
+- `--num-gpus` ist standardmäßig `1`.
+
+Wenn du Backend bereits selbst startest, `--start-backend` weglassen und nur URL setzen:
+
+```bash
+./examples/skeid-vast-onebox.sh \
+  --backend-url http://127.0.0.1:8000/v1 \
+  --engine sglang \
+  --model Qwen/Qwen2.5-32B-Instruct
+
+# Optional (nur wenn du CLI-Key nicht gesetzt hast):
+# --vast-api-key "$VAST_API_KEY"
 ```
 
 ## Docker: Usage aus SQLite abrufen

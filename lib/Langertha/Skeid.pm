@@ -5,7 +5,6 @@ use Moo;
 use strict;
 use warnings;
 use Carp qw(croak);
-use DBI;
 use POSIX qw(strftime);
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
@@ -52,6 +51,49 @@ C<nodes[].engine> uses lowercased engine class names from L<Langertha>.
 Examples: C<OpenAI =E<gt> openai>, C<OpenAIBase =E<gt> openaibase>,
 C<vLLM =E<gt> vllm>. Legacy aliases like C<openai-compatible> are intentionally
 rejected.
+
+=head2 Pluggable Usage Storage
+
+The usage storage layer is pluggable.  By default Skeid records usage events
+to SQLite or PostgreSQL via DBI, but you can replace the storage backend
+without touching DBI at all.
+
+B<Option 1 – Constructor callbacks> (simplest):
+
+  my $skeid = Langertha::Skeid->new(
+    store_usage_event => sub {
+      my ($self, $event) = @_;
+      # $event is a hashref with all 22 normalized columns
+      publish_to_nats($event);
+      return { ok => 1 };
+    },
+    query_usage_report => sub {
+      my ($self, $filters) = @_;
+      # $filters has: since, api_key_id, model, limit
+      return { ok => 1, enabled => 1, totals => { ... } };
+    },
+  );
+
+B<Option 2 – Subclass override>:
+
+  package MyApp::Skeid;
+  use Moo;
+  extends 'Langertha::Skeid';
+
+  sub _store_usage_event {
+    my ($self, $event) = @_;
+    ...
+    return { ok => 1 };
+  }
+
+  sub _query_usage_report {
+    my ($self, $filters) = @_;
+    ...
+  }
+
+When a callback or override is provided, the DBI default is bypassed entirely
+and no database connection is created.  DBI and DBD::SQLite are C<recommends>
+dependencies — they are not required when usage is handled externally.
 
 =head2 Admin API Key
 
@@ -104,6 +146,16 @@ has usage_db_path => (
 has usage_store => (
   is      => 'rw',
   default => sub { {} },
+);
+
+has store_usage_event => (
+  is        => 'ro',
+  predicate => 'has_store_usage_event',
+);
+
+has query_usage_report => (
+  is        => 'ro',
+  predicate => 'has_query_usage_report',
 );
 
 has admin_api_key => (
@@ -524,6 +576,8 @@ sub _usage_dbh {
   my $dsn = $self->_usage_dsn;
   return unless length($backend) && length($dsn);
 
+  eval { require DBI } or return;
+
   my $store = $self->usage_store || {};
   my $user = (ref($store) eq 'HASH' ? ($store->{user} // '') : '');
   my $password = (ref($store) eq 'HASH' ? ($store->{password} // '') : '');
@@ -630,15 +684,6 @@ sub normalize_engine_id {
 
 sub record_usage {
   my ($self, %args) = @_;
-  my $backend = $self->_usage_backend;
-  return { ok => 0, error => 'usage_store not configured' } unless length $backend;
-
-  my $dbh = eval { $self->_usage_dbh };
-  if (!$dbh || $@) {
-    my $err = $@ || 'failed to connect usage database';
-    $err =~ s/\s+$//;
-    return { ok => 0, error => $err };
-  }
 
   my $metrics = ref($args{metrics}) eq 'HASH' ? $args{metrics} : {};
   my $usage = ref($metrics->{usage}) eq 'HASH' ? $metrics->{usage} : {};
@@ -652,8 +697,46 @@ sub record_usage {
   my $cost_output   = _num($metrics->{cost_output_usd}) || _num($metrics->{output_cost_usd});
   my $cost_total    = _num($metrics->{cost_total_usd}) || _num($metrics->{total_cost_usd});
 
-  my $created_at = $args{created_at} // _iso8601_now();
-  my $request_id = $args{request_id} // '';
+  my %event = (
+    created_at    => ($args{created_at} // _iso8601_now()),
+    request_id    => ($args{request_id} // ''),
+    api_format    => ($args{api_format} // ''),
+    endpoint      => ($args{endpoint} // ''),
+    api_key_id    => ($args{api_key_id} // ''),
+    provider      => ($args{provider} // ''),
+    engine        => ($args{engine} // ''),
+    model         => ($args{model} // ''),
+    node_id       => ($args{node_id} // ''),
+    route_url     => ($args{route_url} // ''),
+    status_code   => (_num($args{status_code}) || 0),
+    ok            => ($args{ok} ? 1 : 0),
+    duration_ms   => (_num($args{duration_ms}) || 0),
+    input_tokens  => $input_tokens,
+    output_tokens => $output_tokens,
+    total_tokens  => $total_tokens,
+    tool_calls    => _num($tool_calls),
+    cost_input_usd  => $cost_input,
+    cost_output_usd => $cost_output,
+    cost_total_usd  => $cost_total,
+    error_type    => ($args{error_type} // ''),
+    error_message => ($args{error_message} // ''),
+  );
+
+  return $self->_store_usage_event(\%event);
+}
+
+sub _store_usage_event {
+  my ($self, $event) = @_;
+  return $self->store_usage_event->($self, $event) if $self->has_store_usage_event;
+  my $backend = $self->_usage_backend;
+  return { ok => 0, error => 'usage_store not configured' } unless length $backend;
+
+  my $dbh = eval { $self->_usage_dbh };
+  if (!$dbh || $@) {
+    my $err = $@ || 'failed to connect usage database';
+    $err =~ s/\s+$//;
+    return { ok => 0, error => $err };
+  }
 
   my $sth = $dbh->prepare_cached(q{
     INSERT INTO usage_events (
@@ -663,28 +746,28 @@ sub record_usage {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   });
   $sth->execute(
-    $created_at,
-    $request_id,
-    ($args{api_format} // ''),
-    ($args{endpoint} // ''),
-    ($args{api_key_id} // ''),
-    ($args{provider} // ''),
-    ($args{engine} // ''),
-    ($args{model} // ''),
-    ($args{node_id} // ''),
-    ($args{route_url} // ''),
-    (_num($args{status_code}) || 0),
-    ($args{ok} ? 1 : 0),
-    (_num($args{duration_ms}) || 0),
-    $input_tokens,
-    $output_tokens,
-    $total_tokens,
-    (_num($tool_calls)),
-    $cost_input,
-    $cost_output,
-    $cost_total,
-    ($args{error_type} // ''),
-    ($args{error_message} // ''),
+    $event->{created_at},
+    $event->{request_id},
+    $event->{api_format},
+    $event->{endpoint},
+    $event->{api_key_id},
+    $event->{provider},
+    $event->{engine},
+    $event->{model},
+    $event->{node_id},
+    $event->{route_url},
+    $event->{status_code},
+    $event->{ok},
+    $event->{duration_ms},
+    $event->{input_tokens},
+    $event->{output_tokens},
+    $event->{total_tokens},
+    $event->{tool_calls},
+    $event->{cost_input_usd},
+    $event->{cost_output_usd},
+    $event->{cost_total_usd},
+    $event->{error_type},
+    $event->{error_message},
   );
 
   my %out = (ok => 1);
@@ -696,6 +779,23 @@ sub record_usage {
 
 sub usage_report {
   my ($self, %args) = @_;
+
+  my $limit = _num($args{limit});
+  $limit = 20 if $limit < 1;
+  $limit = 500 if $limit > 500;
+
+  my %filters;
+  $filters{since}      = $args{since}      if defined $args{since}      && length $args{since};
+  $filters{api_key_id} = $args{api_key_id} if defined $args{api_key_id} && length $args{api_key_id};
+  $filters{model}      = $args{model}      if defined $args{model}      && length $args{model};
+  $filters{limit}      = $limit;
+
+  return $self->_query_usage_report(\%filters);
+}
+
+sub _query_usage_report {
+  my ($self, $filters) = @_;
+  return $self->query_usage_report->($self, $filters) if $self->has_query_usage_report;
   my $backend = $self->_usage_backend;
   return { ok => 0, enabled => 0, error => 'usage_store not configured' } unless length $backend;
 
@@ -706,23 +806,21 @@ sub usage_report {
     return { ok => 0, enabled => 0, error => $err };
   }
 
-  my $limit = _num($args{limit});
-  $limit = 20 if $limit < 1;
-  $limit = 500 if $limit > 500;
+  my $limit = $filters->{limit} // 20;
 
   my @where;
   my @bind;
-  if (defined $args{since} && length $args{since}) {
+  if (defined $filters->{since} && length $filters->{since}) {
     push @where, 'created_at >= ?';
-    push @bind, $args{since};
+    push @bind, $filters->{since};
   }
-  if (defined $args{api_key_id} && length $args{api_key_id}) {
+  if (defined $filters->{api_key_id} && length $filters->{api_key_id}) {
     push @where, 'api_key_id = ?';
-    push @bind, $args{api_key_id};
+    push @bind, $filters->{api_key_id};
   }
-  if (defined $args{model} && length $args{model}) {
+  if (defined $filters->{model} && length $filters->{model}) {
     push @where, 'model = ?';
-    push @bind, $args{model};
+    push @bind, $filters->{model};
   }
 
   my $where_sql = @where ? ('WHERE ' . join(' AND ', @where)) : '';
@@ -786,7 +884,7 @@ sub usage_report {
     enabled   => 1,
     backend   => $backend,
     db_path   => ($backend eq 'sqlite' ? ($self->usage_db_path // '') : ''),
-    since     => ($args{since} // ''),
+    since     => ($filters->{since} // ''),
     totals    => {
       requests       => _num($totals->{requests}),
       input_tokens   => _num($totals->{input_tokens}),
