@@ -7,7 +7,7 @@
 - Engine IDs map 1:1 to Langertha engines
 - Normalized usage + cost accounting
 - Dynamic YAML reload on each task dispatch
-- Built-in usage store: `sqlite` or `postgresql`
+- Built-in usage store: `jsonlog` (recommended), `sqlite`, or `postgresql`
 - Pluggable usage backend: override via callback or subclass
 
 ## Install
@@ -159,6 +159,31 @@ nodes:
 `sqlite_path` is required for `backend: sqlite`. Skeid creates the SQLite file and applies schema automatically.
 
 DBI and DBD::SQLite are optional (`recommends`). When no backend is configured and no override is provided, usage tracking is gracefully disabled.
+
+### jsonlog Backend (recommended)
+
+No DBI needed. Two modes:
+
+**Directory mode** (one file per event — recommended, no collision risk):
+
+```yaml
+usage_store:
+  backend: jsonlog
+  path: /var/log/skeid/events/
+```
+
+Each event is written as a separate `.json` file. Directory mode is auto-detected when the path is an existing directory or ends with `/`.
+
+**File mode** (JSON-lines in a single file):
+
+```yaml
+usage_store:
+  backend: jsonlog
+  path: /var/log/skeid/usage.jsonl
+  mode: file
+```
+
+Events are appended as one JSON line each, with file locking.
 
 ### Custom Usage Backend
 

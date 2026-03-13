@@ -11,6 +11,7 @@ use File::Path qw(make_path);
 use File::Spec;
 use File::ShareDir qw(dist_dir);
 use YAML::PP;
+use JSON::MaybeXS qw(encode_json decode_json);
 use Langertha ();
 use Langertha::Knarr::Metrics;
 
@@ -54,11 +55,28 @@ rejected.
 
 =head2 Pluggable Usage Storage
 
-The usage storage layer is pluggable.  By default Skeid records usage events
-to SQLite or PostgreSQL via DBI, but you can replace the storage backend
-without touching DBI at all.
+The usage storage layer is pluggable.  Built-in backends are C<jsonlog>
+(recommended, no DBI required), C<sqlite>, and C<postgresql>.  You can also
+replace the storage layer entirely via constructor callbacks or subclass
+override.
 
-B<Option 1 – Constructor callbacks> (simplest):
+B<jsonlog backend> (recommended — no DBI dependency):
+
+  # Directory mode: one JSON file per event (no collision risk)
+  my $skeid = Langertha::Skeid->new(
+    usage_store => { backend => 'jsonlog', path => '/var/log/skeid/events/' },
+  );
+
+  # File mode: JSON-lines appended to a single file
+  my $skeid = Langertha::Skeid->new(
+    usage_store => { backend => 'jsonlog', path => '/var/log/skeid/usage.jsonl', mode => 'file' },
+  );
+
+Directory mode is auto-detected when the path is an existing directory or ends
+with C</>.  It writes one C<.json> file per event, which avoids file-level
+locking and concurrent-write collisions entirely.
+
+B<Constructor callbacks> (custom backend, no subclassing):
 
   my $skeid = Langertha::Skeid->new(
     store_usage_event => sub {
@@ -470,8 +488,10 @@ sub _configure_usage_store {
   my $backend = lc($cfg->{backend} // '');
   $backend = 'sqlite' if !$backend && (defined($cfg->{sqlite_path}) || defined($cfg->{path}) || defined($cfg->{db_path}));
   $backend = 'postgresql' if !$backend && defined($cfg->{dsn}) && $cfg->{dsn} =~ /^dbi:Pg:/i;
+  $backend = 'jsonlog' if !$backend && defined($cfg->{log_path});
   $backend = 'sqlite' unless length $backend;
   $backend = 'postgresql' if $backend =~ /^postgres/;
+  $backend = 'jsonlog' if $backend =~ /^json/;
 
   my $normalized;
   if ($backend eq 'sqlite') {
@@ -510,6 +530,18 @@ sub _configure_usage_store {
       schema_file  => ($cfg->{schema_file} // ''),
       auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
     };
+  } elsif ($backend eq 'jsonlog') {
+    my $path = $cfg->{log_path} // $cfg->{path} // '';
+    croak 'usage_store.log_path (or path) is required for jsonlog backend' unless length $path;
+    my $mode = $cfg->{mode} // '';
+    if (!length($mode)) {
+      $mode = (-d $path || $path =~ m{/$}) ? 'dir' : 'file';
+    }
+    $normalized = {
+      backend => 'jsonlog',
+      path    => $path,
+      mode    => $mode,
+    };
   } else {
     croak "unsupported usage_store backend '$backend'";
   }
@@ -531,11 +563,21 @@ sub _configure_usage_store {
 
   if ($normalized->{backend} eq 'sqlite') {
     $self->usage_db_path($normalized->{path});
-  } else {
+  } elsif ($normalized->{backend} ne 'jsonlog') {
     $self->clear_usage_db_path if $self->has_usage_db_path;
   }
 
-  $self->_ensure_usage_schema_if_enabled if $changed || !$self->_usage_dbh_cached;
+  if ($normalized->{backend} eq 'jsonlog') {
+    my $path = $normalized->{path};
+    if ($normalized->{mode} eq 'dir') {
+      make_path($path) unless -d $path;
+    } else {
+      my $dir = dirname($path);
+      make_path($dir) if length($dir) && $dir ne '.' && !-d $dir;
+    }
+  } else {
+    $self->_ensure_usage_schema_if_enabled if $changed || !$self->_usage_dbh_cached;
+  }
   return $self->usage_store;
 }
 
@@ -731,6 +773,8 @@ sub _store_usage_event {
   my $backend = $self->_usage_backend;
   return { ok => 0, error => 'usage_store not configured' } unless length $backend;
 
+  return $self->_store_usage_event_jsonlog($event) if $backend eq 'jsonlog';
+
   my $dbh = eval { $self->_usage_dbh };
   if (!$dbh || $@) {
     my $err = $@ || 'failed to connect usage database';
@@ -777,6 +821,125 @@ sub _store_usage_event {
   return \%out;
 }
 
+sub _jsonlog_event_id {
+  my $ts = strftime('%Y%m%d-%H%M%S', gmtime());
+  my $rand = sprintf('%06d', int(rand(1_000_000)));
+  return "${ts}-${rand}";
+}
+
+sub _store_usage_event_jsonlog {
+  my ($self, $event) = @_;
+  my $store = $self->usage_store || {};
+  my $path = $store->{path} // '';
+  my $mode = $store->{mode} // 'dir';
+
+  my $id = _jsonlog_event_id();
+  my $json = encode_json({ %$event, id => $id });
+
+  if ($mode eq 'dir') {
+    my $file = File::Spec->catfile($path, "${id}.json");
+    open my $fh, '>', $file or return { ok => 0, error => "Cannot write $file: $!" };
+    print $fh $json, "\n";
+    close $fh;
+  } else {
+    open my $fh, '>>', $path or return { ok => 0, error => "Cannot append $path: $!" };
+    flock($fh, 2); # LOCK_EX
+    print $fh $json, "\n";
+    close $fh;
+  }
+
+  return { ok => 1, id => $id };
+}
+
+sub _query_usage_report_jsonlog {
+  my ($self, $filters) = @_;
+  my $store = $self->usage_store || {};
+  my $path = $store->{path} // '';
+  my $mode = $store->{mode} // 'dir';
+
+  my @events;
+  if ($mode eq 'dir') {
+    my @files = sort glob(File::Spec->catfile($path, '*.json'));
+    for my $file (@files) {
+      my $text = eval { _read_text_file($file) };
+      next unless defined $text;
+      my $ev = eval { decode_json($text) };
+      push @events, $ev if ref($ev) eq 'HASH';
+    }
+  } else {
+    if (open my $fh, '<', $path) {
+      while (my $line = <$fh>) {
+        chomp $line;
+        next unless length $line;
+        my $ev = eval { decode_json($line) };
+        push @events, $ev if ref($ev) eq 'HASH';
+      }
+      close $fh;
+    }
+  }
+
+  # Apply filters
+  if (defined $filters->{since} && length $filters->{since}) {
+    @events = grep { ($_->{created_at} // '') ge $filters->{since} } @events;
+  }
+  if (defined $filters->{api_key_id} && length $filters->{api_key_id}) {
+    @events = grep { ($_->{api_key_id} // '') eq $filters->{api_key_id} } @events;
+  }
+  if (defined $filters->{model} && length $filters->{model}) {
+    @events = grep { ($_->{model} // '') eq $filters->{model} } @events;
+  }
+
+  # Aggregate
+  my %totals = (requests => 0, input_tokens => 0, output_tokens => 0, total_tokens => 0, tool_calls => 0, total_cost_usd => 0);
+  my (%by_key, %by_model);
+  for my $ev (@events) {
+    $totals{requests}++;
+    $totals{input_tokens}  += _num($ev->{input_tokens});
+    $totals{output_tokens} += _num($ev->{output_tokens});
+    $totals{total_tokens}  += _num($ev->{total_tokens});
+    $totals{tool_calls}    += _num($ev->{tool_calls});
+    $totals{total_cost_usd} += _num($ev->{cost_total_usd});
+
+    my $kid = $ev->{api_key_id} // '';
+    $by_key{$kid}{requests}++;
+    $by_key{$kid}{total_tokens}   += _num($ev->{total_tokens});
+    $by_key{$kid}{total_cost_usd} += _num($ev->{cost_total_usd});
+
+    my $mid = $ev->{model} // '';
+    $by_model{$mid}{requests}++;
+    $by_model{$mid}{total_tokens}   += _num($ev->{total_tokens});
+    $by_model{$mid}{total_cost_usd} += _num($ev->{cost_total_usd});
+  }
+
+  my $limit = $filters->{limit} // 20;
+  my @recent = reverse @events;
+  @recent = @recent[0 .. $limit - 1] if @recent > $limit;
+
+  return {
+    ok      => 1,
+    enabled => 1,
+    backend => 'jsonlog',
+    since   => ($filters->{since} // ''),
+    totals  => \%totals,
+    by_key  => [ map {
+      +{ api_key_id => $_, requests => $by_key{$_}{requests}, total_tokens => $by_key{$_}{total_tokens}, total_cost_usd => $by_key{$_}{total_cost_usd} }
+    } sort { ($by_key{$b}{total_cost_usd} || 0) <=> ($by_key{$a}{total_cost_usd} || 0) } keys %by_key ],
+    by_model => [ map {
+      +{ model => $_, requests => $by_model{$_}{requests}, total_tokens => $by_model{$_}{total_tokens}, total_cost_usd => $by_model{$_}{total_cost_usd} }
+    } sort { ($by_model{$b}{total_cost_usd} || 0) <=> ($by_model{$a}{total_cost_usd} || 0) } keys %by_model ],
+    recent  => [ map {
+      +{
+        id => ($_->{id} // ''), created_at => ($_->{created_at} // ''), api_format => ($_->{api_format} // ''),
+        endpoint => ($_->{endpoint} // ''), api_key_id => ($_->{api_key_id} // ''), model => ($_->{model} // ''),
+        node_id => ($_->{node_id} // ''), status_code => _num($_->{status_code}), ok => ($_->{ok} ? 1 : 0),
+        input_tokens => _num($_->{input_tokens}), output_tokens => _num($_->{output_tokens}),
+        total_tokens => _num($_->{total_tokens}), tool_calls => _num($_->{tool_calls}),
+        cost_total_usd => _num($_->{cost_total_usd}),
+      }
+    } @recent ],
+  };
+}
+
 sub usage_report {
   my ($self, %args) = @_;
 
@@ -797,6 +960,7 @@ sub _query_usage_report {
   my ($self, $filters) = @_;
   return $self->query_usage_report->($self, $filters) if $self->has_query_usage_report;
   my $backend = $self->_usage_backend;
+  return $self->_query_usage_report_jsonlog($filters) if $backend eq 'jsonlog';
   return { ok => 0, enabled => 0, error => 'usage_store not configured' } unless length $backend;
 
   my $dbh = eval { $self->_usage_dbh };

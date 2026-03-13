@@ -6,6 +6,8 @@ Revision history for Langertha-Skeid
       `_store_usage_event` and `usage_report` delegates to `_query_usage_report`
     - Add `store_usage_event` and `query_usage_report` constructor parameters
       for callback-based usage backend override (no subclassing required)
+    - Add `jsonlog` usage backend: one JSON file per event in a directory
+      (recommended, no DBI needed) or JSON-lines append to a single file
     - Make DBI and DBD::SQLite optional (moved to `recommends` in cpanfile);
       usage tracking is gracefully disabled when no backend is configured
     - Initial release extracted from Knarr as `Langertha::Skeid`
