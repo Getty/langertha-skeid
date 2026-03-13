@@ -18,6 +18,7 @@ RUN cpanm --notest App::cpm \
     && cpm install --cpanfile=./cpanfile $SNAP \
       --global \
       --resolver metacpan \
+      --without-recommends \
       --workers=$(nproc) \
       --show-build-log-on-failure \
     && rm -rf /root/.perl-cpm/ /tmp/*

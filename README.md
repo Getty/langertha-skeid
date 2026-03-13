@@ -119,8 +119,8 @@ nodes:
     max_conns: 128
 
 usage_store:
-  backend: sqlite
-  sqlite_path: /data/skeid/usage.sqlite
+  backend: jsonlog
+  path: /data/skeid/events/
 
 admin:
   api_key: change-me
@@ -156,9 +156,7 @@ nodes:
     max_conns: 128
 ```
 
-`sqlite_path` is required for `backend: sqlite`. Skeid creates the SQLite file and applies schema automatically.
-
-DBI and DBD::SQLite are optional (`recommends`). When no backend is configured and no override is provided, usage tracking is gracefully disabled.
+The Docker image is built `--without-recommends`, so DBI/DBD::SQLite are not included by default. The `jsonlog` backend needs no DBI at all. For SQLite or PostgreSQL backends, install the drivers separately or build with recommends enabled.
 
 ### jsonlog Backend (recommended)
 
@@ -256,7 +254,7 @@ docker build -t raudssus/langertha-skeid \
 
 Both args are forwarded to `cpanm` (for example `AUTHOR/Dist-x.yyy.tar.gz` or a tarball URL).
 
-## Docker Quickstart (SQLite)
+## Docker Quickstart
 
 1. Config + Data-Verzeichnis anlegen:
 
@@ -275,8 +273,8 @@ nodes:
     engine: vllm
 
 usage_store:
-  backend: sqlite
-  sqlite_path: /data/skeid/usage.sqlite
+  backend: jsonlog
+  path: /data/skeid/events/
 YAML
 ```
 
@@ -298,7 +296,7 @@ curl -s http://127.0.0.1:8090/health
 docker exec -it skeid bin/skeid usage --config /etc/skeid/skeid.yaml
 ```
 
-Hinweis: `sqlite_path` muss auf ein beschreibbares Volume zeigen, damit Usage-Daten persistent bleiben.
+Hinweis: `path` muss auf ein beschreibbares Volume zeigen, damit Usage-Daten persistent bleiben.
 
 ## Beispiel: Avatar Setup (2x vLLM + 2x SGLang)
 
