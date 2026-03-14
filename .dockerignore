@@ -3,6 +3,9 @@
 .build
 *.tar.gz
 Langertha-Skeid-*
+Dockerfile*
 docker-compose*.yml
+examples/
+!examples/vast-start.sh
 *.sqlite
 *.db
