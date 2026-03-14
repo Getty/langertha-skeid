@@ -478,6 +478,7 @@ sub _proxy_openai_json {
   $meta ||= {};
 
   my %fwd_headers = _forward_headers($c);
+  _inject_node_auth(\%fwd_headers, $c->skeid, $node_id);
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
   my $done = $c->app->ua->start($tx);
   my $duration_ms = _duration_ms($started);
@@ -554,6 +555,7 @@ sub _proxy_openai_json_async {
   $cb ||= sub { };
 
   my %fwd_headers = _forward_headers($c);
+  _inject_node_auth(\%fwd_headers, $c->skeid, $node_id);
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
   $c->app->ua->start($tx => sub {
     my ($ua, $done) = @_;
@@ -634,6 +636,7 @@ sub _proxy_openai_stream {
   $meta ||= {};
 
   my %fwd_headers = _forward_headers($c);
+  _inject_node_auth(\%fwd_headers, $c->skeid, $node_id);
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
 
   $c->render_later;
@@ -731,6 +734,21 @@ sub _forward_headers {
     $fwd_headers{$name} = $c->req->headers->header($name);
   }
   return %fwd_headers;
+}
+
+# If the selected node has api_key_env set, inject the key from the
+# environment as an Authorization: Bearer header, overriding whatever
+# the client sent. Used for per-agent Skeid deployments where the
+# provider API key is injected via a K8s Secret env var rather than
+# being passed by the caller.
+sub _inject_node_auth {
+  my ($headers_ref, $skeid, $node_id) = @_;
+  my ($node) = grep { ($_->{id} // '') eq $node_id } @{$skeid->nodes};
+  return unless $node && defined(my $env_name = $node->{api_key_env});
+  my $key = $ENV{$env_name} // '';
+  return unless length($key);
+  $headers_ref->{Authorization} = "Bearer $key";
+  delete $headers_ref->{'x-api-key'};
 }
 
 sub _extract_request_api_key {

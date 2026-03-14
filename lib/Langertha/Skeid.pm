@@ -273,14 +273,17 @@ sub add_node {
 
   $self->remove_node($id);
   push @{$self->nodes}, {
-    id        => $id,
-    url       => $url,
-    model     => ($node{model} // ''),
-    engine    => $self->normalize_engine_id((defined($node{engine}) && length($node{engine})) ? $node{engine} : 'OpenAIBase'),
-    weight    => (defined $node{weight} ? 0 + $node{weight} : 1),
-    max_conns => (defined $node{max_conns} ? 0 + $node{max_conns} : 0),
-    healthy   => (exists $node{healthy} ? ($node{healthy} ? 1 : 0) : 1),
-    metadata  => (ref($node{metadata}) eq 'HASH' ? $node{metadata} : {}),
+    id          => $id,
+    url         => $url,
+    model       => ($node{model} // ''),
+    engine      => $self->normalize_engine_id((defined($node{engine}) && length($node{engine})) ? $node{engine} : 'OpenAIBase'),
+    weight      => (defined $node{weight} ? 0 + $node{weight} : 1),
+    max_conns   => (defined $node{max_conns} ? 0 + $node{max_conns} : 0),
+    healthy     => (exists $node{healthy} ? ($node{healthy} ? 1 : 0) : 1),
+    metadata    => (ref($node{metadata}) eq 'HASH' ? $node{metadata} : {}),
+    (defined($node{api_key_env}) && length($node{api_key_env})
+      ? (api_key_env => "$node{api_key_env}")
+      : ()),
   };
   return 1;
 }
