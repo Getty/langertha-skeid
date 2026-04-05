@@ -50,4 +50,46 @@ my $skeid2 = Langertha::Skeid->new(key_broker => $broker2);
 ok $skeid2->has_key_broker, 'has_key_broker predicate';
 is $skeid2->key_broker->resolve_key('provider/groq/api-key'), 'gsk_test', 'broker resolves via skeid2';
 
+# Test _inject_node_auth with broker
+use Langertha::Skeid::Proxy;
+
+{
+  my $broker = TestBroker->new(_keys => { 'ref/test' => 'secret_key_123' });
+  my $skeid = Langertha::Skeid->new(key_broker => $broker);
+  $skeid->add_node(id => 'test-node', url => 'http://test', api_key_ref => 'ref/test');
+
+  my %headers = (Authorization => 'Bearer client-key');
+  Langertha::Skeid::Proxy::_inject_node_auth(\%headers, $skeid, 'test-node');
+  is $headers{Authorization}, 'Bearer secret_key_123', 'broker key overrides client key';
+}
+
+{
+  # Fallback to env var when no broker
+  my $skeid = Langertha::Skeid->new;
+  $skeid->add_node(id => 'env-node', url => 'http://test', api_key_env => 'TEST_SKEID_KEY');
+  local $ENV{TEST_SKEID_KEY} = 'env_key_456';
+
+  my %headers;
+  Langertha::Skeid::Proxy::_inject_node_auth(\%headers, $skeid, 'env-node');
+  is $headers{Authorization}, 'Bearer env_key_456', 'env var fallback works';
+}
+
+{
+  # Broker failure falls back to env var
+  package FailBroker;
+  use Moo;
+  extends 'Langertha::Skeid::KeyBroker';
+  sub resolve_key { die "royal down" }
+
+  package main;
+  my $skeid = Langertha::Skeid->new(key_broker => FailBroker->new);
+  $skeid->add_node(id => 'fail-node', url => 'http://test',
+    api_key_ref => 'ref/x', api_key_env => 'TEST_SKEID_KEY');
+  local $ENV{TEST_SKEID_KEY} = 'fallback_key';
+
+  my %headers;
+  Langertha::Skeid::Proxy::_inject_node_auth(\%headers, $skeid, 'fail-node');
+  is $headers{Authorization}, 'Bearer fallback_key', 'falls back to env on broker failure';
+}
+
 done_testing;

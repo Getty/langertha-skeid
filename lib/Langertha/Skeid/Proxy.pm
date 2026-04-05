@@ -744,9 +744,26 @@ sub _forward_headers {
 sub _inject_node_auth {
   my ($headers_ref, $skeid, $node_id) = @_;
   my ($node) = grep { ($_->{id} // '') eq $node_id } @{$skeid->nodes};
-  return unless $node && defined(my $env_name = $node->{api_key_env});
-  my $key = $ENV{$env_name} // '';
-  return unless length($key);
+  return unless $node;
+
+  my $key;
+
+  # 1. KeyBroker with api_key_ref — dynamic resolution
+  if ($skeid->has_key_broker && defined(my $ref = $node->{api_key_ref})) {
+    my $broker = $skeid->key_broker;
+    $broker->refresh if $broker->needs_refresh;
+    $key = eval { $broker->resolve_key($ref) };
+    warn "KeyBroker resolve failed for '$ref': $@" if $@ && !defined $key;
+  }
+
+  # 2. Fallback: env var (existing behavior)
+  if (!defined($key) || !length($key)) {
+    if (defined(my $env_name = $node->{api_key_env})) {
+      $key = $ENV{$env_name} // '';
+    }
+  }
+
+  return unless defined($key) && length($key);
   $headers_ref->{Authorization} = "Bearer $key";
   delete $headers_ref->{'x-api-key'};
 }
