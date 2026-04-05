@@ -185,6 +185,8 @@ has admin_api_key => (
   },
 );
 
+has key_broker => (is => 'ro', predicate => 'has_key_broker');
+
 has config_file => (
   is        => 'ro',
   predicate => 'has_config_file',
@@ -283,6 +285,9 @@ sub add_node {
     metadata    => (ref($node{metadata}) eq 'HASH' ? $node{metadata} : {}),
     (defined($node{api_key_env}) && length($node{api_key_env})
       ? (api_key_env => "$node{api_key_env}")
+      : ()),
+    (defined($node{api_key_ref}) && length($node{api_key_ref})
+      ? (api_key_ref => "$node{api_key_ref}")
       : ()),
   };
   return 1;
