@@ -13,7 +13,10 @@ use File::ShareDir qw(dist_dir);
 use YAML::PP;
 use JSON::MaybeXS qw(encode_json decode_json);
 use Langertha ();
-use Langertha::Knarr::Metrics;
+use Langertha::Usage;
+use Langertha::Cost;
+use Langertha::Pricing;
+use Langertha::UsageRecord;
 
 =head1 SYNOPSIS
 
@@ -1102,27 +1105,40 @@ sub _query_usage_report {
   };
 }
 
+sub _usage_object {
+  my ($self, %args) = @_;
+  return Langertha::Usage->from_hash($args{usage}) if ref($args{usage}) eq 'HASH';
+  return $args{usage} if ref($args{usage}) && $args{usage}->isa('Langertha::Usage');
+  return Langertha::Usage->from_response($args{response});
+}
+
 sub estimate_cost {
   my ($self, %args) = @_;
   my $model = $args{model} // '';
-  my $usage = $args{usage}
-    || Langertha::Knarr::Metrics->usage_from_response($args{response});
-  my $pricing = $args{pricing} || $self->pricing_for_model($model);
-
-  return Langertha::Knarr::Metrics->estimate_cost_usd(
-    usage   => $usage,
-    pricing => $pricing,
-  );
+  my $usage = $self->_usage_object(%args);
+  my $rule  = $args{pricing} || $self->pricing_for_model($model);
+  my $pricing = Langertha::Pricing->new( default_rule => $rule );
+  return $pricing->cost_for( $usage, undef )->to_hash;
 }
 
 sub normalize_metrics {
   my ($self, %args) = @_;
   my $model = $args{model} // '';
-  my $usage = $args{usage}
-    || Langertha::Knarr::Metrics->usage_from_response($args{response});
-  my $pricing = $args{pricing} || $self->pricing_for_model($model);
+  my $usage = $self->_usage_object(%args);
+  my $rule  = $args{pricing} || $self->pricing_for_model($model);
+  my $pricing = Langertha::Pricing->new( default_rule => $rule );
+  my $cost = $pricing->cost_for( $usage, undef );
 
-  return Langertha::Knarr::Metrics->build_record(
+  my @names;
+  for my $tc ( @{ $args{tool_calls} || [] } ) {
+    next unless ref($tc) eq 'HASH';
+    my $n = $tc->{name} // ( ref( $tc->{function} ) eq 'HASH' ? $tc->{function}{name} : undef );
+    push @names, $n if defined $n && length $n;
+  }
+
+  my $record = Langertha::UsageRecord->new(
+    usage           => $usage,
+    cost            => $cost,
     provider        => $args{provider},
     engine          => $args{engine},
     model           => $model,
@@ -1130,11 +1146,11 @@ sub normalize_metrics {
     duration_ms     => $args{duration_ms},
     started_at      => $args{started_at},
     finished_at     => $args{finished_at},
-    usage           => $usage,
-    tool_calls      => ($args{tool_calls} || []),
-    pricing         => $pricing,
+    tool_calls      => scalar(@names),
+    tool_names      => \@names,
     pricing_version => $args{pricing_version},
   );
+  return $record->to_hash;
 }
 
 sub _route_key {

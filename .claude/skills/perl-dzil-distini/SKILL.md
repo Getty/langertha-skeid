@@ -1,5 +1,5 @@
 ---
-name: dzil-distini
+name: perl-dzil-distini
 description: "Analyzes Dist::Zilla dist.ini configuration for any plugin bundle"
 user-invocable: false
 allowed-tools: Read, Grep

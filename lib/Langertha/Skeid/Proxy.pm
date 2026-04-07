@@ -10,8 +10,9 @@ use POSIX qw(strftime);
 use JSON::MaybeXS qw(encode_json decode_json);
 use Digest::SHA qw(sha1_hex);
 use Langertha::Skeid;
-use Langertha::Knarr::Input;
-use Langertha::Knarr::Output;
+use Langertha::Tool;
+use Langertha::ToolCall;
+use Langertha::ToolChoice;
 
 sub build_app {
   my ($class, %opts) = @_;
@@ -520,10 +521,7 @@ sub _proxy_openai_json {
   my $payload = eval { $res->json };
   my $metrics = {};
   if (ref($payload) eq 'HASH') {
-    my $tool_calls = eval {
-      my $norm = Langertha::Knarr::Output->extract_from_raw($payload);
-      $norm->{tool_calls} || [];
-    };
+    my $tool_calls = eval { [ map { $_->to_hash } Langertha::ToolCall->extract($payload) ] } || [];
     $metrics = eval {
       $c->skeid->call_function('metrics.normalize', {
         provider    => ($meta->{provider} || 'skeid'),
@@ -532,7 +530,7 @@ sub _proxy_openai_json {
         route       => ($meta->{endpoint} || ''),
         duration_ms => $duration_ms,
         response    => $payload,
-        tool_calls  => (ref($tool_calls) eq 'ARRAY' ? $tool_calls : []),
+        tool_calls  => $tool_calls,
       });
     } || {};
   }
@@ -599,10 +597,7 @@ sub _proxy_openai_json_async {
     my $payload = eval { $res->json };
     my $metrics = {};
     if (ref($payload) eq 'HASH') {
-      my $tool_calls = eval {
-        my $norm = Langertha::Knarr::Output->extract_from_raw($payload);
-        $norm->{tool_calls} || [];
-      };
+      my $tool_calls = eval { [ map { $_->to_hash } Langertha::ToolCall->extract($payload) ] } || [];
       $metrics = eval {
         $c->skeid->call_function('metrics.normalize', {
           provider    => ($meta->{provider} || 'skeid'),
@@ -611,7 +606,7 @@ sub _proxy_openai_json_async {
           route       => ($meta->{endpoint} || ''),
           duration_ms => $duration_ms,
           response    => $payload,
-          tool_calls  => (ref($tool_calls) eq 'ARRAY' ? $tool_calls : []),
+          tool_calls  => $tool_calls,
         });
       } || {};
     }
@@ -937,14 +932,14 @@ sub _anthropic_request_to_openai {
   );
 
   if (ref($body->{tools}) eq 'ARRAY') {
-    my $canonical = Langertha::Knarr::Input->normalize_tools($body->{tools});
-    $out{tools} = Langertha::Knarr::Input->to_openai_tools($canonical);
+    my $tools = Langertha::Tool->from_list($body->{tools});
+    $out{tools} = [ map { $_->to_openai } @$tools ];
   }
 
   if (defined $body->{tool_choice}) {
-    my $canonical_tc = Langertha::Knarr::Input->normalize_tool_choice($body->{tool_choice});
-    if ($canonical_tc) {
-      my $oai_tc = Langertha::Knarr::Input->to_openai_tool_choice($canonical_tc);
+    my $tc = Langertha::ToolChoice->from_hash($body->{tool_choice});
+    if ($tc) {
+      my $oai_tc = $tc->to_openai;
       $out{tool_choice} = $oai_tc if defined $oai_tc;
     }
   }
@@ -955,21 +950,25 @@ sub _anthropic_request_to_openai {
 sub _openai_response_to_anthropic {
   my ($res, $default_model) = @_;
 
-  my $meta = Langertha::Knarr::Output->extract_from_raw($res || {});
-  my @content;
+  my $choice = (ref($res->{choices}) eq 'ARRAY' ? $res->{choices}[0] : {}) || {};
+  my $msg = $choice->{message} || {};
+  my $text = $msg->{content} // '';
+  my @calls = Langertha::ToolCall->extract($res || {});
 
-  my $text = $meta->{text} // '';
-  my $calls = $meta->{tool_calls} || [];
-  if (!@$calls && length($text)) {
-    my ($clean, $extracted) = Langertha::Knarr::Output->parse_hermes_calls_from_text($text);
+  if (!@calls && length($text)) {
+    my ($clean, $extracted) = Langertha::ToolCall->extract_hermes_from_text($text);
     $text = $clean;
-    $calls = $extracted;
+    @calls = @$extracted;
   }
 
+  my @content;
   push @content, { type => 'text', text => $text } if length $text;
-  push @content, @{Langertha::Knarr::Output->to_anthropic_tool_use_blocks($calls)} if @$calls;
+  my $i = 0;
+  for my $call (@calls) {
+    $i++;
+    push @content, $call->to_anthropic_block( fallback_id => "toolu_skeid_$i" );
+  }
 
-  my $choice = (ref($res->{choices}) eq 'ARRAY' ? $res->{choices}[0] : {}) || {};
   my $fr = $choice->{finish_reason} // 'stop';
   my $stop_reason = $fr eq 'tool_calls' ? 'tool_use'
                   : $fr eq 'length'     ? 'max_tokens'
@@ -998,13 +997,13 @@ sub _openai_response_to_ollama_chat {
   my $tool_calls = [];
 
   if (ref($msg->{tool_calls}) eq 'ARRAY') {
-    my $meta = Langertha::Knarr::Output->extract_from_raw($res || {});
-    $tool_calls = Langertha::Knarr::Output->to_ollama_tool_calls($meta->{tool_calls});
+    my @calls = Langertha::ToolCall->extract($res || {});
+    $tool_calls = [ map { $_->to_ollama } @calls ];
   } elsif (length($text)) {
-    my ($clean, $calls) = Langertha::Knarr::Output->parse_hermes_calls_from_text($text);
+    my ($clean, $calls) = Langertha::ToolCall->extract_hermes_from_text($text);
     if (@$calls) {
       $text = $clean;
-      $tool_calls = Langertha::Knarr::Output->to_ollama_tool_calls($calls);
+      $tool_calls = [ map { $_->to_ollama } @$calls ];
     }
   }
 

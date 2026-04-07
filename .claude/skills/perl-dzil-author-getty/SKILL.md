@@ -1,5 +1,5 @@
 ---
-name: dzil-author-getty
+name: perl-dzil-author-getty
 description: "Explains @Author::GETTY plugin bundle configuration and conventions"
 user-invocable: false
 allowed-tools: Read, Grep
