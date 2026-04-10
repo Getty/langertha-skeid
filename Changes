@@ -1,6 +1,6 @@
 Revision history for Langertha-Skeid
 
-{{$NEXT}}
+0.002     2026-04-10 00:37:36Z
 
     - Drop Langertha::Knarr dependency. Skeid no longer goes through
       the Knarr namespace facades for format conversion or metrics —
