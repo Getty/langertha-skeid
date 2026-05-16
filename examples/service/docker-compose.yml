@@ -11,9 +11,9 @@ services:
     volumes:
       - openbao-data:/opt/openbao/file
     ports:
-      - "8200:8200"
+      - "5501:8200"
     healthcheck:
-      test: ["CMD", "bao", "status"]
+      test: ["CMD-SHELL", "bao status -address=http://127.0.0.1:8200"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -31,7 +31,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5533:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U skeid -d skeid"]
       interval: 10s
@@ -48,7 +48,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      OPENBAO_ADDR: http://openbao:8200
+      OPENBAO_ADDR: http://openbao:5501
       OPENBAO_ROOT_TOKEN: skeid-root-token
       # These are written to OpenBao KV - secrets for app to use
       # In prod: use docker secret or external init
@@ -73,10 +73,10 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8090:8090"
+      - "5591:8090"
     environment:
       # OpenBao connection (AppRole auth - token in memory only)
-      OPENBAO_ADDR: http://openbao:8200
+      OPENBAO_ADDR: http://openbao:5501
       OPENBAO_ROLE_ID: ${OPENBAO_ROLE_ID}
       OPENBAO_SECRET_ID: ${OPENBAO_SECRET_ID}
 
