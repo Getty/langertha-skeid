@@ -93,7 +93,7 @@ sub _fetch_token {
   }
 
   my $data = decode_json($resp->{content})->{auth} // {};
-  my $token = $data->{token} // '';
+  my $token = $data->{client_token} // '';
   my $ttl = $data->{ttl} // 0;
 
   die "OpenBao AppRole login returned no token" unless length $token;
@@ -158,6 +158,10 @@ sub resolve_key {
   # Normalize path - strip leading slash if present
   $ref =~ s{^/+}{};
 
+  # KV-v2 requires secret/data/ prefix for reads
+  # User provides logical path like "secret/skeid/remote/groq" → convert to API path "secret/data/skeid/remote/groq"
+  $ref =~ s{^secret/?}{secret/data/};
+
   my $resp = $self->_http->get(
     "${\$self->addr}/v1/$ref",
     {
@@ -201,7 +205,7 @@ sub list_secrets {
 
 sub DEMOLISH {
   my ($self) = @_;
-  $self->_clear_renewal_loop if $self->has_renewal_loop;
+  $self->_clear_renewal_loop if $self->can('has_renewal_loop') && $self->has_renewal_loop;
   $self->_clear_token;
 }
 

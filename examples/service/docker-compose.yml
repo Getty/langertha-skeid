@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   openbao:
     image: openbao/openbao:latest
@@ -64,7 +62,7 @@ services:
       - init
 
   skeid:
-    image: raudssus/langertha-skeid:latest
+    image: raudssus/langertha-skeid:test
     container_name: skeid-proxy
     restart: unless-stopped
     depends_on:
@@ -76,7 +74,8 @@ services:
       - "5591:8090"
     environment:
       # OpenBao connection (AppRole auth - token in memory only)
-      OPENBAO_ADDR: http://openbao:5501
+      # Internal port 8200, exposed as 5501 on host
+      OPENBAO_ADDR: http://openbao:8200
       OPENBAO_ROLE_ID: ${OPENBAO_ROLE_ID}
       OPENBAO_SECRET_ID: ${OPENBAO_SECRET_ID}
 
@@ -88,7 +87,7 @@ services:
       SKEID_USAGE_DB_PASSWORD: skeid_password_change_me
 
       # Remote LLM key - path in OpenBao
-      SKEID_REMOTE_KEY_REF: secret/skeid/remote/openai
+      SKEID_REMOTE_KEY_REF: ${SKEID_REMOTE_KEY_REF:-secret/skeid/remote/groq}
     volumes:
       - ./skeid.yaml:/etc/skeid/skeid.yaml:ro
       - skeid-usage:/data/skeid

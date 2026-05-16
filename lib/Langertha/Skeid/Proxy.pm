@@ -16,9 +16,22 @@ use Langertha::ToolChoice;
 
 sub build_app {
   my ($class, %opts) = @_;
-  my $skeid = $opts{skeid} || Langertha::Skeid->new(
-    ($opts{config_file} ? (config_file => $opts{config_file}) : ()),
-  );
+
+  # Auto-detect OpenBao KeyBroker if OPENBAO_ROLE_ID is set
+  my @skeid_opts = ($opts{config_file} ? (config_file => $opts{config_file}) : ());
+  if ($ENV{OPENBAO_ROLE_ID} && $ENV{OPENBAO_SECRET_ID}) {
+    eval {
+      require Langertha::Skeid::KeyBroker::OpenBao;
+      push @skeid_opts, key_broker => Langertha::Skeid::KeyBroker::OpenBao->new(
+        addr      => $ENV{OPENBAO_ADDR} // 'http://127.0.0.1:8200',
+        role_id   => $ENV{OPENBAO_ROLE_ID},
+        secret_id => $ENV{OPENBAO_SECRET_ID},
+      );
+    };
+    warn "Failed to initialize OpenBao KeyBroker: $@" if $@;
+  }
+
+  my $skeid = $opts{skeid} || Langertha::Skeid->new(@skeid_opts);
   if (exists $opts{admin_api_key}) {
     $skeid->admin_api_key(defined($opts{admin_api_key}) ? $opts{admin_api_key} : '');
   }
