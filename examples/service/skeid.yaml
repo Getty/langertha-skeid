@@ -1,0 +1,39 @@
+# Skeid Configuration for Service Stack
+# Location: /etc/skeid/skeid.yaml (mounted from examples/service/skeid.yaml)
+
+pricing:
+  "*":
+    input_per_million: 0.10
+    output_per_million: 0.40
+
+# Example nodes - keys are resolved via OpenBao KeyBroker
+nodes:
+  - id: openai-main
+    url: https://api.openai.com/v1
+    model: gpt-4o-mini
+    engine: openai
+    # api_key_ref resolved via KeyBroker -> OpenBao secret/skeid/remote/openai
+    api_key_ref: secret/skeid/remote/openai
+
+  - id: anthropic-main
+    url: https://api.anthropic.com/v1
+    model: claude-sonnet-4-20250514
+    engine: anthropic
+    # api_key_ref resolved via KeyBroker -> OpenBao secret/skeid/remote/anthropic
+    api_key_ref: secret/skeid/remote/anthropic
+
+# Usage storage via PostgreSQL
+usage_store:
+  backend: postgresql
+  dsn: "dbi:Pg:dbname=skeid;host=postgres;port=5432"
+  user: skeid
+  password_env: SKEID_USAGE_DB_PASSWORD
+
+# Admin API protection
+admin:
+  api_key_env: SKEID_ADMIN_API_KEY
+
+# Routing config
+routing:
+  wait_timeout_ms: 2000
+  wait_poll_ms: 25
