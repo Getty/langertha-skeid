@@ -1,0 +1,22 @@
+---
+class: standard
+completed: 2026-08-08
+created: 2026-08-08T13:13:59Z
+id: 11
+priority: medium
+status: done
+tags:
+- performance
+- protocols
+title: Forwarded hop-by-hop headers and a 5-connection upstream pool killed connection
+  reuse
+updated: 2026-08-08T13:14:04Z
+---
+
+Verified: 100 requests through Skeid left 100 TIME-WAIT sockets to the upstream -- a fresh TCP connection per request.
+
+Two causes: _forward_headers passed the client Connection header (and other hop-by-hop headers) upstream, so a client sending "Connection: close" made Skeid close its own upstream connection; and Mojo::UserAgent pools 5 connections by default while the proxy served 16 concurrently.
+
+Fixed: hop-by-hop headers are stripped per RFC 7230, and max_connections defaults to 100 (SKEID_UPSTREAM_POOL overrides). json throughput 118.8 -> 125.3 req/s at c=16.
+
+Modest gain; the header handling was a correctness bug regardless.
