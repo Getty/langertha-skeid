@@ -1,0 +1,21 @@
+---
+class: standard
+created: 2026-08-08T23:46:50Z
+id: 17
+priority: medium
+status: backlog
+tags:
+- policy
+- keybroker
+- config
+title: Map customer keys to readable ids without putting keys in a file
+updated: 2026-08-08T23:46:50Z
+---
+
+Since ADR 0008, skeid.yaml names customers by derived key id (k_<12 hex>, from `skeid keyid`). It works and it keeps customer keys out of config, but it is unreadable and makes key rotation a config edit.
+
+The natural home for a key -> name mapping is next to the key in OpenBao (secret/skeid/customer/<name> already exists in the example stack). The KeyBroker could resolve a presented key to its customer name, and policies could be named by that.
+
+Blocked on karr #3: the KeyBroker blocks the event loop and has no cache. A per-request vault round-trip on the routing path is not acceptable -- ADR 0008 says a request costs one hash lookup, and this would be the thing that breaks it. Do #3 first.
+
+Open question worth deciding before building: does policy assignment then belong in OpenBao next to the key, or stay in YAML keyed by name? ADR 0008 leaves this open on purpose.
