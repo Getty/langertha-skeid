@@ -1,0 +1,17 @@
+---
+class: standard
+created: 2026-08-08T13:13:53Z
+id: 10
+priority: low
+status: backlog
+tags:
+- performance
+- usage
+- negative-result
+title: Usage accounting is not a performance problem -- do not optimise it
+updated: 2026-08-08T13:13:53Z
+---
+
+Measured 2026-08-08, json c=16, 320 requests: jsonlog dir 128.1 req/s, jsonlog file 130.7, no usage store at all 129.8. All within noise.
+
+Recorded so nobody spends a sprint moving usage writes off the request path. If that idea comes up again, this is the answer. Re-measure only if the store changes (a DBI backend on a real PostgreSQL is a different question and has not been measured).
