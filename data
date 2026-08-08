@@ -1,0 +1,27 @@
+---
+class: standard
+completed: 2026-08-08
+created: 2026-08-08T05:03:44Z
+id: 9
+priority: high
+status: done
+tags:
+- bug
+- streaming
+- protocols
+title: SSE relay finalized the response on the first chunk -- streaming was broken
+  end to end
+updated: 2026-08-08T05:03:49Z
+---
+
+Found by bench/ (fakellm + llmbench), not by the suite: streaming through Skeid returned correct headers, a 200 and an empty body, then logged "Transaction already destroyed" for every later chunk.
+
+Two independent causes, both fatal:
+
+1. The relay called $c->write($bytes) per chunk with no drain callback. A dynamic Mojolicious response is finished once its write queue empties, so the response ended after the first chunk. Fixed by queueing chunks and draining via write_chunk with a drain callback, finishing only once the queue is empty and upstream is done.
+
+2. The first read event fires with an EMPTY chunk as soon as upstream headers are parsed, and writing an empty chunk finalizes the response. Fixed by skipping empty chunks.
+
+Also fixed while in there: SSE frames were parsed per read, so a frame split across two reads was dropped -- usually the final one, which is the one carrying usage. Now buffered and parsed line by line.
+
+Regression test: t/23-proxy-stream.t (real upstream, real socket, chunk-level client). Verified to fail against the old relay. The empty-chunk half is not reproducible through a Mojolicious upstream; it is covered by bench/ against fakellm.
