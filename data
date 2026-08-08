@@ -1,0 +1,20 @@
+---
+class: standard
+created: 2026-08-08T14:24:53Z
+id: 15
+priority: medium
+status: backlog
+tags:
+- performance
+- usage
+title: Measure a remote usage store before building UsageStore::Buffered
+updated: 2026-08-08T14:24:53Z
+---
+
+Measured: jsonlog costs nothing (karr #10). NOT measured: a DBI backend against a real PostgreSQL over TCP, which is a round-trip on the request path and can hang or fail.
+
+Measure that first with bench/. Only if it costs real time, add a UsageStore::Buffered decorator around any store: bounded queue, flush on batch size or timer, flush on shutdown, JsonLog stays synchronous.
+
+Overflow policy must be drop-and-count-loudly. Silently dropping billing data under a sink outage is the worst possible failure. Note the trade against ADR 0004: a crash loses one event today, up to N with buffering -- that is a config decision, not a default.
+
+Separately and cheaply: when no usage store is configured at all, record_usage still builds the whole event before discovering there is no sink. Skip the work when disabled.
