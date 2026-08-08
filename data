@@ -1,0 +1,18 @@
+---
+class: standard
+completed: 2026-08-08
+created: 2026-08-08T04:27:56Z
+id: 5
+priority: high
+status: done
+tags:
+- security
+- git
+title: examples/service/.env is tracked in git
+updated: 2026-08-08T04:43:07Z
+---
+
+git ls-files shows examples/service/.env tracked, alongside the intended .env.example template. .gitignore does not cover it. Any role_id/secret_id/password an operator puts there gets committed.
+
+Fix: add examples/service/.env to .gitignore and git rm --cached it. Confirm the tracked history does not already contain a real credential; if it does, rotation is required, not just removal.
+Fixed: .env untracked (git rm --cached) and gitignored; .env.example rewritten with placeholders.
