@@ -1,0 +1,36 @@
+---
+class: standard
+created: 2026-08-09T04:10:12Z
+id: 20
+priority: low
+status: backlog
+tags:
+- usage
+- performance
+- ops
+- docs
+title: Confirm traffic logging story covers fast+safe -- jsonlog dir mode is the answer
+updated: 2026-08-09T04:10:12Z
+---
+
+You asked: can Skeid do traffic logging, fast and safe? Answer (before any code change): yes, and it already does. This ticket records the finding and adds a small doc gap to close.
+
+What exists today:
+- usage_store.backend: jsonlog in two modes (karr #10 measured both):
+  - directory mode (recommended) -- one .json file per event, no shared lock contention, no interleave risk, perfect for a busy disk. Each event lands independently. 128.1 req/s measured at c=16 on the json path.
+  - file mode -- JSON lines, advisory file lock, one file. Slightly faster in measurement but locks across all writers.
+- usage_store.backend: sqlite (default DBI), usage_store.backend: postgresql.
+- Custom callback override via store_usage_event => sub { ... } -- publish to NATS, Kafka, whatever, without subclassing.
+
+Fast: directory-mode jsonlog is fastest of the three measured (karr #10).
+Safe: directory-mode has no interleave, no torn writes (write is per-event, atomic on POSIX), no shared lock, survives a crash mid-event (one file, partial event, easily filtered downstream). The billing-loss scenario is the same as today: an event that has not been written yet is lost when the process dies -- that is the ADR 0004 contract.
+
+Open gap worth closing in this ticket:
+- jsonlog directory mode is described in README and is the default for the keyword "jsonlog", but the container image builds the example service against postgresql. Either (a) flip the example to jsonlog for a faster, no-DB first run, or (b) document why postgres wins for the example stack (multi-frontend, real report, real query).
+- Add a tiny reader / tailer hint to README -- the directory format is one-file-per-event, easy to feed into `jq`, `vector`, `fluent-bit`, `loki`. A one-liner each makes the difference obvious.
+- Confirm the directory-mode writer fsyncs per file. Today the writer does not fsync explicitly; on a crash the kernel may buffer. Add an opt-in fsync: true for ops who care, default off (matches the existing ADR 0004 "one event in flight" contract).
+
+Done-when:
+- README has a 5-line section called "traffic / event logging" with the directory-mode recommendation, a jq one-liner, and the volume-mount hint for Docker.
+- An opt-in fsync flag exists in the jsonlog backend; default off; tested.
+- A note in the example compose stack explains why it uses postgresql, not jsonlog.
