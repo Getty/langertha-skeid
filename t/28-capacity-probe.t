@@ -115,6 +115,44 @@ use Langertha::Skeid::Proxy;
   ok !$skeid2->observe_response_headers('cloud', { 'content-type' => 'application/json' }),
     'a response that says nothing about rate limits records nothing';
 
+  # Providers meter requests and tokens separately, and for an LLM API the token budget is
+  # usually what runs out first. Reading only the request quota would keep sending to a node
+  # with plenty of requests left and no tokens, which answers 429 all the same.
+  my $skeid3 = Langertha::Skeid->new;
+  $skeid3->add_node(id => 'cloud', url => 'http://x/v1', model => 'm');
+  my $tokens_tight = $skeid3->observe_response_headers('cloud', {
+    'x-ratelimit-limit-requests'     => '1000',
+    'x-ratelimit-remaining-requests' => '990',      # 1% used
+    'x-ratelimit-limit-tokens'       => '100000',
+    'x-ratelimit-remaining-tokens'   => '0',        # exhausted
+  });
+  is $tokens_tight->{quota}, 'tokens', 'the tightest quota is the one reported';
+  is $skeid3->route_state(model => 'm')->{has_available}, 0, 'and an exhausted token budget blocks';
+
+  my $requests_tight = $skeid3->observe_response_headers('cloud', {
+    'x-ratelimit-limit-requests'     => '1000',
+    'x-ratelimit-remaining-requests' => '0',
+    'x-ratelimit-limit-tokens'       => '100000',
+    'x-ratelimit-remaining-tokens'   => '99000',
+  });
+  is $requests_tight->{quota}, 'requests', 'and the other way round when requests are the tight one';
+  is $skeid3->route_state(model => 'm')->{has_available}, 0, 'which also blocks';
+
+  my $roomy = $skeid3->observe_response_headers('cloud', {
+    'x-ratelimit-remaining-requests' => '900',
+    'x-ratelimit-limit-requests'     => '1000',
+    'x-ratelimit-remaining-tokens'   => '50000',
+    'x-ratelimit-limit-tokens'       => '100000',
+  });
+  is $roomy->{quota}, 'tokens', 'half the tokens beats a tenth of the requests as the tighter one';
+  is $skeid3->route_state(model => 'm')->{has_available}, 1, 'with room in both, it is admissible';
+
+  my $anthropic_tokens = $skeid3->observe_response_headers('cloud', {
+    'anthropic-ratelimit-input-tokens-remaining' => '0',
+    'anthropic-ratelimit-input-tokens-limit'     => '20000',
+  });
+  is $anthropic_tokens->{used}, 20000, "Anthropic's input-token spelling is read too";
+
   # Header casing is not something a provider promises.
   my $mixed = $skeid2->observe_response_headers('cloud', { 'X-RateLimit-Remaining' => '3' });
   is $mixed->{limit}, 4, 'header names are matched case-insensitively';

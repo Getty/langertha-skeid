@@ -171,6 +171,7 @@ nodes:
 |---|---|---|
 | `inflight` | the default; no probe object exists | none |
 | `ratelimit` | `x-ratelimit-*` / `anthropic-ratelimit-*` / `Retry-After` read off responses the proxy already holds | none |
+| | requests **and** tokens are read separately; the tightest quota (as a fraction) decides | |
 | `prometheus` | poll a metrics endpoint on a timer | one request per node per interval |
 | `custom` | a `code` callback or a `class` to load | caller's |
 

@@ -105,6 +105,10 @@ Details that turned out to matter:
   provider saying "not for another 30 seconds" is a statement about the future.
 - A rate-limit header with no matching limit header is read as "one more than remains", which
   is enough to stop admitting at zero without inventing a ceiling.
+- Providers meter requests *and* tokens, and for an LLM API the token budget is normally what
+  runs out first — a node with requests to spare and no tokens left answers `429` all the same.
+  Both quotas are read and the one closest to exhausted decides, compared as a fraction since
+  the units differ.
 - Probes follow a config reload: the inventory generation is compared per request and probes
   are rebuilt when it moves, or they poll for nodes that no longer exist.
 

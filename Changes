@@ -85,6 +85,10 @@ Revision history for Langertha-Skeid
     - A capacity reading may only narrow what max_conns allows, never widen it,
       so a stale or broken probe cannot become an overload -- and for a rented
       node max_conns keeps its meaning as a spend limit
+    - The ratelimit probe reads request and token quotas separately and lets
+      the tightest one decide. For an LLM API the token budget is usually what
+      runs out first, and a node with requests to spare and no tokens left
+      answers 429 all the same
     - Readings expire after capacity_max_age_ms (5s) and every failure reports
       nothing rather than something old, degrading to inflight. A provider's 429
       becomes a backoff that outlives the age limit and never touches the

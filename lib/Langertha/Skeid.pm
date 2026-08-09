@@ -1324,6 +1324,9 @@ sub set_capacity_reading {
     used   => (defined $reading{used}  ? 0 + $reading{used}  : undef),
     limit  => (defined $reading{limit} ? 0 + $reading{limit} : undef),
     at     => (defined $reading{at}    ? 0 + $reading{at}    : $now),
+    # Which of a provider's several quotas this reading is about, when it had more than one.
+    # For reports only -- admission just sees used and limit.
+    (defined $reading{quota} ? (quota => "$reading{quota}") : ()),
   };
 
   if (defined $reading{retry_after_ms} && $reading{retry_after_ms} > 0) {
@@ -1381,17 +1384,41 @@ sub forget_capacity {
 
 # Rate-limit headers, in the spellings the big providers actually use. Ordered: the first one
 # present wins, so a provider sending several does not get read twice.
-my @RATELIMIT_REMAINING = qw(
-  x-ratelimit-remaining-requests
-  anthropic-ratelimit-requests-remaining
-  x-ratelimit-remaining
-  ratelimit-remaining
-);
-my @RATELIMIT_LIMIT = qw(
-  x-ratelimit-limit-requests
-  anthropic-ratelimit-requests-limit
-  x-ratelimit-limit
-  ratelimit-limit
+# Providers meter more than one thing at once, and for an LLM API the token budget is usually
+# what runs out first -- a node with requests to spare and no tokens left answers 429 all the
+# same. Each quota is read separately and the tightest one decides.
+#
+# Within a quota the order is "most specific first": the first name present wins, so a provider
+# sending both a specific and a generic spelling is not counted twice.
+my @RATELIMIT_QUOTAS = (
+  {
+    name      => 'requests',
+    remaining => [qw(
+      x-ratelimit-remaining-requests
+      anthropic-ratelimit-requests-remaining
+      x-ratelimit-remaining
+      ratelimit-remaining
+    )],
+    limit => [qw(
+      x-ratelimit-limit-requests
+      anthropic-ratelimit-requests-limit
+      x-ratelimit-limit
+      ratelimit-limit
+    )],
+  },
+  {
+    name      => 'tokens',
+    remaining => [qw(
+      x-ratelimit-remaining-tokens
+      anthropic-ratelimit-tokens-remaining
+      anthropic-ratelimit-input-tokens-remaining
+    )],
+    limit => [qw(
+      x-ratelimit-limit-tokens
+      anthropic-ratelimit-tokens-limit
+      anthropic-ratelimit-input-tokens-limit
+    )],
+  },
 );
 
 =method capacity_header_names
@@ -1402,7 +1429,7 @@ name instead of walking every header of every response.
 =cut
 
 sub capacity_header_names {
-  return (@RATELIMIT_REMAINING, @RATELIMIT_LIMIT, 'retry-after');
+  return ((map { @{$_->{remaining}}, @{$_->{limit}} } @RATELIMIT_QUOTAS), 'retry-after');
 }
 
 =method observe_response_headers
@@ -1412,6 +1439,10 @@ sub capacity_header_names {
 The zero-cost probe: commercial providers do not publish queue depth, but they do put their
 rate-limit state on every response Skeid already receives. Reading it costs no extra request
 (ADR 0009).
+
+Providers meter requests and tokens separately, and for an LLM API the token budget is usually
+what runs out first. Both are read, and the one closest to exhausted decides — compared as a
+fraction, since the two are not the same unit.
 
 C<Retry-After> on a C<429> becomes a backoff. It deliberately does B<not> touch C<healthy>:
 rate-limited is busy, not broken, and nothing would ever flip that back.
@@ -1430,17 +1461,30 @@ sub observe_response_headers {
   my %reading = (source => 'ratelimit');
   my $useful = 0;
 
-  my ($remaining) = grep { defined } map { $h{$_} } @RATELIMIT_REMAINING;
-  my ($limit)     = grep { defined } map { $h{$_} } @RATELIMIT_LIMIT;
-
-  if (defined($remaining) && $remaining =~ /^\s*(\d+)/) {
+  # The tightest quota wins, compared as a fraction because requests and tokens are not the
+  # same unit. Reporting the roomier one would admit a request the provider is about to refuse.
+  my $tightest = -1;
+  for my $quota (@RATELIMIT_QUOTAS) {
+    my ($remaining) = grep { defined } map { $h{$_} } @{$quota->{remaining}};
+    next unless defined($remaining) && $remaining =~ /^\s*(\d+)/;
     my $left = 0 + $1;
+
+    my ($limit) = grep { defined } map { $h{$_} } @{$quota->{limit}};
     # The probe contract counts what is used, not what is left; a limit we were not told is
     # reconstructed as "one more than we have", which is enough to stop admitting at zero.
     my $total = (defined($limit) && $limit =~ /^\s*(\d+)/) ? 0 + $1 : $left + 1;
+    next unless $total > 0;
+
+    my $used = $total - $left;
+    $used = $total if $used > $total;
+    $used = 0 if $used < 0;
+
+    my $fraction = $used / $total;
+    next unless $fraction > $tightest;
+    $tightest = $fraction;
     $reading{limit} = $total;
-    $reading{used}  = $total - $left;
-    $reading{used}  = $total if $reading{used} > $total;
+    $reading{used}  = $used;
+    $reading{quota} = $quota->{name};
     $useful = 1;
   }
 
