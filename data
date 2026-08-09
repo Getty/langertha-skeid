@@ -1,0 +1,28 @@
+---
+class: standard
+created: 2026-08-08T14:24:48Z
+id: 14
+priority: medium
+status: backlog
+tags:
+- admission
+- deployment
+title: Static partitioning of max_conns across frontends and workers
+updated: 2026-08-09T01:44:25Z
+---
+
+Interim answer for both multi-frontend and prefork (karr #7) until capacity probing lands (ADR 0009): each instance is configured with max_conns / N.
+
+Wastes capacity under uneven load, needs no coordination, adds no failure mode. Needs to be explicit config, not folklore -- an operator who forgets it silently over-admits by a factor of N.
+Downgraded in scope by karr #13. Static partitioning is no longer the only answer for multiple frontends -- a prometheus probe reads the node's real occupancy including traffic this Skeid never sent, which is what partitioning was working around.
+
+Still worth doing for the cases probing cannot reach: a node with no metrics endpoint, and prefork workers within one process group (karr #7), where the shared thing is not the upstream but this process's own admission state.
+
+Reconsider after #7 rather than before it.
+Half of this is done by karr #7 / ADR 0010: worker_max_conns divides max_conns among prefork workers, with a startup warning when it cannot be honoured.
+
+What remains is the multi-FRONTEND case -- two Skeid hosts in front of one node, no probe available. Same arithmetic, but there is nothing that knows N: each frontend would have to be told its share in config (a divisor, or an explicit per-frontend max_conns).
+
+Worth noting the workaround already exists: set max_conns to the per-frontend share by hand. A divisor field would be sugar over that. Low value unless someone actually runs frontends without probes -- with a prometheus probe the question disappears, because both frontends read the node's real occupancy.
+
+Reclassify as low priority.
