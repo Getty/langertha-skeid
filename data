@@ -1,0 +1,14 @@
+---
+class: standard
+created: 2026-08-09T04:13:43Z
+id: 21
+priority: low
+status: backlog
+tags:
+- usage
+- performance
+- ops
+- docs
+title: Confirm traffic logging story covers fast+safe -- jsonlog dir mode is the answer
+updated: 2026-08-09T04:13:43Z
+---
