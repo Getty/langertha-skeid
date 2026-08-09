@@ -1,0 +1,32 @@
+# Skeid config for the benchmark harness.
+#
+# One node, pointing at fakellm. Nothing here should cost measurable time on the request path:
+# no key broker (so no vault round-trip), jsonlog usage (so no database write), and a wait
+# window long enough that saturation never turns into a 429 in the middle of a run.
+#
+# max_conns is deliberately high. Admission control is worth measuring, but it is a separate
+# experiment -- lower it on purpose when that is the question, and say so in the report.
+
+nodes:
+  - id: bench-1
+    url: http://127.0.0.1:18080/v1
+    model: fakellm
+    engine: openai
+    weight: 1
+    max_conns: 256
+    healthy: 1
+
+routing:
+  wait_timeout_ms: 5000
+  wait_poll_ms: 5
+  # llmbench --key-id sets x-skeid-key-id, and here that header is exactly as trustworthy as
+  # the harness itself. Never set this in a deployment that terminates client traffic directly.
+  trust_key_id_header: true
+
+usage_store:
+  backend: jsonlog
+  path: /tmp/skeid-bench-usage/
+  mode: dir
+
+admin:
+  api_key_env: SKEID_BENCH_ADMIN_KEY
