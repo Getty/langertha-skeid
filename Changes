@@ -58,6 +58,21 @@ Revision history for Langertha-Skeid
     - Add "skeid keyid", which prints the key id a customer key resolves to --
       the name a keys: entry uses, so the config never holds a customer key
     - Declare Digest::SHA in cpanfile; it was used at runtime but undeclared
+    - Key resolution no longer blocks the event loop. Langertha::Skeid::KeyBroker
+      gains key_async (the request path's only entry point), an in-memory TTL
+      cache with a short negative cache, and coalescing of concurrent misses for
+      one reference into a single resolution. A broker that only implements the
+      blocking resolve_key keeps working; ::OpenBao resolves non-blocking via
+      Mojo::UserAgent and renews its token on a timer rather than when a request
+      discovers it expired. Verified with a test that the process still answers
+      other requests while a resolution is outstanding
+    - SECURITY: KeyBroker::OpenBao verifies the OpenBao TLS certificate. It
+      hardcoded verify_ssl => 0, so anything able to intercept the connection
+      could hand out the AppRole token and every secret resolved with it. Set
+      OPENBAO_VERIFY_SSL=0 for a dev vault with a self-signed certificate
+    - KeyBroker::OpenBao no longer puts a vault response body in a warning, and
+      no longer leaks its token by keeping the renewal timer alive after the
+      broker is gone
     - Add bench/: a C fake-LLM server with configurable TTFT and token rate,
       plus a measuring client for TTFT and throughput distributions
 

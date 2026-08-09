@@ -36,6 +36,13 @@ sub build_app {
   }
 
 
+  # Renew the vault token on a timer rather than when a request discovers it expired. A request
+  # that has to renew first pays the round-trip in its own latency, and it is the request least
+  # able to afford it -- the first one after a quiet period.
+  if ($skeid->has_key_broker && $skeid->key_broker->can('start_renewal')) {
+    $skeid->key_broker->start_renewal;
+  }
+
   my $app = Mojolicious->new;
   $app->secrets(['skeid-proxy']);
   $app->ua->connect_timeout(10);
@@ -526,7 +533,7 @@ sub _proxy_openai_json_async {
   $cb ||= sub { };
 
   my %fwd_headers = _forward_headers($c);
-  _inject_node_auth(\%fwd_headers, $c->skeid, $node_id);
+  _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
   $c->app->ua->start($tx => sub {
     my ($ua, $done) = @_;
@@ -595,6 +602,7 @@ sub _proxy_openai_json_async {
 
     $cb->($res, 0, $status);
   });
+  });
 
   return;
 }
@@ -604,10 +612,14 @@ sub _proxy_openai_stream {
   $meta ||= {};
 
   my %fwd_headers = _forward_headers($c);
-  _inject_node_auth(\%fwd_headers, $c->skeid, $node_id);
+
+  # render_later before the key resolution, not after: a cold cache means the callback runs on
+  # a later tick, and Mojolicious would have rendered an empty response by then.
+  $c->render_later;
+
+  _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
 
-  $c->render_later;
   my $headers_sent = 0;
   my $had_error = 0;
   my $status = 200;
@@ -751,6 +763,7 @@ sub _proxy_openai_stream {
       $c->finish;
     }
   });
+  });
 }
 
 sub _render_upstream_response {
@@ -795,36 +808,52 @@ sub _forward_headers {
   return %fwd_headers;
 }
 
-# If the selected node has api_key_env set, inject the key from the
-# environment as an Authorization: Bearer header, overriding whatever
-# the client sent. Used for per-agent Skeid deployments where the
-# provider API key is injected via a K8s Secret env var rather than
-# being passed by the caller.
-sub _inject_node_auth {
-  my ($headers_ref, $skeid, $node_id) = @_;
+# Sets the upstream Authorization header for the selected node, from the KeyBroker
+# (api_key_ref) or from the environment (api_key_env), overriding whatever the client sent.
+# The callback runs exactly once, and always: a node with no key of its own simply forwards
+# the client's header untouched.
+#
+# Async because resolution can mean a vault round-trip, and this sits between routing and the
+# upstream call -- doing it synchronously stalls every other in-flight request for that
+# round-trip (ADR 0005). key_async answers from cache without touching the loop, so the
+# blocking case is a cold cache, and even then only one request per reference pays for it.
+sub _inject_node_auth_async {
+  my ($headers_ref, $skeid, $node_id, $cb) = @_;
+  $cb ||= sub { };
+
   my ($node) = grep { ($_->{id} // '') eq $node_id } @{$skeid->nodes};
-  return unless $node;
+  return $cb->() unless $node;
 
-  my $key;
+  my $apply = sub {
+    my ($key) = @_;
 
-  # 1. KeyBroker with api_key_ref — dynamic resolution
-  if ($skeid->has_key_broker && defined(my $ref = $node->{api_key_ref})) {
-    my $broker = $skeid->key_broker;
-    $broker->refresh if $broker->needs_refresh;
-    $key = eval { $broker->resolve_key($ref) };
-    warn "KeyBroker resolve failed for '$ref': $@" if $@ && !defined $key;
-  }
-
-  # 2. Fallback: env var (existing behavior)
-  if (!defined($key) || !length($key)) {
-    if (defined(my $env_name = $node->{api_key_env})) {
-      $key = $ENV{$env_name} // '';
+    # Fallback: env var
+    if (!defined($key) || !length($key)) {
+      if (defined(my $env_name = $node->{api_key_env})) {
+        $key = $ENV{$env_name} // '';
+      }
     }
+
+    return $cb->() unless defined($key) && length($key);
+    $headers_ref->{Authorization} = "Bearer $key";
+    delete $headers_ref->{'x-api-key'};
+    $cb->();
+  };
+
+  if ($skeid->has_key_broker && defined(my $ref = $node->{api_key_ref})) {
+    $skeid->key_broker->key_async($ref, sub {
+      my ($key, $error) = @_;
+      # The reference may be logged; what it resolves to may not, and neither may a vault
+      # response body that might carry it (ADR 0003).
+      warn "KeyBroker resolve failed for '$ref': $error"
+        if defined($error) && !defined($key);
+      $apply->($key);
+    });
+    return;
   }
 
-  return unless defined($key) && length($key);
-  $headers_ref->{Authorization} = "Bearer $key";
-  delete $headers_ref->{'x-api-key'};
+  $apply->();
+  return;
 }
 
 sub _extract_request_api_key {

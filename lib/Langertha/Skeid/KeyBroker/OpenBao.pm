@@ -3,9 +3,11 @@ our $VERSION = '0.003';
 # ABSTRACT: OpenBao-backed KeyBroker with AppRole auth and token renewal
 use Moo;
 use HTTP::Tiny;
+use Mojo::IOLoop;
+use Mojo::UserAgent;
 use JSON::MaybeXS qw(decode_json encode_json);
-use Time::HiRes qw(sleep);
 use POSIX qw(strftime);
+use Scalar::Util qw(weaken);
 use namespace::clean;
 
 extends 'Langertha::Skeid::KeyBroker';
@@ -44,19 +46,62 @@ has renew_secs => (
   default => sub { 300 },  # 5 minutes
 );
 
+=attr verify_ssl
+
+Whether to verify the OpenBao server's TLS certificate (default 1, override with
+C<OPENBAO_VERIFY_SSL=0>). Turning it off on an C<https://> address means anything that can
+intercept the connection can hand out this process's AppRole token and every secret it
+resolves. It exists for a dev vault with a self-signed certificate and nothing else.
+
+=cut
+
+has verify_ssl => (
+  is      => 'ro',
+  default => sub {
+    return (defined($ENV{OPENBAO_VERIFY_SSL}) && $ENV{OPENBAO_VERIFY_SSL} =~ /^(0|false|no|off)$/i)
+      ? 0 : 1;
+  },
+);
+
 has _http => (
   is      => 'lazy',
   builder => sub {
+    my ($self) = @_;
     HTTP::Tiny->new(
-      timeout      => 10,
-      verify_ssl   => 0,  # dev mode - set to 1 in prod
+      timeout    => 10,
+      verify_ssl => $self->verify_ssl,
     );
   },
+);
+
+# The non-blocking client, used on the request path. HTTP::Tiny stays for boot and for callers
+# with no IO loop (CLI, tests, setup scripts).
+has _ua => (
+  is      => 'lazy',
+  builder => sub {
+    my ($self) = @_;
+    my $ua = Mojo::UserAgent->new;
+    $ua->connect_timeout(5);
+    $ua->request_timeout(10);
+    $ua->insecure(1) unless $self->verify_ssl;
+    return $ua;
+  },
+);
+
+# Callbacks waiting on a token renewal that is already in flight.
+has _refresh_waiters => (
+  is      => 'ro',
+  default => sub { [] },
 );
 
 has _token => (
   is      => 'rw',
   clearer => '_clear_token',
+);
+
+has _renew_token => (
+  is      => 'rw',
+  clearer => '_clear_renew_token',
 );
 
 has _token_expire => (
@@ -98,38 +143,38 @@ sub _fetch_token {
 
   die "OpenBao AppRole login returned no token" unless length $token;
 
-  $self->_token($token);
+  # The token from AppRole login is ONLY for renew-self
+  # Store it as _renew_token - we'll use it to get the actual API token
+  $self->_renew_token($token);
   $self->_token_expire(time + ($ttl > 0 ? $ttl : 3600));
 
   return 1;
 }
 
-sub _renew_token {
-  my ($self) = @_;
-  # AppRole secret is one-time use - we need a new secret_id from somewhere
-  # For now: if token is expired, die and let docker restart the container
-  if (time >= $self->_token_expire) {
-    die "OpenBao token expired. Container must be restarted to get new AppRole credential.";
-  }
-  return 1;
-}
-
 sub needs_refresh {
   my ($self) = @_;
-  return 1 if time >= ($self->_token_expire - 60);  # refresh 60s before expiry
+  # Refresh if: time is near expiry, OR we have no client_token yet
+  return 1 if time >= ($self->_token_expire - 60);
+  return 1 unless $self->_token;
   return 0;
 }
 
 sub refresh {
   my ($self) = @_;
   # Token renewal via renew-self endpoint
-  my $token = $self->_token or die "No token to renew";
+  # _token holds the RENEW token (from initial AppRole login or previous renew-self)
+  # renew-self returns a NEW client_token for API calls AND a new renew token
+  my $renew_token = $self->_token // $self->_renew_token;
+  unless ($renew_token) {
+    die "No renew token available - call _fetch_token first";
+  }
+
   my $resp = $self->_http->post(
     "${\$self->addr}/v1/auth/token/renew-self",
     {
       headers => {
         'Content-Type'  => 'application/json',
-        'X-Vault-Token' => $token,
+        'X-Vault-Token' => $renew_token,
       },
       content => encode_json({}),
     },
@@ -137,13 +182,40 @@ sub refresh {
 
   if ($resp->{success}) {
     my $data = decode_json($resp->{content})->{auth} // {};
+    my $new_client_token = $data->{client_token} // '';
     my $ttl = $data->{ttl} // 0;
+
+    die "renew-self returned no client_token" unless length $new_client_token;
+
+    # Store the new client_token for API calls
+    $self->_token($new_client_token);
+
+    # Store a new renew token (same as client_token in Vault's default behavior)
+    # The renew_token is good for the lease_duration, then we need to renew again
+    $self->_renew_token($new_client_token);
     $self->_token_expire(time + ($ttl > 0 ? $ttl : 3600));
+
     return 1;
   }
 
-  # Renewal failed - token likely expired, need container restart
-  die "OpenBao token renewal failed. Container must be restarted.";
+  # Renewal failed - need new AppRole credentials
+  die "OpenBao token renewal failed. Container must be restarted to get new AppRole credential.";
+}
+
+# KV-v2 reads go through secret/data/. Callers name the logical path
+# ("secret/skeid/remote/groq"); the API path is "secret/data/skeid/remote/groq".
+sub _kv_path {
+  my ($self, $ref) = @_;
+  $ref =~ s{^/+}{};
+  $ref =~ s{^secret/?}{secret/data/};
+  return $ref;
+}
+
+sub _key_from_payload {
+  my ($self, $payload) = @_;
+  my $decoded = eval { decode_json($payload // '') } or return undef;
+  my $data = $decoded->{data} // {};
+  return $data->{data}{api_key} // $data->{api_key} // undef;
 }
 
 sub resolve_key {
@@ -155,29 +227,149 @@ sub resolve_key {
 
   my $token = $self->_token or die "No OpenBao token";
 
-  # Normalize path - strip leading slash if present
-  $ref =~ s{^/+}{};
-
-  # KV-v2 requires secret/data/ prefix for reads
-  # User provides logical path like "secret/skeid/remote/groq" → convert to API path "secret/data/skeid/remote/groq"
-  $ref =~ s{^secret/?}{secret/data/};
-
+  my $path = $self->_kv_path($ref);
   my $resp = $self->_http->get(
-    "${\$self->addr}/v1/$ref",
+    "${\$self->addr}/v1/$path",
     {
       headers => { 'X-Vault-Token' => $token },
     },
   );
 
   if (!$resp->{success}) {
-    warn "OpenBao read failed for '$ref': " . ($resp->{content} // 'unknown');
+    # Only the status: a response body from a vault read is the last thing that belongs in a
+    # log line, and the reference alone is enough to find the misconfiguration.
+    warn "OpenBao read failed for '$ref': HTTP " . ($resp->{status} // '???');
     return undef;
   }
 
-  my $data = decode_json($resp->{content})->{data} // {};
-  my $api_key = $data->{data}{api_key} // $data->{api_key} // undef;
+  return $self->_key_from_payload($resp->{content});
+}
 
-  return $api_key;
+=method resolve_key_async
+
+Non-blocking resolution against OpenBao, renewing the token first when it is due. Used by
+L<Langertha::Skeid::KeyBroker/key_async>, which is what the request path calls; a cache hit
+never gets here.
+
+With no IO loop running there is nothing to yield to, so this falls back to the blocking path
+— that is the CLI and the test suite, not the proxy.
+
+=cut
+
+sub resolve_key_async {
+  my ($self, $ref, $cb) = @_;
+  $cb ||= sub { };
+  return $cb->(undef, 'no key reference') unless defined($ref) && length($ref);
+  return $self->SUPER::resolve_key_async($ref, $cb) unless Mojo::IOLoop->is_running;
+
+  my $read = sub {
+    my ($token, $error) = @_;
+    return $cb->(undef, $error) unless defined($token) && length($token);
+
+    $self->_ua->get(
+      $self->addr . '/v1/' . $self->_kv_path($ref) => { 'X-Vault-Token' => $token } => sub {
+        my (undef, $tx) = @_;
+        my $res = $tx->res;
+        my $status = $res->code // 0;
+        return $cb->(undef, "OpenBao read failed for '$ref': HTTP " . ($status || 'no response'))
+          unless $status >= 200 && $status < 300;
+
+        my $key = $self->_key_from_payload($res->body);
+        return $cb->(undef, "OpenBao returned no api_key for '$ref'")
+          unless defined($key) && length($key);
+        $cb->($key, undef);
+      }
+    );
+  };
+
+  return $self->_refresh_async($read) if $self->needs_refresh;
+  $read->($self->_token);
+  return;
+}
+
+# Renews the token without blocking, and only once at a time: a cold start at concurrency 64
+# would otherwise fire 64 renew-self calls, and vault would answer them with 64 different
+# tokens, 63 of which are immediately stale.
+sub _refresh_async {
+  my ($self, $cb) = @_;
+  $cb ||= sub { };
+
+  my $waiters = $self->_refresh_waiters;
+  push @$waiters, $cb;
+  return if @$waiters > 1;
+
+  my $settle = sub {
+    my ($token, $error) = @_;
+    my @waiting = splice @$waiters;
+    $_->($token, $error) for @waiting;
+  };
+
+  my $renew_token = $self->_token // $self->_renew_token;
+  return $settle->(undef, 'No renew token available') unless $renew_token;
+
+  $self->_ua->post(
+    $self->addr . '/v1/auth/token/renew-self' => {
+      'Content-Type'  => 'application/json',
+      'X-Vault-Token' => $renew_token,
+    } => encode_json({}) => sub {
+      my (undef, $tx) = @_;
+      my $status = $tx->res->code // 0;
+      return $settle->(undef, 'OpenBao token renewal failed: HTTP ' . ($status || 'no response'))
+        unless $status >= 200 && $status < 300;
+
+      my $data = eval { decode_json($tx->res->body)->{auth} } // {};
+      my $token = $data->{client_token} // '';
+      return $settle->(undef, 'renew-self returned no client_token') unless length $token;
+
+      my $ttl = $data->{ttl} // 0;
+      $self->_token($token);
+      $self->_renew_token($token);
+      $self->_token_expire(time + ($ttl > 0 ? $ttl : 3600));
+      $settle->($token, undef);
+    }
+  );
+  return;
+}
+
+=method start_renewal
+
+  $broker->start_renewal;
+
+Renews the token on a timer instead of waiting for a request to notice it expired, so the
+request path finds a valid token already there. Called by
+L<Langertha::Skeid::Proxy/build_app>; safe to call twice.
+
+A failed renewal warns while the current token is still valid — a blip is not worth dropping
+in-flight requests for. Once it has actually expired the process dies, because a Skeid that
+cannot resolve keys is not a Skeid that should keep answering: the container restarts and logs
+in again with its AppRole credentials (ADR 0003).
+
+=cut
+
+sub start_renewal {
+  my ($self) = @_;
+  return $self->_renewal_loop if $self->_renewal_loop;
+
+  my $every = $self->renew_secs;
+  $every = 60 if !$every || $every < 1;
+
+  # Weak, or the timer's closure keeps the broker alive forever and DEMOLISH never runs -- which
+  # is how a token outlives the object that was supposed to be the only thing holding it.
+  my $weak = $self;
+  weaken($weak);
+
+  my $id = Mojo::IOLoop->recurring($every => sub {
+    my $broker = $weak or return;
+    $broker->_refresh_async(sub {
+      my ($token, $error) = @_;
+      return unless defined $error;
+      die "OpenBao token renewal failed and the token has expired: $error"
+        if time >= $broker->_token_expire;
+      warn "OpenBao token renewal failed (token still valid): $error";
+    });
+  });
+  $self->_renewal_loop($id);
+  return $id;
 }
 
 sub list_secrets {
@@ -205,8 +397,13 @@ sub list_secrets {
 
 sub DEMOLISH {
   my ($self) = @_;
-  $self->_clear_renewal_loop if $self->can('has_renewal_loop') && $self->has_renewal_loop;
+  if (my $id = $self->_renewal_loop) {
+    eval { Mojo::IOLoop->remove($id) };
+    $self->_clear_renewal_loop;
+  }
+  $self->forget_key;
   $self->_clear_token;
+  $self->_clear_renew_token;
 }
 
 1;
@@ -217,10 +414,11 @@ This KeyBroker implementation fetches API keys from OpenBao KV-v2 secrets.
 
 Security model:
 - AppRole credentials (role_id + secret_id) are injected at container start
-- First request: use AppRole to get a token, store in memory
-- Token is renewed every C<renew_secs> seconds (default: 5min)
-- If renewal fails → die → container restart (expected behavior)
-
-No secrets are ever written to disk. Token lives only in memory.
+- Initial AppRole login returns a RENEW token (stored in _renew_token attribute)
+- First API call triggers refresh() → renew-self → gets client_token for API calls
+- renew-self returns a NEW client_token AND a new renew token (same value)
+- Token is renewed every C<renew_secs> seconds (default: 5min) via renew-self
+- If renewal fails → die → container restart (to get new AppRole credential)
+- No secrets are ever written to disk. Tokens live only in memory.
 
 =cut
