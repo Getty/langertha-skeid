@@ -1,0 +1,48 @@
+---
+class: standard
+completed: 2026-08-09
+created: 2026-08-08T14:24:42Z
+id: 13
+priority: high
+status: done
+tags:
+- admission
+- capacity
+- feature
+title: 'Pluggable node capacity probes: prometheus, ratelimit headers, custom (ADR
+  0009)'
+updated: 2026-08-09T00:20:14Z
+---
+
+Implements ADR 0009. inflight becomes one probe implementation among several.
+
+- inflight (default, today behaviour)
+- prometheus: poll vLLM/SGLang/TGI metrics on a timer, URL and metric names configurable
+- ratelimit_headers: read x-ratelimit-* / anthropic-ratelimit-* / Retry-After passively off responses Skeid already receives -- zero extra requests
+- custom: coderef or class name, part of the contract because Skeid is generic
+
+Never on the request path. One normalized reading shape, unknown is valid and falls back to inflight, readings carry an age and degrade when stale.
+
+A 429 adjusts the probe reading and a backoff timer. It must NOT touch the healthy flag -- rate-limited is busy, not broken, and nothing would flip it back.
+
+Open, needs measurement: poll interval, and whether a reading should influence weighting as well as admission.
+DONE -- all four probes, plus one rule the ADR did not state.
+
+THE RULE: a probe may only narrow what max_conns already allows, never widen it. _node_can_take asks both and they are not symmetric -- max_conns is this process's own guardrail and always applies. Without this, a stale or broken probe becomes an overload, and for a rented node max_conns is a spend limit a provider reporting spare capacity must not be able to lift. ADR 0009 updated with it and with the rest of what implementation settled.
+
+Contract in Langertha::Skeid: set_capacity_reading / capacity_reading / forget_capacity / capacity_max_age_ms (5s), dispatch capacity.set|get|observe|forget, node_metrics carries the reading with its source so a measured node and an inferred one are not reported as equally known.
+
+- inflight: unchanged default. No capacity block means no probe object at all, not a probe reporting the same thing.
+- ratelimit: observe_response_headers, called from responses the proxy already holds -- zero extra requests. OpenAI, Anthropic and bare x-ratelimit-* spellings, case-insensitive. remaining with no limit header is read as 'one more than remains', enough to stop at zero without inventing a ceiling.
+- prometheus: Langertha::Skeid::CapacityProbe::Prometheus, timer poll, defaults for vLLM/SGLang/TGI metric names, overridable per node, several series of one metric summed. used = running + waiting: a queued request occupies the node, and admitting more because they are 'only waiting' is how a queue becomes a timeout. limit falls back to max_conns. One poll in flight at a time, or a slow endpoint makes the probe into the load it measures.
+- custom: coderef or class name (validated before require, a config file should not be able to name a path).
+
+Every failure path reports NOTHING rather than something old -- unreachable endpoint, unrecognised metric names, a probe that dies mid-poll (caught, warned, reading dropped). Unknown degrades to inflight, which is imprecise; a kept reading is confidently wrong. A pending backoff deliberately outlives capacity_max_age_ms because it is a statement about the future, not an observation. 429 never touches healthy.
+
+Probes are started by build_app and rebuilt when the inventory generation moves, or a config reload leaves them polling for nodes that are gone.
+
+t/28-capacity-probe.t (43) and t/29-capacity-probe-prometheus.t (34). Both sabotage-verified: letting a probe override max_conns fails 1 assertion, ignoring staleness fails 2. Suite: 427 via dzil test.
+
+Still open, as the ADR says: the poll interval (2s is a starting point, not a finding) and whether a reading should influence weighting as well as admission. Both need measurement.
+
+karr #14 (static partitioning of max_conns) is now the fallback for deployments that cannot probe, not the only answer.
