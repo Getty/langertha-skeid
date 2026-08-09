@@ -34,3 +34,10 @@ Langertha-Skeid-*
 !.claude/agents/
 !.claude/skills/
 !.claude/hooks/
+
+# karr materialized task view -- never commit
+tasks/
+config.yml
+
+# Local deployment secrets (only the .example template is tracked)
+examples/service/.env
