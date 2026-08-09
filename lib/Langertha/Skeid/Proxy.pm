@@ -8,6 +8,7 @@ use Mojo::IOLoop;
 use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
 use Langertha::Skeid;
+use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Ollama;
@@ -35,13 +36,17 @@ sub build_app {
     $skeid->admin_api_key(defined($opts{admin_api_key}) ? $opts{admin_api_key} : '');
   }
 
-
   # Renew the vault token on a timer rather than when a request discovers it expired. A request
   # that has to renew first pays the round-trip in its own latency, and it is the request least
   # able to afford it -- the first one after a quiet period.
   if ($skeid->has_key_broker && $skeid->key_broker->can('start_renewal')) {
     $skeid->key_broker->start_renewal;
   }
+
+  # Capacity probes (ADR 0009). Held by the app, because a probe that goes out of scope stops
+  # polling. Nodes with no capacity block get none, which is plain inflight admission.
+  my $probes = Langertha::Skeid::CapacityProbe->start_for_skeid($skeid);
+  my $probe_generation = $skeid->_inventory_generation;
 
   my $app = Mojolicious->new;
   $app->secrets(['skeid-proxy']);
@@ -57,6 +62,17 @@ sub build_app {
       : 100
   );
   $app->helper(skeid => sub { $skeid });
+
+  # A config reload replaces the whole inventory, so probes have to follow it or they keep
+  # polling for nodes that are gone and never start for new ones. An integer compare per
+  # request is cheap enough not to need its own timer, and the rebuild itself is rare.
+  $app->hook(before_dispatch => sub {
+    my $generation = $skeid->_inventory_generation;
+    return if $generation == $probe_generation;
+    $probe_generation = $generation;
+    $_->stop for values %$probes;
+    $probes = Langertha::Skeid::CapacityProbe->start_for_skeid($skeid);
+  });
 
   my $r = $app->routes;
 
@@ -568,6 +584,7 @@ sub _proxy_openai_json_async {
     my $res = $done->res;
     my $status = $res->code // 200;
 
+    _observe_capacity($c, $node_id, $res);
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => ($status < 500) ? 1 : 0,
@@ -734,6 +751,7 @@ sub _proxy_openai_stream {
     }
 
     my $duration_ms = _duration_ms($started);
+    _observe_capacity($c, $node_id, $tx_done->res);
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => ($had_error || $status >= 500) ? 0 : 1,
@@ -853,6 +871,35 @@ sub _inject_node_auth_async {
   }
 
   $apply->();
+  return;
+}
+
+# The free capacity probe (ADR 0009): a commercial provider will not tell us its queue depth,
+# but it puts its rate-limit state on every response we already have in hand. Reading it costs
+# no extra request -- which is the whole reason this is worth doing on the request path at all.
+#
+# Pulls the handful of headers by name rather than walking all of them; this runs per response.
+my @CAPACITY_HEADERS = Langertha::Skeid->capacity_header_names;
+
+sub _observe_capacity {
+  my ($c, $node_id, $res) = @_;
+  return unless defined($node_id) && length($node_id);
+  return unless $res;
+  my $headers = $res->headers or return;
+
+  my %found;
+  for my $name (@CAPACITY_HEADERS) {
+    my $value = $headers->header($name);
+    $found{$name} = $value if defined $value;
+  }
+  my $status = $res->code // 0;
+  return unless %found || $status == 429;
+
+  $c->skeid->call_function('capacity.observe', {
+    id      => $node_id,
+    headers => \%found,
+    status  => $status,
+  });
   return;
 }
 

@@ -12,6 +12,9 @@ my @modules = qw(
   Langertha::Skeid::UsageStore::JsonLog
   Langertha::Skeid::UsageStore::DBI
   Langertha::Skeid::KeyBroker
+  Langertha::Skeid::CapacityProbe
+  Langertha::Skeid::CapacityProbe::Prometheus
+  Langertha::Skeid::CapacityProbe::Custom
 );
 
 for my $mod (@modules) {

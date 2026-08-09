@@ -66,3 +66,24 @@ routing:
 #
 # Unlisted keys take default_policy, so a deployment where every customer is configured the
 # same way carries no key entries at all.
+
+# Capacity probes (ADR 0009). inflight counts only what THIS Skeid sent, so two frontends in
+# front of the same GPU each think it is half as busy as it is. A probe reads what the node
+# itself reports, including traffic Skeid never saw.
+#
+# nodes:
+#   - id: gpu-1
+#     url: http://gpu-1:8000/v1
+#     model: qwen3-32b
+#     tags: [local]
+#     max_conns: 32
+#     capacity:
+#       probe: prometheus
+#       path: /metrics          # or a full url: for a sidecar
+#       interval_ms: 2000
+#       # running/waiting default to the vLLM, SGLang and TGI metric names
+#       # limit: 32             # defaults to max_conns
+#
+# Cloud nodes need no configuration: rate-limit headers are read off responses Skeid already
+# receives, so a provider that says "0 remaining" stops being admitted until it says otherwise.
+# A probe can only ever narrow max_conns, never raise it.

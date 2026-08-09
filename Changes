@@ -73,6 +73,22 @@ Revision history for Langertha-Skeid
     - KeyBroker::OpenBao no longer puts a vault response body in a warning, and
       no longer leaks its token by keeping the renewal timer alive after the
       broker is gone
+    - Node capacity is probed, not only counted (ADR 0009). inflight counts
+      what this process sent, which undercounts the moment a second frontend, a
+      prefork worker or a batch job shares the node -- each counter sees its own
+      share and together they over-admit. Nodes can now carry a capacity block
+      selecting a probe: ratelimit (reads x-ratelimit-* / anthropic-ratelimit-* /
+      Retry-After off responses Skeid already has, so it costs nothing),
+      prometheus (polls vLLM/SGLang/TGI metrics on a timer), or custom (a
+      callback or a class, because Skeid fronts whatever an operator runs).
+      Absent means inflight, so an existing config routes exactly as before
+    - A capacity reading may only narrow what max_conns allows, never widen it,
+      so a stale or broken probe cannot become an overload -- and for a rented
+      node max_conns keeps its meaning as a spend limit
+    - Readings expire after capacity_max_age_ms (5s) and every failure reports
+      nothing rather than something old, degrading to inflight. A provider's 429
+      becomes a backoff that outlives the age limit and never touches the
+      healthy flag: rate-limited is busy, not broken
     - Add bench/: a C fake-LLM server with configurable TTFT and token rate,
       plus a measuring client for TTFT and throughput distributions
 

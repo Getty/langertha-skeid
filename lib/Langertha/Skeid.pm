@@ -285,6 +285,32 @@ has _inflight => (
   default => sub { {} },
 );
 
+# node_id => normalized capacity reading (see set_capacity_reading). Written by probes off the
+# request path, read by admission.
+has _capacity => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+=attr capacity_max_age_ms
+
+How long a capacity reading is trusted, in milliseconds (default 5000, 0 disables expiry).
+
+A stale reading is worse than none: it describes a node as it was, and admission acts on it as
+if it were now. Past this age a reading is ignored and C<inflight> decides again, which is the
+same behaviour as having configured no probe at all (ADR 0009).
+
+=cut
+
+has capacity_max_age_ms => (
+  is      => 'rw',
+  default => sub {
+    return (defined($ENV{SKEID_CAPACITY_MAX_AGE_MS}) && length($ENV{SKEID_CAPACITY_MAX_AGE_MS}))
+      ? 0 + $ENV{SKEID_CAPACITY_MAX_AGE_MS}
+      : 5000;
+  },
+);
+
 has _stats => (
   is      => 'rw',
   default => sub { {} },
@@ -362,6 +388,9 @@ sub add_node {
     (defined($node{api_key_ref}) && length($node{api_key_ref})
       ? (api_key_ref => "$node{api_key_ref}")
       : ()),
+    # How this node's capacity is found (ADR 0009). Absent means inflight, which is every
+    # deployment that existed before probes did.
+    (ref($node{capacity}) eq 'HASH' ? (capacity => { %{$node{capacity}} }) : ()),
   };
   $self->_bump_inventory;
   return 1;
@@ -373,6 +402,8 @@ sub remove_node {
   my @keep = grep { ($_->{id} // '') ne $id } @{$self->nodes};
   my $removed = @{$self->nodes} - @keep;
   $self->nodes(\@keep);
+  # Or a node re-added under the same id inherits a reading about a different machine.
+  $self->forget_capacity($id) if $removed;
   return $removed ? 1 : 0;
 }
 
@@ -814,10 +845,35 @@ sub _node_can_take {
   my $id = $node->{id} // '';
   return 0 unless length $id;
 
+  # Both have to agree, and they are not symmetric: max_conns is this process's own guardrail
+  # and always applies, while a probe may only narrow what it allows. A probe that could widen
+  # it would turn a stale or broken reading into an overload -- and for a rented node,
+  # max_conns is a spend limit, not a capacity estimate (ADR 0009).
+  return 0 unless $self->_inflight_allows($node);
+  return 0 unless $self->_capacity_allows($id);
+  return 1;
+}
+
+sub _inflight_allows {
+  my ($self, $node) = @_;
   my $max = 0 + ($node->{max_conns} // 0);
-  my $inflight = 0 + ($self->_inflight->{$id} // 0);
   return 1 if $max <= 0;
-  return $inflight < $max ? 1 : 0;
+  return (0 + ($self->_inflight->{$node->{id} // ''} // 0)) < $max ? 1 : 0;
+}
+
+# What a probe says about a node, if anything current. Unknown is a valid answer and means
+# "inflight decides" -- which is the entire behaviour of a deployment that configures no probes.
+sub _capacity_allows {
+  my ($self, $node_id) = @_;
+  my $reading = $self->capacity_reading($node_id) or return 1;
+
+  # A provider that told us to come back later is not busy in the inflight sense: no request of
+  # ours is outstanding, and admitting one would just buy another 429.
+  return 0 if $reading->{retry_after} && time < $reading->{retry_after};
+
+  my $limit = 0 + ($reading->{limit} // 0);
+  return 1 if $limit <= 0;
+  return (0 + ($reading->{used} // 0)) < $limit ? 1 : 0;
 }
 
 sub _node_has_tags {
@@ -1233,6 +1289,182 @@ sub route_state {
   };
 }
 
+=method set_capacity_reading
+
+  $skeid->set_capacity_reading('gpu-1', used => 6, limit => 8, source => 'prometheus');
+  $skeid->set_capacity_reading('groq-1', retry_after_ms => 2000, source => 'ratelimit');
+
+Records what a probe found. One shape for every probe, so admission never learns where a
+number came from (ADR 0009):
+
+=over 4
+
+=item * C<used> / C<limit> — occupancy. C<limit> 0 or absent means the probe measured
+something it cannot turn into a ceiling, so it does not constrain admission.
+
+=item * C<retry_after_ms> — do not send anything here until it elapses. What a C<429> means.
+
+=item * C<source> — which probe, for reports. Never consulted by admission.
+
+=back
+
+A reading only ever narrows what C<max_conns> already allows, and expires after
+L</capacity_max_age_ms>. Probing is a background activity: calling this from a request handler
+is a bug unless the reading was a by-product of a response already in hand.
+
+=cut
+
+sub set_capacity_reading {
+  my ($self, $node_id, %reading) = @_;
+  croak 'node_id required' unless defined $node_id && length $node_id;
+
+  my $now = time;
+  my $entry = {
+    source => ((defined($reading{source}) && length($reading{source})) ? "$reading{source}" : 'custom'),
+    used   => (defined $reading{used}  ? 0 + $reading{used}  : undef),
+    limit  => (defined $reading{limit} ? 0 + $reading{limit} : undef),
+    at     => (defined $reading{at}    ? 0 + $reading{at}    : $now),
+  };
+
+  if (defined $reading{retry_after_ms} && $reading{retry_after_ms} > 0) {
+    $entry->{retry_after} = $now + ($reading{retry_after_ms} / 1000);
+  } elsif (defined $reading{retry_after}) {
+    $entry->{retry_after} = 0 + $reading{retry_after};
+  }
+
+  $self->_capacity->{$node_id} = $entry;
+  return $entry;
+}
+
+=method capacity_reading
+
+  my $reading = $skeid->capacity_reading('gpu-1');   # or nothing
+
+The node's current capacity reading, or nothing when no probe has reported or the last report
+has aged out. A backoff outlives the age limit: a provider that said "not for another 30
+seconds" told us something that is still true.
+
+=cut
+
+sub capacity_reading {
+  my ($self, $node_id) = @_;
+  return unless defined($node_id) && length($node_id);
+  my $entry = $self->_capacity->{$node_id} or return;
+
+  my $backoff_pending = ($entry->{retry_after} && time < $entry->{retry_after}) ? 1 : 0;
+  my $max_age = 0 + ($self->capacity_max_age_ms // 0);
+  if (!$backoff_pending && $max_age > 0 && (time - ($entry->{at} // 0)) > ($max_age / 1000)) {
+    delete $self->_capacity->{$node_id};
+    return;
+  }
+  return $entry;
+}
+
+=method forget_capacity
+
+  $skeid->forget_capacity('gpu-1');   # or all of them with no argument
+
+Drops probe readings, so C<inflight> decides again. What a node removal calls, and what a probe
+calls when it can no longer reach its source — reporting nothing beats reporting last hour.
+
+=cut
+
+sub forget_capacity {
+  my ($self, $node_id) = @_;
+  if (defined($node_id) && length($node_id)) {
+    delete $self->_capacity->{$node_id};
+    return 1;
+  }
+  %{$self->_capacity} = ();
+  return 1;
+}
+
+# Rate-limit headers, in the spellings the big providers actually use. Ordered: the first one
+# present wins, so a provider sending several does not get read twice.
+my @RATELIMIT_REMAINING = qw(
+  x-ratelimit-remaining-requests
+  anthropic-ratelimit-requests-remaining
+  x-ratelimit-remaining
+  ratelimit-remaining
+);
+my @RATELIMIT_LIMIT = qw(
+  x-ratelimit-limit-requests
+  anthropic-ratelimit-requests-limit
+  x-ratelimit-limit
+  ratelimit-limit
+);
+
+=method capacity_header_names
+
+The response headers worth looking at, so a caller on the request path can pull those few by
+name instead of walking every header of every response.
+
+=cut
+
+sub capacity_header_names {
+  return (@RATELIMIT_REMAINING, @RATELIMIT_LIMIT, 'retry-after');
+}
+
+=method observe_response_headers
+
+  $skeid->observe_response_headers('groq-1', \%headers, status => 429);
+
+The zero-cost probe: commercial providers do not publish queue depth, but they do put their
+rate-limit state on every response Skeid already receives. Reading it costs no extra request
+(ADR 0009).
+
+C<Retry-After> on a C<429> becomes a backoff. It deliberately does B<not> touch C<healthy>:
+rate-limited is busy, not broken, and nothing would ever flip that back.
+
+Returns the reading it recorded, or nothing when the response said nothing useful.
+
+=cut
+
+sub observe_response_headers {
+  my ($self, $node_id, $headers, %args) = @_;
+  return unless defined($node_id) && length($node_id);
+  return unless ref($headers) eq 'HASH';
+
+  # Case-insensitive: header casing is not something a provider promises.
+  my %h = map { lc($_) => $headers->{$_} } keys %$headers;
+  my %reading = (source => 'ratelimit');
+  my $useful = 0;
+
+  my ($remaining) = grep { defined } map { $h{$_} } @RATELIMIT_REMAINING;
+  my ($limit)     = grep { defined } map { $h{$_} } @RATELIMIT_LIMIT;
+
+  if (defined($remaining) && $remaining =~ /^\s*(\d+)/) {
+    my $left = 0 + $1;
+    # The probe contract counts what is used, not what is left; a limit we were not told is
+    # reconstructed as "one more than we have", which is enough to stop admitting at zero.
+    my $total = (defined($limit) && $limit =~ /^\s*(\d+)/) ? 0 + $1 : $left + 1;
+    $reading{limit} = $total;
+    $reading{used}  = $total - $left;
+    $reading{used}  = $total if $reading{used} > $total;
+    $useful = 1;
+  }
+
+  my $retry = $h{'retry-after'};
+  my $status = 0 + ($args{status} // 0);
+  if ($status == 429 || defined $retry) {
+    my $secs;
+    if (defined($retry) && $retry =~ /^\s*([\d.]+)\s*$/) {
+      $secs = 0 + $1;
+    } elsif ($status == 429) {
+      # A 429 with no Retry-After still means "not now". One second is short enough not to
+      # strand capacity and long enough to stop hammering.
+      $secs = 1;
+    }
+    if (defined $secs && $secs > 0) {
+      $reading{retry_after_ms} = $secs * 1000;
+      $useful = 1;
+    }
+  }
+
+  return unless $useful;
+  return $self->set_capacity_reading($node_id, %reading);
+}
+
 sub start_request {
   my ($self, $node_id) = @_;
   croak 'node_id required' unless defined $node_id && length $node_id;
@@ -1270,6 +1502,7 @@ sub node_metrics {
   my ($self, $node_id) = @_;
   if (defined $node_id && length $node_id) {
     my $s = $self->_stats->{$node_id} || {};
+    my $reading = $self->capacity_reading($node_id);
     return {
       node_id => $node_id,
       inflight => 0 + ($self->_inflight->{$node_id} // 0),
@@ -1277,6 +1510,9 @@ sub node_metrics {
       ok => 0 + ($s->{ok} // 0),
       error => 0 + ($s->{error} // 0),
       duration_ms_total => 0 + ($s->{duration_ms_total} // 0),
+      # Present only when a probe has something current to say. A report must not present a
+      # measured node and an inferred one as equally known (ADR 0009).
+      ($reading ? (capacity => { %$reading }) : ()),
     };
   }
 
@@ -1363,6 +1599,22 @@ sub call_function {
       tags   => $args->{tags},
       deny_tags => $args->{deny_tags},
     );
+  }
+  if ($name eq 'capacity.set') {
+    my $id = $args->{id} // croak 'capacity.set: id required';
+    return { capacity => $self->set_capacity_reading($id, %$args) };
+  }
+  if ($name eq 'capacity.get') {
+    my $id = $args->{id} // croak 'capacity.get: id required';
+    return { capacity => $self->capacity_reading($id) };
+  }
+  if ($name eq 'capacity.observe') {
+    my $id = $args->{id} // croak 'capacity.observe: id required';
+    return { capacity => $self->observe_response_headers(
+      $id, ($args->{headers} || {}), status => $args->{status}) };
+  }
+  if ($name eq 'capacity.forget') {
+    return { ok => $self->forget_capacity($args->{id}) ? 1 : 0 };
   }
   if ($name eq 'request.start') {
     my $id = $args->{id} // croak 'request.start: id required';
