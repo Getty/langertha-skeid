@@ -1,0 +1,28 @@
+---
+blocked: needs a real AKI.io key to read actual response headers
+class: standard
+created: 2026-08-08T14:24:59Z
+id: 16
+priority: low
+status: backlog
+tags:
+- research
+- capacity
+title: Find out what AKI.io reports in its response headers
+updated: 2026-08-09T01:33:40Z
+---
+
+Their public docs (aki.io/docs) document per-key monthly euro budgets and per-key endpoint restrictions, but say nothing about rate-limit headers.
+
+Empirical check: one request with a real key, dump every response header. If they follow the OpenAI x-ratelimit-* convention, the passive ratelimit_headers probe from ADR 0009 works for them unchanged. If not, it is a custom probe.
+
+Worth doing for every provider actually in use -- the header names are not standardised.
+Researched, partly answered, and it produced a real fix.
+
+ANSWERED for the mainstream providers: OpenAI, Groq, the Meta Llama API and the OpenAI-compatible crowd all send x-ratelimit-{limit,remaining}-{requests,tokens} plus x-ratelimit-reset-*; Anthropic uses anthropic-ratelimit-{requests,tokens,input-tokens}-{limit,remaining}; the IETF draft spelling (ratelimit-limit / ratelimit-remaining, no x-) shows up on smaller gateways. All of those are now in the probe.
+
+THE FIX THIS TURNED UP: the ratelimit probe was only reading the REQUEST quota. For an LLM API that is the wrong one to watch -- providers meter tokens as well, and the token budget is normally what runs out first. A node with 990 of 1000 requests left and zero tokens left was still being admitted and answered 429. Both quotas are read now, tightest wins, compared as a fraction since the units differ. Commit 648e14f, tests in t/28.
+
+NOT ANSWERED for AKI.io itself. It is not an OpenAI-compatible endpoint: Langertha::Engine::AKI posts to https://aki.io/api/call/<model> with the key as a query parameter, and there is no public documentation of its response headers. This needs one real request with a real key, not a search engine -- run it and read the headers, then either add the spellings to \@RATELIMIT_QUOTAS or write a custom probe against its /api/endpoints route, which may expose quota state directly.
+
+Leaving open for that. Low cost once someone has a key.
