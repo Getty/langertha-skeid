@@ -1,0 +1,46 @@
+---
+class: standard
+created: 2026-08-09T04:08:57Z
+id: 18
+priority: medium
+status: backlog
+tags:
+- registry
+- peer-discovery
+- admission
+- architecture
+title: 'Optional Skeid-to-Skeid registry: hot node map without scraping metrics'
+updated: 2026-08-09T04:08:57Z
+---
+
+Goal: a Skeid in front of other Skeids knows which nodes downstream are hot without scraping their /metrics endpoint. Toggleable, not the default.
+
+Why this would help:
+- Behind a VIP/load-balancer in front of N Skeid instances, the fronting Skeid currently has to choose a downstream without knowing which one is hot. Counting its own inflight per downstream undersells load the moment any other path sends traffic there.
+- CapacityProbe::Prometheus works (ADR 0009) when the node speaks Prometheus, but the backends ARE Skeid -- they do not. Asking a Skeid to publish a Prometheus metric just to feed the fronting tier is wrong: Skeid already knows its own per-node inflight and per-node error rate, in memory, in real time.
+- A registry means a Skeid downstream publishes a small structured snapshot (per-node inflight, in-flight errors, last-failure-stamp, q-size if any) on an event the upstream subscribes to. The fronting tier consumes it the same way it consumes a probe today.
+
+Design constraints (from CONTEXT, ADR 0003, ADR 0009):
+- Optional. Default config MUST still work without any registry -- admission falls back to CapacityProbe or inflight as today. Set registry.enabled: true explicitly.
+- Snapshots are signed but never carry keys, never carry customer IDs, never carry usage payloads. The key broker stays untouched; this is operational telemetry only.
+- The shared event is the source of truth -- never count alongside it. Either you trust the snapshot or you do not. Mixing with inflight is the over-admission pattern this whole feature exists to fix.
+- Stale snapshot = unknown = forget_capacity, exactly the Prometheus probe rule. A snapshot that goes silent degrades to inflight, not to whatever it said 30s ago.
+- Failure mode: a registry that drops messages degrades gracefully. A registry that lies (probes say full, snapshot says empty) loses to the tighter reading, never the looser.
+- Backpressure: a downstream that cannot publish should not be penalised -- it is busy, not broken (ADR 0009: busy is Admission, Health is operator-only).
+
+Scope to decide before code:
+- Transport: HTTP POST to a registered webhook, or a NATS/Redis pubsub dependency, or a new Skeid protocol on /skeid/registry. Each has a different operational story. Default if absent: the same transport OpenBao uses (out of scope, a sibling repo) so there is one secret/credential story.
+- Identity: each peer signed by the same OpenBao AppRole (skeid-frontend) the downstream uses for admin routes. Trust is already there.
+- Vocabulary: this is a new sub-class of CapacityProbe -- CapacityProbe::Registry -- or a separate dispatch? Lean: a probe, because admission consumes it the same way and the failure rules are identical (forget on stale, never count alongside).
+
+NOT in scope:
+- Cross-region failover. The frontend knows one tier of Skeids.
+- Multi-master / split-brain. One registry source per frontend.
+- Anything that needs a key on disk. This is the same ADR 0003 boundary.
+
+Done-when:
+- registry.enabled: true in YAML triggers a Skeid admin route on the downstream publishing snapshots.
+- A fronting Skeid with the same block turned on builds a CapacityProbe::Registry per peer and the existing admission path consumes it.
+- A test with two in-process Skeids shows the fronting tier routes away from a peer whose downstream is hot.
+- An ADR (0011) codifies the snapshot schema, the staleness rules, and the failure-mode choices.
+- README + CONTEXT.md describe the option and the operator contract.
