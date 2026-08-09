@@ -1,0 +1,37 @@
+---
+class: standard
+completed: 2026-08-09
+created: 2026-08-08T04:28:06Z
+id: 7
+priority: high
+status: done
+tags:
+- performance
+- deployment
+title: bin/skeid serve runs a single-worker Mojo::Server::Daemon
+updated: 2026-08-09T01:44:08Z
+---
+
+serve builds Mojo::Server::Daemon, i.e. one process, one IO loop, one CPU. Fine for a stall-free async proxy at moderate load, but there is no way to run workers without writing your own launcher.
+
+Consider a --workers flag selecting Mojo::Server::Prefork. Decide with numbers from bench/ (ADR 0007): measure single-worker throughput and TTFT at rising concurrency first, and only add the flag if the ceiling is real.
+
+Note inflight/max_conns admission is per-process state — with N workers each worker admits up to max_conns, so a prefork mode changes the meaning of max_conns. That is the actual design question, not the flag.
+MEASURED (docs/bench/2026-08-08-baseline.md): prefork with 4 workers reaches 177.7 req/s at c=16 vs 128.1 single-process, TTFT p50 87.2ms vs 120.4ms -- overhead falls from +37ms to +3.9ms. At c=32 it scales to 350.2 req/s. Decomposition: a minimal Mojolicious pass-through costs 6.57ms/req, Skeid 7.81ms, so only 1.2ms is Skeid's own logic. Micro-optimisation cannot pay; workers can.
+
+Blocker is semantics, not the flag: inflight/max_conns are per-process, so N workers admit N*max_conns to a node that can serve one number. Decide that first (divide max_conns by worker count? shared inflight state? per-worker share negotiated at startup?) -- ADR-sized.
+DONE. serve --workers N runs Mojo::Server::Prefork; default 1, so nothing changes until asked for.
+
+THE BLOCKER IS DECIDED, in ADR 0010: each worker takes max_conns/N (worker_max_conns, floor 1). Partitioning needs no coordination and no new failure mode, and it errs the right way -- under-admitting wastes some capacity, over-admitting a GPU is a timeout for every request on it. Shared state in Redis would buy accuracy for a round-trip on the admission path, which ADR 0009 already declined.
+
+A max_conns below the worker count cannot be honoured, so worker_share_warnings names the node and what it will actually see, printed at startup. Silence there would mean ignoring a number the operator wrote.
+
+A node with a capacity probe (karr #13) is barely affected: every worker reads the same truth from the node including the other workers' traffic. Partitioned max_conns stays the per-worker guardrail, and a probe may still only narrow it.
+
+FOUND WHILE BUILDING IT, and it would have been easy to ship without noticing: everything on a timer runs once per worker. Four workers on a 2s probe interval poll a metrics endpoint every 500ms -- the probe becomes the load it measures. Probe intervals are now multiplied by the worker count (poll_interval_seconds). Vault renewal is deliberately NOT scaled: each process holds its own token and must keep its own alive.
+
+MEASURED with the flag as shipped (docs/bench/2026-08-09-prefork-workers.md): 170.7 req/s at 4 workers vs 128.1 single, TTFT p50 88ms vs 120ms, 334.5 req/s at c=32 with TTFT still 90ms -- it stops growing with concurrency, which is the real result. Within a few percent of the hand-rolled prefork numbers from 08-08. The run does NOT exercise partitioning (bench node has max_conns 256); t/30-worker-share.t does, 26 assertions, sabotage-verified (disabling the split fails 7).
+
+Consequence recorded in the ADR: the usage store becomes multi-writer under prefork. jsonlog dir mode and postgresql fine, SQLite not recommended above one worker. Admin API writes reach one worker only, which makes the config file the only workable source of truth.
+
+karr #14 (static partitioning) is now implemented for the worker case; what remains there is the multi-frontend case without a probe.
