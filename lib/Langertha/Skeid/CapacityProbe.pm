@@ -99,6 +99,26 @@ sub poll {
   croak ref($self) . " must implement poll()";
 }
 
+=method poll_interval_seconds
+
+How often this process actually polls: L</interval_ms> multiplied by the worker count.
+
+Every worker runs its own copy of the timer, so without the multiplier four workers on a 2s
+interval would hit the node's metrics endpoint every 500ms — the probe becoming the load it
+was meant to measure. What the operator configured is the rate the *node* sees from the
+process group (ADR 0010).
+
+=cut
+
+sub poll_interval_seconds {
+  my ($self) = @_;
+  my $workers = 0 + ($self->skeid->worker_count // 1);
+  $workers = 1 if $workers < 1;
+
+  my $every = (($self->interval_ms || 2000) * $workers) / 1000;
+  return $every < 0.1 ? 0.1 : $every;
+}
+
 =method start
 
   $probe->start;
@@ -113,8 +133,7 @@ sub start {
   return $self->_timer if $self->_timer;
   require Mojo::IOLoop;
 
-  my $every = ($self->interval_ms || 2000) / 1000;
-  $every = 0.1 if $every < 0.1;
+  my $every = $self->poll_interval_seconds;
 
   # Weak, or the timer's closure keeps the probe (and the whole control plane) alive forever.
   my $weak = $self;

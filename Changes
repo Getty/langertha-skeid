@@ -85,6 +85,21 @@ Revision history for Langertha-Skeid
     - A capacity reading may only narrow what max_conns allows, never widen it,
       so a stale or broken probe cannot become an overload -- and for a rented
       node max_conns keeps its meaning as a spend limit
+    - skeid serve --workers N runs Mojo::Server::Prefork. Measured at 170.7
+      req/s with 4 workers against 128.1 with one, and TTFT p50 falls from
+      120ms to 88ms and stops growing with concurrency (334 req/s at c=32).
+      Only ~1.2ms per request is Skeid's own logic, so more loops was the only
+      lever left
+    - max_conns is divided among the workers (ADR 0010). inflight is
+      per-process, so without this N workers each admit up to max_conns and a
+      node configured for 8 sees 32. A max_conns below the worker count cannot
+      be honoured and now warns at startup instead of quietly over-admitting
+    - Capacity probe intervals are multiplied by the worker count, so the rate
+      a node's metrics endpoint sees from the process group stays what was
+      configured rather than N times it
+    - Note for prefork deployments: the usage store becomes a multi-writer
+      store. jsonlog in directory mode and postgresql are fine; SQLite is not
+      recommended above one worker
     - The ratelimit probe reads request and token quotas separately and lets
       the tightest one decide. For an LLM API the token budget is usually what
       runs out first, and a node with requests to spare and no tokens left

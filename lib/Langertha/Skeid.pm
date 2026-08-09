@@ -311,6 +311,23 @@ has capacity_max_age_ms => (
   },
 );
 
+=attr worker_count
+
+How many worker processes share this configuration (default 1).
+
+C<inflight> and C<max_conns> are per-process, so N workers would each admit up to C<max_conns>
+to a node that can only serve one number — C<max_conns: 8> across 4 workers would permit 32,
+silently. Setting this makes each worker take its share instead (ADR 0010). Anything on a timer
+is spread the same way, so the process group's aggregate poll rate stays what was configured.
+
+=cut
+
+has worker_count => (
+  is      => 'rw',
+  default => sub { 1 },
+  trigger => sub { $_[0]->_bump_inventory },
+);
+
 has _stats => (
   is      => 'rw',
   default => sub { {} },
@@ -856,9 +873,66 @@ sub _node_can_take {
 
 sub _inflight_allows {
   my ($self, $node) = @_;
-  my $max = 0 + ($node->{max_conns} // 0);
+  my $max = $self->worker_max_conns($node);
   return 1 if $max <= 0;
   return (0 + ($self->_inflight->{$node->{id} // ''} // 0)) < $max ? 1 : 0;
+}
+
+=method worker_max_conns
+
+  my $share = $skeid->worker_max_conns($node);
+
+This process's share of a node's C<max_conns> (ADR 0010). With one worker that is the
+configured value; with N it is the configured value divided by N, so the group as a whole never
+admits more than was asked for.
+
+Never less than 1 when a limit is set: a worker that may admit nothing is a worker that does
+nothing. That means C<max_conns> below the worker count cannot be honoured, and
+L</worker_share_warnings> is what says so out loud.
+
+=cut
+
+sub worker_max_conns {
+  my ($self, $node) = @_;
+  my $max = 0 + ((ref($node) eq 'HASH' ? $node->{max_conns} : $node) // 0);
+  return 0 if $max <= 0;
+
+  my $workers = 0 + ($self->worker_count // 1);
+  return $max if $workers <= 1;
+
+  my $share = int($max / $workers);
+  return $share > 0 ? $share : 1;
+}
+
+=method worker_share_warnings
+
+  warn $_ for @{ $skeid->worker_share_warnings };
+
+The nodes whose C<max_conns> cannot be divided among the workers without exceeding it. Returned
+rather than warned so the caller decides where they go; C<bin/skeid> prints them at startup.
+
+Silence here would be the bad kind: the operator wrote a number, and the process group is about
+to ignore it.
+
+=cut
+
+sub worker_share_warnings {
+  my ($self) = @_;
+  my $workers = 0 + ($self->worker_count // 1);
+  return [] if $workers <= 1;
+
+  my @warnings;
+  for my $node (@{$self->nodes}) {
+    my $max = 0 + ($node->{max_conns} // 0);
+    next if $max <= 0;
+    next if $max >= $workers;
+    push @warnings, sprintf(
+      "node '%s': max_conns %d cannot be split across %d workers; each will admit 1, "
+      . "so the node may see up to %d concurrent requests. Use fewer workers or raise max_conns.",
+      ($node->{id} // '?'), $max, $workers, $workers,
+    );
+  }
+  return \@warnings;
 }
 
 # What a probe says about a node, if anything current. Unknown is a valid answer and means

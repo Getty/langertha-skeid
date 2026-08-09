@@ -7,6 +7,7 @@ use Getopt::Long qw(GetOptions GetOptionsFromArray);
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 use Mojo::Server::Daemon;
+use Mojo::Server::Prefork;
 use JSON::MaybeXS;
 use Langertha::Skeid;
 use Langertha::Skeid::Proxy;
@@ -29,27 +30,49 @@ if ($cmd ne 'serve') {
 my $listen = '127.0.0.1:8090';
 my $config = 'skeid.yaml';
 my $admin_api_key = '';
+my $workers = 1;
 
 GetOptions(
   'listen|l=s' => \$listen,
   'config|c=s' => \$config,
   'admin-api-key=s' => \$admin_api_key,
+  'workers|w=i' => \$workers,
 ) or die _usage_text();
+
+$workers = 1 if !$workers || $workers < 1;
 
 my %opts;
 $opts{config_file} = $config if defined($config) && -f $config;
 $opts{admin_api_key} = $admin_api_key if defined($admin_api_key) && length($admin_api_key);
+# Set before build_app so the first probe interval and the first admission decision already
+# know how many processes are sharing the node (ADR 0010).
+$opts{worker_count} = $workers;
 
 my $app = Langertha::Skeid::Proxy->build_app(%opts);
 
 print "Starting Skeid proxy on http://$listen\n";
 print "Config: ", ($opts{config_file} // '(none)'), "\n";
+print "Workers: $workers\n" if $workers > 1;
 
-my $daemon = Mojo::Server::Daemon->new(
-  app    => $app,
-  listen => ["http://$listen"],
-);
-$daemon->run;
+# An operator who wrote max_conns meant it for the node, not for each process. When the split
+# cannot honour that, say so -- silently admitting more than was configured is how a GPU ends
+# up queueing.
+warn "WARNING: $_\n" for @{ $app->skeid->worker_share_warnings };
+
+if ($workers > 1) {
+  my $prefork = Mojo::Server::Prefork->new(
+    app     => $app,
+    listen  => ["http://$listen"],
+    workers => $workers,
+  );
+  $prefork->run;
+} else {
+  my $daemon = Mojo::Server::Daemon->new(
+    app    => $app,
+    listen => ["http://$listen"],
+  );
+  $daemon->run;
+}
 
 sub _run_usage {
   my (@argv) = @_;
@@ -205,6 +228,7 @@ sub _usage_text {
   return <<'USAGE';
 Usage:
   skeid serve [--listen host:port] [--config skeid.yaml] [--admin-api-key KEY]
+              [--workers N]    N > 1 runs prefork; each worker takes max_conns/N
   skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
               [--backend sqlite|postgresql] [--db /path/to.sqlite]
               [--dsn dbi:Pg:...] [--db-user USER] [--db-pass PASS|--db-pass-env ENV]

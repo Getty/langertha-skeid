@@ -77,6 +77,11 @@ Per-node count of started-but-unfinished requests, raised by `request.start` and
 undercount the moment anything else shares it.
 _Avoid_: load, queue depth, connections.
 
+**Worker share**:
+This process's slice of a node's `max_conns` under `--workers N` — the configured value divided
+by N. `max_conns` names what the *node* may take; the share is what one process may send.
+_Avoid_: quota, limit, per-worker max_conns.
+
 **Capacity probe**:
 How a node's real occupancy is found: `inflight` (default), `ratelimit` (read off responses
 already in hand), `prometheus` (polled from vLLM/SGLang metrics), or `custom`. Never runs on

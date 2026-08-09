@@ -35,6 +35,11 @@ sub build_app {
   if (exists $opts{admin_api_key}) {
     $skeid->admin_api_key(defined($opts{admin_api_key}) ? $opts{admin_api_key} : '');
   }
+  # How many processes share these nodes. Set before anything reads max_conns or starts a
+  # timer, since both are divided by it (ADR 0010).
+  if (defined $opts{worker_count} && $opts{worker_count} > 0) {
+    $skeid->worker_count(0 + $opts{worker_count});
+  }
 
   # Renew the vault token on a timer rather than when a request discovers it expired. A request
   # that has to renew first pays the round-trip in its own latency, and it is the request least

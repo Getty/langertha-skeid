@@ -148,6 +148,25 @@ between the two, another request may have taken the last slot.
 `request.finish`, on every path including errors and upstream timeouts. A missed finish leaks
 a slot until restart.
 
+## Workers
+
+`serve --workers N` runs `Mojo::Server::Prefork`; default 1, so nothing changes until asked
+for. Measured: 170.7 req/s at 4 workers vs 128.1 at one, TTFT p50 88ms vs 120ms
+(`docs/bench/2026-08-09-prefork-workers.md`).
+
+**`inflight` and `max_conns` are per-process**, so each worker takes `max_conns / N`
+(`worker_max_conns`, floor 1). Without that, `max_conns: 8` across 4 workers permits 32 —
+silently. A `max_conns` below the worker count cannot be honoured; `worker_share_warnings`
+says so at startup rather than pretending.
+
+Anything on a timer runs **once per worker**. Probe intervals are multiplied by the worker
+count (`poll_interval_seconds`) so the node sees the configured rate from the group. Vault
+renewal is deliberately *not* scaled — each process holds its own token and must keep it alive.
+
+Under prefork the usage store is multi-writer: `jsonlog` (dir mode) and `postgresql` are fine,
+**SQLite is not**. Admin API writes reach one worker only, which makes the config file the
+only workable source of truth (ADR 0010).
+
 ## Capacity probes
 
 `inflight` counts what *this process* sent. Exact for one Skeid in front of one node, an
