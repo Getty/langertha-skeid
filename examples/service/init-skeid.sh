@@ -3,15 +3,17 @@ set -e
 
 echo "=== Skeid Init Script ==="
 
+OPENBAO_ADDR=${OPENBAO_ADDR:-http://openbao:8200}
+
 # Wait for OpenBao to be ready
-echo "Waiting for OpenBao..."
+echo "Waiting for OpenBao at $OPENBAO_ADDR..."
 until curl -sf "${OPENBAO_ADDR}/v1/sys/health" > /dev/null 2>&1; do
   sleep 2
 done
 echo "OpenBao is ready"
 
 # Use root token for setup
-export BAO_TOKEN="${OPENBAO_ROOT_TOKEN:-skeid-root-token}"
+export BAO_TOKEN="${OPENBAO_ROOT_TOKEN}"
 
 echo "=== Setting up AppRole for Skeid ==="
 
@@ -34,17 +36,17 @@ curl -sf -X POST \
     "token_policies": ["skeid-keys"]
   }' || true
 
-# Get Role ID
+# Get Role ID - use perl for JSON parsing
 ROLE_ID=$(curl -sf -X GET \
   -H "X-Vault-Token: $BAO_TOKEN" \
   "${OPENBAO_ADDR}/v1/auth/approle/role/${ROLE_NAME}/role-id" \
-  | jq -r '.data.role_id')
+  | perl -MMojo::JSON -le 'my $j = Mojo::JSON->decode(<STDIN>); print $j->{data}{role_id} // "";')
 
 # Generate new Secret ID (this is the one-time use credential)
 SECRET_ID=$(curl -sf -X POST \
   -H "X-Vault-Token: $BAO_TOKEN" \
   "${OPENBAO_ADDR}/v1/auth/approle/role/${ROLE_NAME}/secret-id" \
-  | jq -r '.data.secret_id')
+  | perl -MMojo::JSON -le 'my $j = Mojo::JSON->decode(<STDIN>); print $j->{data}{secret_id} // "";')
 
 echo "Role ID: $ROLE_ID"
 echo "Secret ID: $SECRET_ID (save this - only shown once!)"
@@ -52,6 +54,11 @@ echo ""
 echo "Add these to your docker-compose.yml or .env:"
 echo "OPENBAO_ROLE_ID=$ROLE_ID"
 echo "OPENBAO_SECRET_ID=$SECRET_ID"
+
+# Save credentials to a file for docker to pick up
+mkdir -p /run/secrets
+echo "$ROLE_ID" > /run/secrets/OPENBAO_ROLE_ID
+echo "$SECRET_ID" > /run/secrets/OPENBAO_SECRET_ID
 
 # Create policy for Skeid to read keys
 cat > /tmp/skeid-policy.hcl << 'POLICY'
@@ -64,7 +71,7 @@ curl -sf -X PUT \
   -H "X-Vault-Token: $BAO_TOKEN" \
   -H "Content-Type: application/json" \
   "${OPENBAO_ADDR}/v1/sys/policies/acl/skeid-keys" \
-  -d "{\"policy\": $(cat /tmp/skeid-policy.hcl | jq -Rs .)}" || true
+  -d "{\"policy\": $(cat /tmp/skeid-policy.hcl | perl -pe 's/"/\\"/g; s/\n/\\n/g; s/^/"/; s/$/"/'))}" || true
 
 echo "=== Storing LLM Provider Keys ==="
 
@@ -91,12 +98,12 @@ fi
 echo "=== Creating Customer Key Entries ==="
 
 # Create some example customer keys
-for customer in alice bob charlie; do
+for customer in alice bob charlie testuser123; do
   curl -sf -X POST \
     -H "X-Vault-Token: $BAO_TOKEN" \
     -H "Content-Type: application/json" \
     "${OPENBAO_ADDR}/v1/secret/data/skeid/customer/${customer}" \
-    -d "{\"data\": {\"api_key\": \"sk-${customer}-$(date +%s)\", \"active\": true}}"
+    -d "{\"data\": {\"api_key\": \"sk-${customer}-secret-key\", \"active\": true}}"
   echo "Created key for $customer"
 done
 
@@ -154,4 +161,8 @@ echo "Next steps:"
 echo "1. Copy the OPENBAO_ROLE_ID and OPENBAO_SECRET_ID from above"
 echo "2. Add them to your docker-compose.yml or .env file"
 echo "3. Restart skeid with the AppRole credentials"
-echo "4. Test with: curl -H 'x-skeid-key-id: alice' http://localhost:8090/v1/chat/completions ..."
+echo "4. Test with: curl -H 'Authorization: Bearer sk-alice-secret-key' http://localhost:8090/v1/chat/completions ..."
+echo ""
+echo "The key id a customer routes and bills under is derived from their key:"
+echo "  skeid keyid sk-alice-secret-key"
+echo "That is the name a policy entry in skeid.yaml uses -- the config never holds the key itself."

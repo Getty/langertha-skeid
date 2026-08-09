@@ -5,14 +5,13 @@ use strict;
 use warnings;
 use Mojolicious;
 use Mojo::IOLoop;
-use Time::HiRes qw(time usleep);
-use POSIX qw(strftime);
-use JSON::MaybeXS qw(encode_json decode_json);
-use Digest::SHA qw(sha1_hex);
+use Time::HiRes qw(time);
+use JSON::MaybeXS qw(decode_json);
 use Langertha::Skeid;
-use Langertha::Tool;
+use Langertha::Skeid::Protocol;
+use Langertha::Skeid::Protocol::Anthropic;
+use Langertha::Skeid::Protocol::Ollama;
 use Langertha::ToolCall;
-use Langertha::ToolChoice;
 
 sub build_app {
   my ($class, %opts) = @_;
@@ -36,10 +35,20 @@ sub build_app {
     $skeid->admin_api_key(defined($opts{admin_api_key}) ? $opts{admin_api_key} : '');
   }
 
+
   my $app = Mojolicious->new;
   $app->secrets(['skeid-proxy']);
   $app->ua->connect_timeout(10);
   $app->ua->request_timeout(300);
+  # Mojo::UserAgent pools 5 upstream connections by default. A proxy serving more concurrent
+  # requests than that reconnects for the surplus on every request, which shows up as latency
+  # that grows with concurrency for no visible reason. Sized for the concurrency a single
+  # Skeid process can actually sustain, not for the number of nodes.
+  $app->ua->max_connections(
+    (defined($ENV{SKEID_UPSTREAM_POOL}) && $ENV{SKEID_UPSTREAM_POOL} =~ /^\d+$/)
+      ? 0 + $ENV{SKEID_UPSTREAM_POOL}
+      : 100
+  );
   $app->helper(skeid => sub { $skeid });
 
   my $r = $app->routes;
@@ -92,22 +101,7 @@ sub build_app {
 
   $r->get('/api/tags' => sub {
     my ($c) = @_;
-    my @models = map {
-      +{
-        name       => ($_->{model} // $_->{id}),
-        model      => ($_->{model} // $_->{id}),
-        modified_at => _iso8601_now(),
-        size       => 0,
-        digest     => '',
-        details    => {
-          family             => ($_->{engine} || 'openaibase'),
-          parameter_size     => 'unknown',
-          quantization_level => 'unknown',
-        },
-      }
-    } @{$c->skeid->list_nodes};
-
-    $c->render(json => { models => \@models });
+    $c->render(json => Langertha::Skeid::Protocol::Ollama->tags_from_nodes($c->skeid->list_nodes));
   });
 
   $r->get('/api/ps' => sub {
@@ -208,9 +202,15 @@ sub _handle_openai_chat {
 
   my $model = $body->{model} // '';
   my $api_key_id = _request_api_key_id($c);
-  _begin_route_async($c, $model, sub {
-    my ($route, $node_id, $started) = @_;
+  _begin_route_async($c, $model, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
     return unless $route;
+
+    # The alias layer means the model the client asked for and the model the node is asked for
+    # are two different strings (ADR 0008). The upstream body carries the served model; the
+    # usage event carries both, or cost attribution silently loses which product was used.
+    my $served_model = _served_model($tier, $model);
+    $body->{model} = $served_model if ref($body) eq 'HASH';
 
     my $url = _endpoint_url_for_node($route->{url}, '/chat/completions');
     my $meta = {
@@ -219,8 +219,9 @@ sub _handle_openai_chat {
       api_key_id => $api_key_id,
       provider   => 'skeid',
       engine     => ($route->{engine} // 'openaibase'),
-      model      => $model,
-      route_url  => ($route->{url} // ''),
+      model            => $served_model,
+      requested_model  => $model,
+      route_url        => ($route->{url} // ''),
     };
 
     if ($body->{stream}) {
@@ -247,9 +248,15 @@ sub _handle_openai_embeddings {
 
   my $model = $body->{model} // '';
   my $api_key_id = _request_api_key_id($c);
-  _begin_route_async($c, $model, sub {
-    my ($route, $node_id, $started) = @_;
+  _begin_route_async($c, $model, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
     return unless $route;
+
+    # The alias layer means the model the client asked for and the model the node is asked for
+    # are two different strings (ADR 0008). The upstream body carries the served model; the
+    # usage event carries both, or cost attribution silently loses which product was used.
+    my $served_model = _served_model($tier, $model);
+    $body->{model} = $served_model if ref($body) eq 'HASH';
 
     my $url = _endpoint_url_for_node($route->{url}, '/embeddings');
     my $meta = {
@@ -258,8 +265,9 @@ sub _handle_openai_embeddings {
       api_key_id => $api_key_id,
       provider   => 'skeid',
       engine     => ($route->{engine} // 'openaibase'),
-      model      => $model,
-      route_url  => ($route->{url} // ''),
+      model            => $served_model,
+      requested_model  => $model,
+      route_url        => ($route->{url} // ''),
     };
     $c->render_later;
     _proxy_openai_json_async($c, $url, $body, $node_id, $started, $meta, sub {
@@ -288,13 +296,19 @@ sub _handle_anthropic_messages {
     return;
   }
 
-  my $openai_body = _anthropic_request_to_openai($body);
+  my $openai_body = Langertha::Skeid::Protocol::Anthropic->request_to_openai($body);
   my $model = $openai_body->{model} // '';
   my $api_key_id = _request_api_key_id($c);
 
-  _begin_route_async($c, $model, sub {
-    my ($route, $node_id, $started) = @_;
+  _begin_route_async($c, $model, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
     return unless $route;
+
+    # The alias layer means the model the client asked for and the model the node is asked for
+    # are two different strings (ADR 0008). The upstream body carries the served model; the
+    # usage event carries both, or cost attribution silently loses which product was used.
+    my $served_model = _served_model($tier, $model);
+    $openai_body->{model} = $served_model;
 
     my $url = _endpoint_url_for_node($route->{url}, '/chat/completions');
     my $meta = {
@@ -303,15 +317,16 @@ sub _handle_anthropic_messages {
       api_key_id => $api_key_id,
       provider   => 'skeid',
       engine     => ($route->{engine} // 'openaibase'),
-      model      => $model,
-      route_url  => ($route->{url} // ''),
+      model            => $served_model,
+      requested_model  => $model,
+      route_url        => ($route->{url} // ''),
     };
     $c->render_later;
     _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
       my ($res, $err, $status) = @_;
       return if $err;
 
-      my $payload = _openai_response_to_anthropic($res, $model);
+      my $payload = Langertha::Skeid::Protocol::Anthropic->response_from_openai($res, $model);
       $c->res->code($status || 200);
       $c->res->headers->header('x-skeid-node' => $node_id);
       $c->render(json => $payload);
@@ -332,35 +347,37 @@ sub _handle_ollama_chat {
     return;
   }
 
-  my $openai_body = {
-    model => ($body->{model} // ''),
-    messages => ($body->{messages} || []),
-    (defined($body->{options}{temperature}) ? (temperature => 0 + $body->{options}{temperature}) : ()),
-    (defined($body->{options}{num_predict})  ? (max_tokens  => 0 + $body->{options}{num_predict})  : ()),
-    (defined($body->{tools}) ? (tools => $body->{tools}) : ()),
-    (defined($body->{tool_choice}) ? (tool_choice => $body->{tool_choice}) : ()),
-  };
+  my $openai_body = Langertha::Skeid::Protocol::Ollama->request_to_openai($body);
+  my $model = $openai_body->{model} // '';
+  my $api_key_id = _request_api_key_id($c);
 
-  _begin_route_async($c, $openai_body->{model}, sub {
-    my ($route, $node_id, $started) = @_;
+  _begin_route_async($c, $model, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
     return unless $route;
+
+    # The alias layer means the model the client asked for and the model the node is asked for
+    # are two different strings (ADR 0008). The upstream body carries the served model; the
+    # usage event carries both, or cost attribution silently loses which product was used.
+    my $served_model = _served_model($tier, $model);
+    $openai_body->{model} = $served_model;
 
     my $url = _endpoint_url_for_node($route->{url}, '/chat/completions');
     my $meta = {
-      api_format => 'ollama',
-      endpoint   => '/api/chat',
-      api_key_id => _request_api_key_id($c),
-      provider   => 'skeid',
-      engine     => ($route->{engine} // 'openaibase'),
-      model      => ($openai_body->{model} // ''),
-      route_url  => ($route->{url} // ''),
+      api_format      => 'ollama',
+      endpoint        => '/api/chat',
+      api_key_id      => _request_api_key_id($c),
+      provider        => 'skeid',
+      engine          => ($route->{engine} // 'openaibase'),
+      model           => $served_model,
+      requested_model => $model,
+      route_url       => ($route->{url} // ''),
     };
     $c->render_later;
     _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
       my ($res, $err, $status) = @_;
       return if $err;
 
-      my $payload = _openai_response_to_ollama_chat($res);
+      my $payload = Langertha::Skeid::Protocol::Ollama->response_from_openai($res);
       $c->res->code($status || 200);
       $c->res->headers->header('x-skeid-node' => $node_id);
       $c->render(json => $payload);
@@ -368,105 +385,83 @@ sub _handle_ollama_chat {
   });
 }
 
-sub _begin_route {
-  my ($c, $model) = @_;
-  my $wait_timeout_ms = 0 + ($c->skeid->route_wait_timeout_ms // 0);
+# Walks the tiers of a requested model (ADR 0008) until one admits the request.
+#
+# The two ways a tier can fail are not the same and must not be treated the same. A tier with
+# no eligible node is skipped immediately -- waiting cannot conjure a node that does not exist.
+# A tier whose nodes are all busy is waited on for its own wait_ms, because capacity comes back.
+# Only when every tier is exhausted does the request fail, and which failure it is depends on
+# whether any tier ever had an eligible node: none did means the model is unroutable (503),
+# some did means everything was busy (429).
+#
+# $cb is called with ($route, $node_id, $started, $tier) on success and with nothing on failure,
+# after the error has been rendered.
+sub _begin_route_async {
+  my ($c, $model, $api_key_id, $cb) = @_;
+  $cb ||= sub { };
   my $wait_poll_ms = 0 + ($c->skeid->route_wait_poll_ms // 25);
   $wait_poll_ms = 1 if $wait_poll_ms < 1;
-  $wait_timeout_ms = 0 if $wait_timeout_ms < 0;
 
-  my $started = time;
-  my $deadline = $started + ($wait_timeout_ms / 1000);
-  my $last_state;
-  my $last_node_id = '';
+  my $decision = $c->skeid->call_function('route.plan', {
+    model      => ($model // ''),
+    api_key_id => $api_key_id,
+  });
 
-  while (1) {
-    my $state = $c->skeid->call_function('route.state', { model => ($model // '') });
-    $last_state = $state if ref($state) eq 'HASH';
-
-    # Wrong model / no healthy nodes for this model: fail fast.
-    if (!$last_state || !$last_state->{has_eligible}) {
-      $c->render(json => {
-        error => {
-          message => "No healthy node available for model '$model'",
-          type    => 'model_not_found',
-        }
-      }, status => 503);
-      return;
-    }
-
-    my $route = $c->skeid->call_function('route.next', { model => ($model // '') })->{node};
-    if ($route && ref($route) eq 'HASH') {
-      my $node_id = $route->{id};
-      $last_node_id = $node_id if defined $node_id;
-      my $started_ok = $c->skeid->call_function('request.start', { id => $node_id })->{ok};
-      return ($route, $node_id, $started) if $started_ok;
-    }
-
-    my $now = time;
-    last if $now >= $deadline;
-    usleep($wait_poll_ms * 1000);
+  # The key's policy does not grant this model, or grants it but forbids every tier that serves
+  # it. Both are permission answers, and neither improves by retrying -- so neither may be
+  # reported as a capacity problem.
+  if (!$decision->{permitted}) {
+    $c->render(json => {
+      error => {
+        message => "Model '$model' is not available for this key",
+        type    => 'permission_error',
+      }
+    }, status => 403);
+    $cb->();
+    return;
   }
 
-  my $waited_ms = int((time - $started) * 1000);
-  $waited_ms = $wait_timeout_ms if $waited_ms < $wait_timeout_ms && $wait_timeout_ms > 0;
-  my $msg = length($last_node_id)
-    ? "Timed out waiting for free capacity on node '$last_node_id' (waited ${waited_ms}ms)"
-    : "Timed out waiting for free capacity for model '$model' (waited ${waited_ms}ms)";
-  $c->render(json => {
-    error => {
-      message => $msg,
-      type    => 'rate_limit_error',
-    }
-  }, status => 429);
-  return;
-}
-
-sub _begin_route_async {
-  my ($c, $model, $cb) = @_;
-  $cb ||= sub { };
-  my $wait_timeout_ms = 0 + ($c->skeid->route_wait_timeout_ms // 0);
-  my $wait_poll_ms = 0 + ($c->skeid->route_wait_poll_ms // 25);
-  $wait_poll_ms = 1 if $wait_poll_ms < 1;
-  $wait_timeout_ms = 0 if $wait_timeout_ms < 0;
-
+  my $plan = $decision->{tiers} || [];
   my $started = time;
-  my $deadline = $started + ($wait_timeout_ms / 1000);
-  my $last_state;
+  my $saw_eligible = 0;
   my $last_node_id = '';
+  my $index = 0;
+  my $tier_deadline = 0;
 
-  my $tick;
-  $tick = sub {
-    my $state = $c->skeid->call_function('route.state', { model => ($model // '') });
-    $last_state = $state if ref($state) eq 'HASH';
-
-    # Wrong model / no healthy nodes for this model: fail fast.
-    if (!$last_state || !$last_state->{has_eligible}) {
-      $c->render(json => {
-        error => {
-          message => "No healthy node available for model '$model'",
-          type    => 'model_not_found',
-        }
-      }, status => 503);
-      $cb->();
-      return;
-    }
-
-    my $route = $c->skeid->call_function('route.next', { model => ($model // '') })->{node};
-    if ($route && ref($route) eq 'HASH') {
-      my $node_id = $route->{id};
-      $last_node_id = $node_id if defined $node_id;
-      my $started_ok = $c->skeid->call_function('request.start', { id => $node_id })->{ok};
-      if ($started_ok) {
-        $cb->($route, $node_id, $started);
+  my $fail = sub {
+    # Nothing eligible can mean two different things once a policy is in play: the model is
+    # unroutable, or it is routable and this key is not allowed at the nodes that serve it.
+    # Only the failure path pays for telling them apart.
+    if (!$saw_eligible && grep { @{$_->{deny_tags} || []} } @$plan) {
+      my $without_deny = 0;
+      for my $tier (@$plan) {
+        my $state = $c->skeid->call_function('route.state', {
+          model => ($tier->{model} // ''),
+          tags  => ($tier->{tags} || []),
+        });
+        $without_deny = 1, last if ref($state) eq 'HASH' && $state->{has_eligible};
+      }
+      if ($without_deny) {
+        $c->render(json => {
+          error => {
+            message => "Model '$model' is not available for this key",
+            type    => 'permission_error',
+          }
+        }, status => 403);
+        $cb->();
         return;
       }
     }
 
-    my $now = time;
-    if ($now >= $deadline) {
+    if (!$saw_eligible) {
+      $c->render(json => {
+        error => {
+          message => "No healthy node available for model '$model'",
+          type    => 'model_not_found',
+        }
+      }, status => 503);
+    } else {
       my $waited_ms = int((time - $started) * 1000);
-      $waited_ms = $wait_timeout_ms if $waited_ms < $wait_timeout_ms && $wait_timeout_ms > 0;
       my $msg = length($last_node_id)
         ? "Timed out waiting for free capacity on node '$last_node_id' (waited ${waited_ms}ms)"
         : "Timed out waiting for free capacity for model '$model' (waited ${waited_ms}ms)";
@@ -476,88 +471,53 @@ sub _begin_route_async {
           type    => 'rate_limit_error',
         }
       }, status => 429);
-      $cb->();
-      return;
     }
-
-    Mojo::IOLoop->timer($wait_poll_ms / 1000, $tick);
+    $cb->();
+    return;
   };
 
+  my $tick;
+  $tick = sub {
+    return $fail->() if $index > $#$plan;
+
+    my $tier = $plan->[$index];
+    my %selector = (
+      model     => ($tier->{model} // ''),
+      tags      => ($tier->{tags} || []),
+      deny_tags => ($tier->{deny_tags} || []),
+      (length($tier->{engine} // '') ? (engine => $tier->{engine}) : ()),
+    );
+
+    my $state = $c->skeid->call_function('route.state', \%selector);
+    if (ref($state) eq 'HASH' && $state->{has_eligible}) {
+      $saw_eligible = 1;
+
+      my $route = $c->skeid->call_function('route.next', \%selector)->{node};
+      if ($route && ref($route) eq 'HASH') {
+        my $node_id = $route->{id};
+        $last_node_id = $node_id if defined $node_id;
+        if ($c->skeid->call_function('request.start', { id => $node_id })->{ok}) {
+          $cb->($route, $node_id, $started, $tier);
+          return;
+        }
+      }
+
+      # Eligible but nothing free: this tier is worth waiting on, up to its own window.
+      if (time < $tier_deadline) {
+        Mojo::IOLoop->timer($wait_poll_ms / 1000, $tick);
+        return;
+      }
+    }
+
+    $index++;
+    $tier_deadline = time + (($plan->[$index] ? ($plan->[$index]{wait_ms} // 0) : 0) / 1000);
+    $tick->();
+    return;
+  };
+
+  $tier_deadline = time + ((@$plan ? ($plan->[0]{wait_ms} // 0) : 0) / 1000);
   $tick->();
   return;
-}
-
-sub _proxy_openai_json {
-  my ($c, $url, $body, $node_id, $started, $meta) = @_;
-  $meta ||= {};
-
-  my %fwd_headers = _forward_headers($c);
-  _inject_node_auth(\%fwd_headers, $c->skeid, $node_id);
-  my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
-  my $done = $c->app->ua->start($tx);
-  my $duration_ms = _duration_ms($started);
-
-  if (my $err = $done->error) {
-    $c->skeid->call_function('request.finish', {
-      id => $node_id,
-      ok => 0,
-      duration_ms => $duration_ms,
-    });
-    _record_usage_event($c, {
-      %$meta,
-      node_id       => $node_id,
-      status_code   => ($err->{code} || 502),
-      ok            => 0,
-      duration_ms   => $duration_ms,
-      error_type    => 'upstream_error',
-      error_message => ($err->{message} // 'unknown'),
-      metrics       => {},
-    });
-    $c->render(json => {
-      error => {
-        message => 'Upstream error: ' . ($err->{message} // 'unknown'),
-        type    => 'upstream_error',
-      }
-    }, status => ($err->{code} || 502));
-    return (undef, 1, ($err->{code} || 502));
-  }
-
-  my $res = $done->res;
-  my $status = $res->code // 200;
-
-  $c->skeid->call_function('request.finish', {
-    id => $node_id,
-    ok => ($status < 500) ? 1 : 0,
-    duration_ms => $duration_ms,
-  });
-
-  my $payload = eval { $res->json };
-  my $metrics = {};
-  if (ref($payload) eq 'HASH') {
-    my $tool_calls = eval { [ map { $_->to_hash } Langertha::ToolCall->extract($payload) ] } || [];
-    $metrics = eval {
-      $c->skeid->call_function('metrics.normalize', {
-        provider    => ($meta->{provider} || 'skeid'),
-        engine      => ($meta->{engine} || 'openaibase'),
-        model       => ($meta->{model} || ($body->{model} // '')),
-        route       => ($meta->{endpoint} || ''),
-        duration_ms => $duration_ms,
-        response    => $payload,
-        tool_calls  => $tool_calls,
-      });
-    } || {};
-  }
-
-  _record_usage_event($c, {
-    %$meta,
-    node_id      => $node_id,
-    status_code  => $status,
-    ok           => ($status < 500) ? 1 : 0,
-    duration_ms  => $duration_ms,
-    metrics      => (ref($metrics) eq 'HASH' ? $metrics : {}),
-  });
-
-  return ($res, 0, $status);
 }
 
 sub _proxy_openai_json_async {
@@ -651,6 +611,38 @@ sub _proxy_openai_stream {
   my $headers_sent = 0;
   my $had_error = 0;
   my $status = 200;
+  my $accumulated_usage = { input => 0, output => 0, total => 0 };
+  my $accumulated_content_bytes = 0;
+
+  # Upstream chunks arrive faster than they can be written out, so they are queued and drained
+  # one at a time. Writing each chunk directly would end the response after the first one:
+  # a dynamic Mojolicious response with no drain callback is finished once its write queue
+  # empties, and every later chunk then hits a destroyed transaction. The client sees headers,
+  # no body, and no error.
+  my @queue;
+  my $draining = 0;
+  my $upstream_done = 0;
+  my $finished = 0;
+
+  my $drain;
+  $drain = sub {
+    if (!@queue) {
+      $draining = 0;
+      if ($upstream_done && !$finished) {
+        $finished = 1;
+        $c->finish;
+      }
+      return;
+    }
+    $draining = 1;
+    my $chunk = shift @queue;
+    $c->write_chunk($chunk => sub { $drain->() });
+  };
+
+  # SSE frames do not respect read boundaries: one read can carry half a frame, and the half
+  # that completes it arrives in the next. Parsing per read would silently drop the split
+  # frame -- usually the last one, which is the one carrying usage.
+  my $pending = '';
 
   $tx->res->content->unsubscribe('read')->on(read => sub {
     my ($content, $bytes) = @_;
@@ -665,7 +657,36 @@ sub _proxy_openai_stream {
       $c->res->headers->header('x-skeid-node' => $node_id);
       $headers_sent = 1;
     }
-    $c->write($bytes);
+
+    # Parse SSE lines and accumulate usage + content bytes. The relayed bytes are never
+    # modified -- this reads along, it does not rewrite.
+    $pending .= $bytes;
+    while ($pending =~ s/\A([^\n]*)\n//) {
+      my $line = $1;
+      next unless $line =~ /^data: (.+?)\s*$/;
+      my $json = eval { decode_json($1) };
+      next unless $json && ref($json) eq 'HASH';
+
+      if (my $delta = $json->{choices}[0]{delta}) {
+        if (my $delta_content = $delta->{content}) {
+          $accumulated_content_bytes += length($delta_content);
+        }
+      }
+
+      if (my $usage = $json->{usage}) {
+        $accumulated_usage->{input}   += ($usage->{prompt_tokens} // $usage->{input_tokens} // 0);
+        $accumulated_usage->{output} += ($usage->{completion_tokens} // $usage->{output_tokens} // 0);
+        $accumulated_usage->{total}  += ($usage->{total_tokens} // 0);
+      }
+    }
+
+    # The first read event fires with an empty chunk as soon as the upstream headers are
+    # parsed, and writing an empty chunk finalizes a Mojolicious response. Relaying it would
+    # end the stream before its first token -- headers, no body, no error.
+    return unless length $bytes;
+
+    push @queue, $bytes;
+    $drain->() unless $draining;
   });
 
   $c->app->ua->start($tx => sub {
@@ -688,7 +709,7 @@ sub _proxy_openai_stream {
           duration_ms   => $duration_ms,
           error_type    => 'upstream_error',
           error_message => ($err->{message} // 'unknown'),
-          metrics       => {},
+          metrics       => $accumulated_usage->{total} > 0 ? { usage => $accumulated_usage } : {},
         });
         $c->render(json => {
           error => {
@@ -706,16 +727,29 @@ sub _proxy_openai_stream {
       ok => ($had_error || $status >= 500) ? 0 : 1,
       duration_ms => $duration_ms,
     });
+
+    # For streaming: use accumulated usage from chunks; if none, try to get from final response
+    my $metrics = {};
+    if ($accumulated_usage->{total} > 0) {
+      $metrics = { usage => $accumulated_usage };
+    }
+
     _record_usage_event($c, {
       %$meta,
       node_id      => $node_id,
       status_code  => $status,
       ok           => ($had_error || $status >= 500) ? 0 : 1,
       duration_ms  => $duration_ms,
-      metrics      => {},
+      metrics      => $metrics,
     });
 
-    $c->finish;
+    # Only finish once the queue has drained, or the tail of the stream is cut off. If the
+    # drain loop is still running it will finish for us when it empties.
+    $upstream_done = 1;
+    if (!$draining && !$finished) {
+      $finished = 1;
+      $c->finish;
+    }
   });
 }
 
@@ -733,12 +767,29 @@ sub _render_upstream_response {
   $c->rendered;
 }
 
+# Hop-by-hop headers describe the client's connection to Skeid, not the request. Forwarding
+# them upstream is wrong per RFC 7230 and expensive here in particular: a client that sends
+# `Connection: close` -- most benchmark tools and plenty of HTTP libraries do -- made Skeid
+# tear down its own upstream connection after every single request, so the connection pool
+# never held anything and each request paid for a fresh TCP handshake.
+my %HOP_BY_HOP = map { $_ => 1 } qw(
+  connection
+  keep-alive
+  proxy-authenticate
+  proxy-authorization
+  te
+  trailer
+  transfer-encoding
+  upgrade
+);
+
 sub _forward_headers {
   my ($c) = @_;
   my %fwd_headers;
   for my $name (@{$c->req->headers->names}) {
     my $lc = lc($name);
-    next if $lc eq 'host' || $lc eq 'content-length' || $lc eq 'transfer-encoding' || $lc eq 'accept-encoding';
+    next if $HOP_BY_HOP{$lc};
+    next if $lc eq 'host' || $lc eq 'content-length' || $lc eq 'accept-encoding';
     $fwd_headers{$name} = $c->req->headers->header($name);
   }
   return %fwd_headers;
@@ -786,15 +837,24 @@ sub _extract_request_api_key {
   return ($raw, $api_key);
 }
 
+# Who the caller is. Everything downstream hangs off this: the routing policy that decides
+# which nodes they may reach, and the usage event they get billed for. So it may only be
+# derived from something the caller had to prove -- the key they presented.
+#
+# x-skeid-key-id is honoured only when the deployment says it authenticates the caller before
+# Skeid sees the request (routing.trust_key_id_header). Believing it unconditionally would let
+# any client name itself into another customer's policy, and into another customer's bill.
 sub _request_api_key_id {
   my ($c) = @_;
-  my $forced = $c->req->headers->header('x-skeid-key-id')
-    // $c->req->headers->header('x-api-key-id');
-  return $forced if defined($forced) && length($forced);
+
+  if ($c->skeid->trust_key_id_header) {
+    my $forced = $c->req->headers->header('x-skeid-key-id')
+      // $c->req->headers->header('x-api-key-id');
+    return $forced if defined($forced) && length($forced);
+  }
 
   my (undef, $api_key) = _extract_request_api_key($c);
-  return 'anonymous' unless defined($api_key) && length($api_key);
-  return 'k_' . substr(sha1_hex($api_key), 0, 12);
+  return $c->skeid->key_id_for_key($api_key);
 }
 
 sub _request_id {
@@ -820,9 +880,10 @@ sub _record_usage_event {
 
   my $recorded = eval {
     $c->skeid->call_function('usage.record', {
-      created_at    => _iso8601_now(),
+      created_at    => Langertha::Skeid::Protocol::iso8601_now(),
       request_id    => _request_id($c),
       api_format    => ($args->{api_format} // ''),
+      requested_model => ($args->{requested_model} // $args->{model} // ''),
       endpoint      => ($args->{endpoint} // ''),
       api_key_id    => ($args->{api_key_id} // 'anonymous'),
       provider      => ($args->{provider} // 'skeid'),
@@ -848,6 +909,15 @@ sub _record_usage_event {
   return $recorded;
 }
 
+# The model a tier asks its nodes for. Falls back to what the client requested, which is what
+# makes an aliasless deployment behave exactly as it did before tiers existed.
+sub _served_model {
+  my ($tier, $requested) = @_;
+  return $requested unless ref($tier) eq 'HASH';
+  my $model = $tier->{model};
+  return (defined($model) && length($model)) ? $model : $requested;
+}
+
 sub _endpoint_url_for_node {
   my ($base, $path) = @_;
   $base //= '';
@@ -859,225 +929,9 @@ sub _endpoint_url_for_node {
   return $base . '/v1/' . $path;
 }
 
-sub _anthropic_request_to_openai {
-  my ($body) = @_;
-  my @messages;
-
-  if (defined $body->{system}) {
-    if (ref($body->{system}) eq 'ARRAY') {
-      my $txt = join('', map { ref($_) eq 'HASH' ? ($_->{text} // '') : "$_" } @{$body->{system}});
-      push @messages, { role => 'system', content => $txt } if length $txt;
-    } else {
-      push @messages, { role => 'system', content => "$body->{system}" };
-    }
-  }
-
-  for my $m (@{$body->{messages} || []}) {
-    next unless ref($m) eq 'HASH';
-    my $role = $m->{role} // 'user';
-    my $content = $m->{content};
-
-    if (!ref($content)) {
-      push @messages, { role => $role, content => (defined($content) ? "$content" : '') };
-      next;
-    }
-
-    if (ref($content) eq 'ARRAY') {
-      my @text;
-      my @tool_calls;
-
-      for my $block (@$content) {
-        next unless ref($block) eq 'HASH';
-        my $type = $block->{type} // '';
-
-        if ($type eq 'text') {
-          push @text, ($block->{text} // '');
-          next;
-        }
-
-        if ($type eq 'tool_use') {
-          my $id = $block->{id} // ('toolu_' . int(rand(1_000_000)));
-          my $name = $block->{name} // 'tool';
-          my $args = _encode_json_safe($block->{input} || {});
-          push @tool_calls, {
-            id => $id,
-            type => 'function',
-            function => {
-              name => $name,
-              arguments => $args,
-            },
-          };
-          next;
-        }
-
-        if ($type eq 'tool_result') {
-          my $tcid = $block->{tool_use_id} // $block->{id} // '';
-          my $val = $block->{content};
-          my $txt = ref($val) ? _encode_json_safe($val) : (defined($val) ? "$val" : '');
-          push @messages, {
-            role => 'tool',
-            tool_call_id => $tcid,
-            content => $txt,
-          };
-          next;
-        }
-      }
-
-      my $text = join('', @text);
-      if ($role eq 'assistant') {
-        my %msg = (role => 'assistant');
-        $msg{content} = $text if length $text;
-        $msg{tool_calls} = \@tool_calls if @tool_calls;
-        $msg{content} = '' if !exists($msg{content}) && !exists($msg{tool_calls});
-        push @messages, \%msg;
-      } elsif (length $text) {
-        push @messages, { role => $role, content => $text };
-      }
-    }
-  }
-
-  my %out = (
-    model    => ($body->{model} // ''),
-    messages => \@messages,
-    (defined($body->{max_tokens}) ? (max_tokens => 0 + $body->{max_tokens}) : ()),
-    (defined($body->{temperature}) ? (temperature => 0 + $body->{temperature}) : ()),
-    (defined($body->{top_p}) ? (top_p => 0 + $body->{top_p}) : ()),
-  );
-
-  if (ref($body->{tools}) eq 'ARRAY') {
-    my $tools = Langertha::Tool->from_list($body->{tools});
-    $out{tools} = [ map { $_->to_openai } @$tools ];
-  }
-
-  if (defined $body->{tool_choice}) {
-    my $tc = Langertha::ToolChoice->from_hash($body->{tool_choice});
-    if ($tc) {
-      my $oai_tc = $tc->to_openai;
-      $out{tool_choice} = $oai_tc if defined $oai_tc;
-    }
-  }
-
-  return \%out;
-}
-
-sub _openai_response_to_anthropic {
-  my ($res, $default_model) = @_;
-
-  my $choice = (ref($res->{choices}) eq 'ARRAY' ? $res->{choices}[0] : {}) || {};
-  my $msg = $choice->{message} || {};
-  my $text = $msg->{content} // '';
-  my @calls = Langertha::ToolCall->extract($res || {});
-
-  if (!@calls && length($text)) {
-    my ($clean, $extracted) = Langertha::ToolCall->extract_hermes_from_text($text);
-    $text = $clean;
-    @calls = @$extracted;
-  }
-
-  my @content;
-  push @content, { type => 'text', text => $text } if length $text;
-  my $i = 0;
-  for my $call (@calls) {
-    $i++;
-    push @content, $call->to_anthropic_block( fallback_id => "toolu_skeid_$i" );
-  }
-
-  my $fr = $choice->{finish_reason} // 'stop';
-  my $stop_reason = $fr eq 'tool_calls' ? 'tool_use'
-                  : $fr eq 'length'     ? 'max_tokens'
-                  : 'end_turn';
-
-  return {
-    id           => ($res->{id} ? ('msg_' . $res->{id}) : ('msg_' . int(time * 1000))),
-    type         => 'message',
-    role         => 'assistant',
-    model        => ($res->{model} // $default_model),
-    content      => \@content,
-    stop_reason  => $stop_reason,
-    stop_sequence => undef,
-    usage => {
-      input_tokens  => 0 + (($res->{usage} || {})->{prompt_tokens} // 0),
-      output_tokens => 0 + (($res->{usage} || {})->{completion_tokens} // 0),
-    },
-  };
-}
-
-sub _openai_response_to_ollama_chat {
-  my ($res) = @_;
-  my $choice = (ref($res->{choices}) eq 'ARRAY' ? $res->{choices}[0] : {}) || {};
-  my $msg = $choice->{message} || {};
-  my $text = ($msg->{content} // '');
-  my $tool_calls = [];
-
-  if (ref($msg->{tool_calls}) eq 'ARRAY') {
-    my @calls = Langertha::ToolCall->extract($res || {});
-    $tool_calls = [ map { $_->to_ollama } @calls ];
-  } elsif (length($text)) {
-    my ($clean, $calls) = Langertha::ToolCall->extract_hermes_from_text($text);
-    if (@$calls) {
-      $text = $clean;
-      $tool_calls = [ map { $_->to_ollama } @$calls ];
-    }
-  }
-
-  return {
-    model      => ($res->{model} // ''),
-    created_at => _iso8601_now(),
-    message    => {
-      role    => ($msg->{role} // 'assistant'),
-      content => $text,
-      (@$tool_calls ? (tool_calls => $tool_calls) : ()),
-    },
-    done       => 1,
-    done_reason => ($choice->{finish_reason} // 'stop'),
-    prompt_eval_count => 0 + (($res->{usage} || {})->{prompt_tokens} // 0),
-    eval_count        => 0 + (($res->{usage} || {})->{completion_tokens} // 0),
-  };
-}
-
-sub _parse_hermes_tool_calls {
-  my ($text) = @_;
-  my @calls;
-  return \@calls unless defined $text;
-
-  while ($text =~ m{<tool_call>\s*(\{.*?\})\s*</tool_call>}sg) {
-    my $json = $1;
-    my $obj = _decode_json_safe($json);
-    next unless ref($obj) eq 'HASH';
-    push @calls, {
-      id => ('tool_' . int(rand(1_000_000))),
-      type => 'function',
-      function => {
-        name => ($obj->{name} // 'tool'),
-        arguments => _encode_json_safe($obj->{arguments} || {}),
-      },
-    };
-  }
-
-  return \@calls;
-}
-
-sub _decode_json_safe {
-  my ($value) = @_;
-  return $value if ref($value);
-  return undef unless defined $value && length $value;
-  my $decoded = eval { decode_json($value) };
-  return $@ ? undef : $decoded;
-}
-
-sub _encode_json_safe {
-  my ($value) = @_;
-  return '{}' unless defined $value;
-  return eval { encode_json($value) } || '{}';
-}
-
 sub _duration_ms {
   my ($started) = @_;
   return int((time - $started) * 1000);
-}
-
-sub _iso8601_now {
-  return strftime('%Y-%m-%dT%H:%M:%SZ', gmtime());
 }
 
 1;

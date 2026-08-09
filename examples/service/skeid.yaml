@@ -30,3 +30,39 @@ admin:
 routing:
   wait_timeout_ms: 2000
   wait_poll_ms: 25
+  # Believe x-skeid-key-id from the client. Only correct when something in front of Skeid
+  # authenticates the caller and sets the header -- otherwise any client can pick its own
+  # routing policy and somebody else's invoice.
+  trust_key_id_header: false
+
+# Model aliases (ADR 0008). A client-facing name resolves to an ordered list of tiers, tried
+# until one has free capacity. Tag your nodes (tags: [local] / [cloud]) to use this.
+#
+# aliases:
+#   house-model:
+#     tiers:
+#       - tags: [local]
+#         model: qwen3-32b
+#         wait_ms: 200      # wait this long for a local GPU before paying for cloud
+#       - tags: [cloud]
+#         model: llama-3.3-70b-versatile
+#
+# wait_ms defaults to 0 -- fall through immediately unless you ask to wait.
+
+# Per-key routing policy (ADR 0008). Profiles are the standard setups; a key takes one, or one
+# plus an override of a single field. Keys are named by the id their API key resolves to --
+# `skeid keyid sk-alice-secret-key` prints it -- so the config never holds a customer key.
+#
+# policies:
+#   standard:  { deny_tags: [cloud] }     # our hardware only, 429 rather than spill to cloud
+#   burstable: {}                         # cloud is fine when local is full
+#   trial:     { models: [house-model] }  # one product, and it may go anywhere
+# default_policy: standard
+# keys:
+#   k_5f0e1a2b3c4d: burstable
+#   k_9c8b7a6f5e4d:
+#     policy: standard
+#     deny_tags: [cloud, eu-outside]      # replaces the profile's deny list
+#
+# Unlisted keys take default_policy, so a deployment where every customer is configured the
+# same way carries no key entries at all.

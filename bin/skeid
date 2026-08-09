@@ -19,6 +19,9 @@ if (@ARGV && defined($ARGV[0]) && $ARGV[0] !~ /^-/) {
 if ($cmd eq 'usage') {
   exit _run_usage(@ARGV);
 }
+if ($cmd eq 'keyid') {
+  exit _run_keyid(@ARGV);
+}
 if ($cmd ne 'serve') {
   die _usage_text();
 }
@@ -179,6 +182,25 @@ sub _run_usage {
   return 0;
 }
 
+# Prints the key id a customer key routes and bills under. Needed because a config names
+# customers in keys:, and must be able to do that without holding their keys.
+sub _run_keyid {
+  my (@argv) = @_;
+
+  my @keys = grep { defined && length } @argv;
+  if (!@keys) {
+    # Reading from stdin keeps the key off the command line, and out of the shell history.
+    while (my $line = <STDIN>) {
+      chomp $line;
+      push @keys, $line if length $line;
+    }
+  }
+  die _usage_text() unless @keys;
+
+  print Langertha::Skeid->key_id_for_key($_), "\n" for @keys;
+  return 0;
+}
+
 sub _usage_text {
   return <<'USAGE';
 Usage:
@@ -187,5 +209,7 @@ Usage:
               [--backend sqlite|postgresql] [--db /path/to.sqlite]
               [--dsn dbi:Pg:...] [--db-user USER] [--db-pass PASS|--db-pass-env ENV]
               [--api-key-id ID] [--model NAME]
+  skeid keyid [KEY ...]        the key id to use in the config's keys: section
+                               (reads stdin when given no argument)
 USAGE
 }

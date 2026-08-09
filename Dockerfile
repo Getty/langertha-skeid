@@ -6,6 +6,8 @@ ARG KNARR_SRC=""
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libssl-dev \
+    libpq-dev \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/skeid
@@ -20,7 +22,8 @@ RUN cpanm --notest App::cpm \
       --resolver metacpan \
       --workers=$(nproc) \
       --show-build-log-on-failure \
-    && rm -rf /root/.perl-cpm/ /tmp/*
+    && rm -rf /root/.perl-cpm/ /tmp/* \
+    && cpanm --notest DBI DBD::Pg
 
 EXPOSE 8090
 

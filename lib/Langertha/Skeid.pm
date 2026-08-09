@@ -6,13 +6,10 @@ use strict;
 use warnings;
 use Carp qw(croak);
 use POSIX qw(strftime);
-use File::Basename qw(dirname);
-use File::Path qw(make_path);
-use File::Spec;
-use File::ShareDir qw(dist_dir);
+use Digest::SHA qw(sha1_hex);
 use YAML::PP;
-use JSON::MaybeXS qw(encode_json decode_json);
 use Langertha ();
+use Langertha::Skeid::UsageStore;
 use Langertha::Usage;
 use Langertha::Cost;
 use Langertha::Pricing;
@@ -46,7 +43,10 @@ tenant billing from one consistent ledger.
 1. Define multiple nodes in config (for example OpenAI-compatible cloud APIs
    and local vLLM/SGLang).
 2. Set model pricing via C<pricing> or C<pricing.set>.
-3. Forward tenant identity via C<x-skeid-key-id> (or C<x-api-key-id>).
+3. Let tenant identity follow from the API key the caller presents. C<skeid keyid>
+   prints the id a given key resolves to. A deployment that authenticates callers
+   in front of Skeid can instead pass C<x-skeid-key-id> and set
+   C<routing.trust_key_id_header>.
 4. Read totals by key/model/time with C<usage.report>.
 
 =head2 Engine IDs
@@ -116,6 +116,28 @@ When a callback or override is provided, the DBI default is bypassed entirely
 and no database connection is created.  DBI and DBD::SQLite are C<recommends>
 dependencies — they are not required when usage is handled externally.
 
+=head2 Per-Key Routing Policy
+
+Which nodes a customer key may be served from, and which models it may ask for:
+
+  policies:
+    standard:  { deny_tags: [cloud] }        # our own hardware only
+    burstable: {}                            # cloud is fine when local is full
+  default_policy: standard
+  keys:
+    k_5f0e1a2b3c4d: burstable                # id from `skeid keyid <key>`
+    k_9c8b7a6f5e4d:
+      policy: standard
+      models: [house-model]                  # sparse override of one field
+
+Resolved once at config load: a request costs one hash lookup, keys on the same profile share
+one policy object, and a key that takes the default is not listed at all. C<deny_tags> filters
+node selection, not just the plan, so a denied node cannot be reached by asking for its own
+model name instead of an alias. A refusal is C<403>, never a capacity error.
+
+Identity comes from the API key the caller presented — see L</key_id_for_key>. See also ADR
+0008 in the distribution repository.
+
 =head2 Admin API Key
 
 C<admin.api_key> (or C<admin_api_key>) controls access to proxy admin routes.
@@ -128,11 +150,49 @@ through dynamic config reload.
 has nodes => (
   is      => 'rw',
   default => sub { [] },
+  # Routing caches derived node lists, so every path that can change the inventory has to
+  # invalidate them. The methods below bump the generation explicitly; this trigger catches
+  # the remaining one -- somebody assigning the whole list through the public accessor.
+  trigger => sub { $_[0]->_bump_inventory },
 );
 
 has model_pricing => (
   is      => 'rw',
   default => sub { {} },
+);
+
+has model_aliases => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+has policies => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+has default_policy => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+# Key id -> resolved policy. Identical resolutions share one object, and a key that takes the
+# default is not listed at all, so ten thousand identical customers cost nothing here.
+has key_policies => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+# Whether x-skeid-key-id / x-api-key-id from the client may name the customer. Off by default:
+# once a policy hangs off the key id, believing that header lets any client pick its own
+# permissions in one line. Turn it on only when something in front of Skeid authenticates the
+# caller and sets the header itself.
+has trust_key_id_header => (
+  is      => 'rw',
+  default => sub {
+    return (defined($ENV{SKEID_TRUST_KEY_ID_HEADER}) && $ENV{SKEID_TRUST_KEY_ID_HEADER} =~ /^(1|true|yes|on)$/i)
+      ? 1 : 0;
+  },
 );
 
 has route_wait_timeout_ms => (
@@ -210,6 +270,16 @@ has _rr_cursor => (
   default => sub { {} },
 );
 
+has _inventory_generation => (
+  is      => 'rw',
+  default => sub { 0 },
+);
+
+has _route_cache => (
+  is      => 'rw',
+  default => sub { { generation => -1, entries => {} } },
+);
+
 has _inflight => (
   is      => 'rw',
   default => sub { {} },
@@ -220,7 +290,7 @@ has _stats => (
   default => sub { {} },
 );
 
-has _usage_dbh_cached => (
+has _usage_store_obj => (
   is      => 'rw',
   default => sub { undef },
 );
@@ -268,7 +338,6 @@ sub BUILD {
       $self->_set_usage_db_path($path);
     }
   }
-  $self->_ensure_usage_schema_if_enabled;
 }
 
 sub add_node {
@@ -285,6 +354,7 @@ sub add_node {
     weight      => (defined $node{weight} ? 0 + $node{weight} : 1),
     max_conns   => (defined $node{max_conns} ? 0 + $node{max_conns} : 0),
     healthy     => (exists $node{healthy} ? ($node{healthy} ? 1 : 0) : 1),
+    tags        => $self->normalize_tags($node{tags}),
     metadata    => (ref($node{metadata}) eq 'HASH' ? $node{metadata} : {}),
     (defined($node{api_key_env}) && length($node{api_key_env})
       ? (api_key_env => "$node{api_key_env}")
@@ -293,6 +363,7 @@ sub add_node {
       ? (api_key_ref => "$node{api_key_ref}")
       : ()),
   };
+  $self->_bump_inventory;
   return 1;
 }
 
@@ -303,6 +374,43 @@ sub remove_node {
   my $removed = @{$self->nodes} - @keep;
   $self->nodes(\@keep);
   return $removed ? 1 : 0;
+}
+
+sub _bump_inventory {
+  my ($self) = @_;
+  # Defensive //0: the nodes trigger can fire during construction, before this attribute's own
+  # default has been assigned.
+  $self->_inventory_generation(($self->_inventory_generation // 0) + 1);
+  return;
+}
+
+=method normalize_tags
+
+  my $tags = Langertha::Skeid->normalize_tags(['Local', 'gb10']);
+  my $tags = Langertha::Skeid->normalize_tags('local, gb10');
+
+Tags are lowercased, trimmed, de-duplicated and kept in the order first seen. A plain string is
+accepted and split on commas or whitespace, because a hand-written config says
+C<tags: local, gb10> at least as often as it says a YAML list.
+
+=cut
+
+sub normalize_tags {
+  my ($self, $value) = @_;
+  return [] unless defined $value;
+
+  my @raw = ref($value) eq 'ARRAY' ? @$value : split(/[,\s]+/, "$value");
+  my (@tags, %seen);
+  for my $tag (@raw) {
+    next unless defined $tag;
+    my $clean = lc "$tag";
+    $clean =~ s/\A\s+//;
+    $clean =~ s/\s+\z//;
+    next unless length $clean;
+    next if $seen{$clean}++;
+    push @tags, $clean;
+  }
+  return \@tags;
 }
 
 sub list_nodes {
@@ -320,6 +428,9 @@ sub set_node_health {
     $found = 1;
     last;
   }
+  # Health is part of eligibility, so flipping it has to drop the derived lists -- otherwise a
+  # node taken out of rotation keeps receiving traffic until something else changes.
+  $self->_bump_inventory if $found;
   return $found;
 }
 
@@ -366,6 +477,18 @@ sub reload_config {
     }
   }
 
+  if (ref($cfg->{policies}) eq 'HASH' || exists $cfg->{default_policy} || ref($cfg->{keys}) eq 'HASH') {
+    $self->_load_policies($cfg);
+  }
+
+  if (ref($cfg->{aliases}) eq 'HASH') {
+    # Replaced wholesale, like nodes: the file is the declared state.
+    $self->model_aliases({});
+    for my $name (keys %{$cfg->{aliases}}) {
+      $self->set_model_alias($name, $cfg->{aliases}{$name});
+    }
+  }
+
   if (ref($cfg->{nodes}) eq 'ARRAY') {
     $self->nodes([]);
     for my $n (@{$cfg->{nodes}}) {
@@ -384,12 +507,27 @@ sub reload_config {
       $poll = 1 if $poll < 1;
       $self->route_wait_poll_ms($poll);
     }
+    if (defined $cfg->{routing}{trust_key_id_header}) {
+      $self->trust_key_id_header($cfg->{routing}{trust_key_id_header} =~ /^(1|true|yes|on)$/i ? 1 : 0);
+    }
   }
 
+  # The admin key may be named directly or handed over by environment variable, the same way
+  # usage_store takes password_env -- a deployment should not have to write the key into a
+  # file that gets mounted into a container.
   if (exists $cfg->{admin_api_key}) {
     $self->admin_api_key(defined($cfg->{admin_api_key}) ? "$cfg->{admin_api_key}" : '');
+  } elsif (defined $cfg->{admin_api_key_env}) {
+    $self->admin_api_key($ENV{$cfg->{admin_api_key_env}} // '');
   } elsif (ref($cfg->{admin}) eq 'HASH') {
-    $self->admin_api_key(defined($cfg->{admin}{api_key}) ? "$cfg->{admin}{api_key}" : '');
+    my $admin = $cfg->{admin};
+    if (exists $admin->{api_key}) {
+      $self->admin_api_key(defined($admin->{api_key}) ? "$admin->{api_key}" : '');
+    } elsif (defined $admin->{api_key_env}) {
+      $self->admin_api_key($ENV{$admin->{api_key_env}} // '');
+    } else {
+      $self->admin_api_key('');
+    }
   } elsif ($self->has_config_loader || $self->has_config_file) {
     # Config-managed mode: absent key means admin API is disabled.
     $self->admin_api_key('');
@@ -435,141 +573,35 @@ sub configure_usage_store {
   return $self->_configure_usage_store($cfg);
 }
 
-sub _dist_root {
-  my $root = dirname(dirname(dirname(__FILE__)));
-  return $root;
-}
-
-sub _schema_file_for_backend {
-  my ($self, $backend) = @_;
-  my $name = ($backend eq 'postgresql') ? 'usage_events.postgresql.sql' : 'usage_events.sqlite.sql';
-  my @candidates;
-
-  # Installed/runtime lookup via dist sharedir.
-  my $share_dir = eval { dist_dir('Langertha-Skeid') };
-  if (!$@ && defined($share_dir) && length($share_dir)) {
-    push @candidates, File::Spec->catfile($share_dir, 'sql', $name);
-  }
-
-  # Dev + dzil test fallback from repository/build paths.
-  my $dir = _dist_root();
-  for (1 .. 6) {
-    push @candidates, File::Spec->catfile($dir, 'share', 'sql', $name);
-    push @candidates, File::Spec->catfile($dir, 'sql', $name);
-    my $parent = dirname($dir);
-    last if !defined($parent) || $parent eq $dir;
-    $dir = $parent;
-  }
-
-  for my $path (@candidates) {
-    return $path if -f $path;
-  }
-
-  return $candidates[0];
-}
-
-sub _read_text_file {
-  my ($path) = @_;
-  open my $fh, '<', $path or die "Cannot open $path: $!";
-  local $/;
-  my $text = <$fh>;
-  close $fh;
-  return $text;
-}
-
-sub _apply_schema_sql {
-  my ($dbh, $sql) = @_;
-  my @stmts = grep { /\S/ } map {
-    my $s = $_;
-    $s =~ s/^\s+//;
-    $s =~ s/\s+$//;
-    $s;
-  } split /;\s*(?:\n|$)/, $sql;
-  for my $stmt (@stmts) {
-    $dbh->do($stmt);
-  }
-  return 1;
-}
 
 sub _configure_usage_store {
   my ($self, $cfg) = @_;
-  $cfg ||= {};
-  croak 'usage_store must be a hashref' unless ref($cfg) eq 'HASH';
-
-  my $backend = lc($cfg->{backend} // '');
-  $backend = 'sqlite' if !$backend && (defined($cfg->{sqlite_path}) || defined($cfg->{path}) || defined($cfg->{db_path}));
-  $backend = 'postgresql' if !$backend && defined($cfg->{dsn}) && $cfg->{dsn} =~ /^dbi:Pg:/i;
-  $backend = 'jsonlog' if !$backend && defined($cfg->{log_path});
-  $backend = 'sqlite' unless length $backend;
-  $backend = 'postgresql' if $backend =~ /^postgres/;
-  $backend = 'jsonlog' if $backend =~ /^json/;
-
-  my $normalized;
-  if ($backend eq 'sqlite') {
-    my $path = $cfg->{sqlite_path} // $cfg->{path} // $cfg->{db_path} // ($self->has_usage_db_path ? $self->usage_db_path : undef);
-    if (!defined($path) || !length($path)) {
-      croak 'usage_store.sqlite_path (or path/db_path) is required for sqlite backend';
-    }
-    $normalized = {
-      backend      => 'sqlite',
-      path         => $path,
-      dsn          => "dbi:SQLite:dbname=$path",
-      user         => '',
-      password     => '',
-      schema_file  => ($cfg->{schema_file} // ''),
-      auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
-    };
-  } elsif ($backend eq 'postgresql') {
-    my $dsn = $cfg->{dsn};
-    if (!defined($dsn) || !length($dsn)) {
-      my $host = $cfg->{host} // '127.0.0.1';
-      my $port = $cfg->{port} // 5432;
-      my $name = $cfg->{dbname} // $cfg->{database} // 'skeid';
-      $dsn = "dbi:Pg:dbname=$name;host=$host;port=$port";
-    }
-    my $user = $cfg->{user} // '';
-    my $password = defined($cfg->{password}) ? $cfg->{password} : '';
-    if (!length($password) && defined($cfg->{password_env}) && length($cfg->{password_env})) {
-      $password = $ENV{$cfg->{password_env}} // '';
-    }
-    $normalized = {
-      backend      => 'postgresql',
-      path         => '',
-      dsn          => $dsn,
-      user         => $user,
-      password     => $password,
-      schema_file  => ($cfg->{schema_file} // ''),
-      auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
-    };
-  } elsif ($backend eq 'jsonlog') {
-    my $path = $cfg->{log_path} // $cfg->{path} // '';
-    croak 'usage_store.log_path (or path) is required for jsonlog backend' unless length $path;
-    my $mode = $cfg->{mode} // '';
-    if (!length($mode)) {
-      $mode = (-d $path || $path =~ m{/$}) ? 'dir' : 'file';
-    }
-    $normalized = {
-      backend => 'jsonlog',
-      path    => $path,
-      mode    => $mode,
-    };
-  } else {
-    croak "unsupported usage_store backend '$backend'";
-  }
+  my $normalized = Langertha::Skeid::UsageStore->normalize_config(
+    $cfg,
+    default_sqlite_path => ($self->has_usage_db_path ? $self->usage_db_path : undef),
+  );
 
   my $old = $self->usage_store || {};
   my $same = ref($old) eq 'HASH'
     && (($old->{backend} // '') eq ($normalized->{backend} // ''))
     && (($old->{dsn} // '') eq ($normalized->{dsn} // ''))
+    && (($old->{path} // '') eq ($normalized->{path} // ''))
+    && (($old->{mode} // '') eq ($normalized->{mode} // ''))
     && (($old->{user} // '') eq ($normalized->{user} // ''))
     && (($old->{password} // '') eq ($normalized->{password} // ''))
     && (($old->{schema_file} // '') eq ($normalized->{schema_file} // ''))
     && ((($old->{auto_migrate} // 1) ? 1 : 0) == (($normalized->{auto_migrate} // 1) ? 1 : 0));
 
+  # Rebuild when the config changed, and also when there simply is no store object yet:
+  # BUILD hands us the caller's raw config as $old, which can compare equal to its own
+  # normalized form and would otherwise leave the store unbuilt.
   my $changed = $same ? 0 : 1;
-  unless ($same) {
-    $self->_disconnect_usage_dbh;
+  if ($changed || !$self->_usage_store_obj) {
+    $self->_disconnect_usage_store;
     $self->usage_store($normalized);
+    $self->_usage_store_obj(Langertha::Skeid::UsageStore->for_config($normalized));
+    my $store = $self->_usage_store_obj;
+    $store->prepare if $store;
   }
 
   if ($normalized->{backend} eq 'sqlite') {
@@ -578,20 +610,8 @@ sub _configure_usage_store {
     $self->clear_usage_db_path if $self->has_usage_db_path;
   }
 
-  if ($normalized->{backend} eq 'jsonlog') {
-    my $path = $normalized->{path};
-    if ($normalized->{mode} eq 'dir') {
-      make_path($path) unless -d $path;
-    } else {
-      my $dir = dirname($path);
-      make_path($dir) if length($dir) && $dir ne '.' && !-d $dir;
-    }
-  } else {
-    $self->_ensure_usage_schema_if_enabled if $changed || !$self->_usage_dbh_cached;
-  }
   return $self->usage_store;
 }
-
 sub _set_usage_db_path {
   my ($self, $path) = @_;
   return $self->_configure_usage_store({
@@ -600,89 +620,6 @@ sub _set_usage_db_path {
   });
 }
 
-sub _usage_backend {
-  my ($self) = @_;
-  my $store = $self->usage_store || {};
-  if (ref($store) eq 'HASH' && defined($store->{backend}) && length($store->{backend})) {
-    return $store->{backend};
-  }
-  my $path = $self->usage_db_path;
-  return (defined($path) && length($path)) ? 'sqlite' : '';
-}
-
-sub _usage_dsn {
-  my ($self) = @_;
-  my $store = $self->usage_store || {};
-  if (ref($store) eq 'HASH' && defined($store->{dsn}) && length($store->{dsn})) {
-    return $store->{dsn};
-  }
-  my $path = $self->usage_db_path;
-  return (defined($path) && length($path)) ? ('dbi:SQLite:dbname=' . $path) : '';
-}
-
-sub _usage_dbh {
-  my ($self) = @_;
-  my $cached = $self->_usage_dbh_cached;
-  return $cached if $cached;
-
-  my $backend = $self->_usage_backend;
-  my $dsn = $self->_usage_dsn;
-  return unless length($backend) && length($dsn);
-
-  eval { require DBI } or return;
-
-  my $store = $self->usage_store || {};
-  my $user = (ref($store) eq 'HASH' ? ($store->{user} // '') : '');
-  my $password = (ref($store) eq 'HASH' ? ($store->{password} // '') : '');
-
-  if ($backend eq 'sqlite') {
-    my $path = (ref($store) eq 'HASH' ? ($store->{path} // $self->usage_db_path) : $self->usage_db_path);
-    my $dir = dirname($path);
-    if (defined $dir && length $dir && $dir ne '.' && !-d $dir) {
-      make_path($dir);
-    }
-  }
-
-  my %connect_attr = (
-    RaiseError => 1,
-    PrintError => 0,
-    AutoCommit => 1,
-  );
-  $connect_attr{sqlite_unicode} = 1 if $backend eq 'sqlite';
-
-  my $dbh = DBI->connect($dsn, $user, $password, \%connect_attr);
-  $self->_usage_dbh_cached($dbh);
-  return $dbh;
-}
-
-sub _disconnect_usage_dbh {
-  my ($self) = @_;
-  my $dbh = $self->_usage_dbh_cached or return;
-  eval { $dbh->disconnect };
-  $self->_usage_dbh_cached(undef);
-  return;
-}
-
-sub _ensure_usage_schema_if_enabled {
-  my ($self) = @_;
-  my $backend = $self->_usage_backend;
-  return unless length $backend;
-  my $dbh = $self->_usage_dbh or return;
-
-  my $store = $self->usage_store || {};
-  my $auto_migrate = (ref($store) eq 'HASH' && exists($store->{auto_migrate}))
-    ? ($store->{auto_migrate} ? 1 : 0)
-    : 1;
-  return 1 unless $auto_migrate;
-
-  my $schema_file = (ref($store) eq 'HASH' ? ($store->{schema_file} // '') : '');
-  $schema_file = $self->_schema_file_for_backend($backend) unless length $schema_file;
-  croak "usage schema file not found: $schema_file" unless -f $schema_file;
-
-  my $sql = _read_text_file($schema_file);
-  _apply_schema_sql($dbh, $sql);
-  return 1;
-}
 
 sub _num {
   my ($v) = @_;
@@ -759,6 +696,7 @@ sub record_usage {
     provider      => ($args{provider} // ''),
     engine        => ($args{engine} // ''),
     model         => ($args{model} // ''),
+    requested_model => ($args{requested_model} // $args{model} // ''),
     node_id       => ($args{node_id} // ''),
     route_url     => ($args{route_url} // ''),
     status_code   => (_num($args{status_code}) || 0),
@@ -781,176 +719,10 @@ sub record_usage {
 sub _store_usage_event {
   my ($self, $event) = @_;
   return $self->store_usage_event->($self, $event) if $self->has_store_usage_event;
-  my $backend = $self->_usage_backend;
-  return { ok => 0, error => 'usage_store not configured' } unless length $backend;
-
-  return $self->_store_usage_event_jsonlog($event) if $backend eq 'jsonlog';
-
-  my $dbh = eval { $self->_usage_dbh };
-  if (!$dbh || $@) {
-    my $err = $@ || 'failed to connect usage database';
-    $err =~ s/\s+$//;
-    return { ok => 0, error => $err };
-  }
-
-  my $sth = $dbh->prepare_cached(q{
-    INSERT INTO usage_events (
-      created_at, request_id, api_format, endpoint, api_key_id, provider, engine, model, node_id, route_url,
-      status_code, ok, duration_ms, input_tokens, output_tokens, total_tokens, tool_calls,
-      cost_input_usd, cost_output_usd, cost_total_usd, error_type, error_message
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  });
-  $sth->execute(
-    $event->{created_at},
-    $event->{request_id},
-    $event->{api_format},
-    $event->{endpoint},
-    $event->{api_key_id},
-    $event->{provider},
-    $event->{engine},
-    $event->{model},
-    $event->{node_id},
-    $event->{route_url},
-    $event->{status_code},
-    $event->{ok},
-    $event->{duration_ms},
-    $event->{input_tokens},
-    $event->{output_tokens},
-    $event->{total_tokens},
-    $event->{tool_calls},
-    $event->{cost_input_usd},
-    $event->{cost_output_usd},
-    $event->{cost_total_usd},
-    $event->{error_type},
-    $event->{error_message},
-  );
-
-  my %out = (ok => 1);
-  if ($backend eq 'sqlite' && $dbh->can('sqlite_last_insert_rowid')) {
-    $out{id} = _num($dbh->sqlite_last_insert_rowid);
-  }
-  return \%out;
+  my $store = $self->_usage_store_obj;
+  return { ok => 0, error => 'usage_store not configured' } unless $store;
+  return $store->store($event);
 }
-
-sub _jsonlog_event_id {
-  my $ts = strftime('%Y%m%d-%H%M%S', gmtime());
-  my $rand = sprintf('%06d', int(rand(1_000_000)));
-  return "${ts}-${rand}";
-}
-
-sub _store_usage_event_jsonlog {
-  my ($self, $event) = @_;
-  my $store = $self->usage_store || {};
-  my $path = $store->{path} // '';
-  my $mode = $store->{mode} // 'dir';
-
-  my $id = _jsonlog_event_id();
-  my $json = encode_json({ %$event, id => $id });
-
-  if ($mode eq 'dir') {
-    my $file = File::Spec->catfile($path, "${id}.json");
-    open my $fh, '>', $file or return { ok => 0, error => "Cannot write $file: $!" };
-    print $fh $json, "\n";
-    close $fh;
-  } else {
-    open my $fh, '>>', $path or return { ok => 0, error => "Cannot append $path: $!" };
-    flock($fh, 2); # LOCK_EX
-    print $fh $json, "\n";
-    close $fh;
-  }
-
-  return { ok => 1, id => $id };
-}
-
-sub _query_usage_report_jsonlog {
-  my ($self, $filters) = @_;
-  my $store = $self->usage_store || {};
-  my $path = $store->{path} // '';
-  my $mode = $store->{mode} // 'dir';
-
-  my @events;
-  if ($mode eq 'dir') {
-    my @files = sort glob(File::Spec->catfile($path, '*.json'));
-    for my $file (@files) {
-      my $text = eval { _read_text_file($file) };
-      next unless defined $text;
-      my $ev = eval { decode_json($text) };
-      push @events, $ev if ref($ev) eq 'HASH';
-    }
-  } else {
-    if (open my $fh, '<', $path) {
-      while (my $line = <$fh>) {
-        chomp $line;
-        next unless length $line;
-        my $ev = eval { decode_json($line) };
-        push @events, $ev if ref($ev) eq 'HASH';
-      }
-      close $fh;
-    }
-  }
-
-  # Apply filters
-  if (defined $filters->{since} && length $filters->{since}) {
-    @events = grep { ($_->{created_at} // '') ge $filters->{since} } @events;
-  }
-  if (defined $filters->{api_key_id} && length $filters->{api_key_id}) {
-    @events = grep { ($_->{api_key_id} // '') eq $filters->{api_key_id} } @events;
-  }
-  if (defined $filters->{model} && length $filters->{model}) {
-    @events = grep { ($_->{model} // '') eq $filters->{model} } @events;
-  }
-
-  # Aggregate
-  my %totals = (requests => 0, input_tokens => 0, output_tokens => 0, total_tokens => 0, tool_calls => 0, total_cost_usd => 0);
-  my (%by_key, %by_model);
-  for my $ev (@events) {
-    $totals{requests}++;
-    $totals{input_tokens}  += _num($ev->{input_tokens});
-    $totals{output_tokens} += _num($ev->{output_tokens});
-    $totals{total_tokens}  += _num($ev->{total_tokens});
-    $totals{tool_calls}    += _num($ev->{tool_calls});
-    $totals{total_cost_usd} += _num($ev->{cost_total_usd});
-
-    my $kid = $ev->{api_key_id} // '';
-    $by_key{$kid}{requests}++;
-    $by_key{$kid}{total_tokens}   += _num($ev->{total_tokens});
-    $by_key{$kid}{total_cost_usd} += _num($ev->{cost_total_usd});
-
-    my $mid = $ev->{model} // '';
-    $by_model{$mid}{requests}++;
-    $by_model{$mid}{total_tokens}   += _num($ev->{total_tokens});
-    $by_model{$mid}{total_cost_usd} += _num($ev->{cost_total_usd});
-  }
-
-  my $limit = $filters->{limit} // 20;
-  my @recent = reverse @events;
-  @recent = @recent[0 .. $limit - 1] if @recent > $limit;
-
-  return {
-    ok      => 1,
-    enabled => 1,
-    backend => 'jsonlog',
-    since   => ($filters->{since} // ''),
-    totals  => \%totals,
-    by_key  => [ map {
-      +{ api_key_id => $_, requests => $by_key{$_}{requests}, total_tokens => $by_key{$_}{total_tokens}, total_cost_usd => $by_key{$_}{total_cost_usd} }
-    } sort { ($by_key{$b}{total_cost_usd} || 0) <=> ($by_key{$a}{total_cost_usd} || 0) } keys %by_key ],
-    by_model => [ map {
-      +{ model => $_, requests => $by_model{$_}{requests}, total_tokens => $by_model{$_}{total_tokens}, total_cost_usd => $by_model{$_}{total_cost_usd} }
-    } sort { ($by_model{$b}{total_cost_usd} || 0) <=> ($by_model{$a}{total_cost_usd} || 0) } keys %by_model ],
-    recent  => [ map {
-      +{
-        id => ($_->{id} // ''), created_at => ($_->{created_at} // ''), api_format => ($_->{api_format} // ''),
-        endpoint => ($_->{endpoint} // ''), api_key_id => ($_->{api_key_id} // ''), model => ($_->{model} // ''),
-        node_id => ($_->{node_id} // ''), status_code => _num($_->{status_code}), ok => ($_->{ok} ? 1 : 0),
-        input_tokens => _num($_->{input_tokens}), output_tokens => _num($_->{output_tokens}),
-        total_tokens => _num($_->{total_tokens}), tool_calls => _num($_->{tool_calls}),
-        cost_total_usd => _num($_->{cost_total_usd}),
-      }
-    } @recent ],
-  };
-}
-
 sub usage_report {
   my ($self, %args) = @_;
 
@@ -970,141 +742,10 @@ sub usage_report {
 sub _query_usage_report {
   my ($self, $filters) = @_;
   return $self->query_usage_report->($self, $filters) if $self->has_query_usage_report;
-  my $backend = $self->_usage_backend;
-  return $self->_query_usage_report_jsonlog($filters) if $backend eq 'jsonlog';
-  return { ok => 0, enabled => 0, error => 'usage_store not configured' } unless length $backend;
-
-  my $dbh = eval { $self->_usage_dbh };
-  if (!$dbh || $@) {
-    my $err = $@ || 'failed to connect usage database';
-    $err =~ s/\s+$//;
-    return { ok => 0, enabled => 0, error => $err };
-  }
-
-  my $limit = $filters->{limit} // 20;
-
-  my @where;
-  my @bind;
-  if (defined $filters->{since} && length $filters->{since}) {
-    push @where, 'created_at >= ?';
-    push @bind, $filters->{since};
-  }
-  if (defined $filters->{api_key_id} && length $filters->{api_key_id}) {
-    push @where, 'api_key_id = ?';
-    push @bind, $filters->{api_key_id};
-  }
-  if (defined $filters->{model} && length $filters->{model}) {
-    push @where, 'model = ?';
-    push @bind, $filters->{model};
-  }
-
-  my $where_sql = @where ? ('WHERE ' . join(' AND ', @where)) : '';
-
-  my $totals = $dbh->selectrow_hashref(
-    "SELECT
-       COUNT(*) AS requests,
-       COALESCE(SUM(input_tokens), 0) AS input_tokens,
-       COALESCE(SUM(output_tokens), 0) AS output_tokens,
-       COALESCE(SUM(total_tokens), 0) AS total_tokens,
-       COALESCE(SUM(tool_calls), 0) AS tool_calls,
-       COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
-     FROM usage_events $where_sql",
-    undef,
-    @bind,
-  ) || {};
-
-  my $by_key = $dbh->selectall_arrayref(
-    "SELECT
-       COALESCE(api_key_id, '') AS api_key_id,
-       COUNT(*) AS requests,
-       COALESCE(SUM(total_tokens), 0) AS total_tokens,
-       COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
-     FROM usage_events
-     $where_sql
-     GROUP BY api_key_id
-     ORDER BY total_cost_usd DESC, requests DESC",
-    { Slice => {} },
-    @bind,
-  ) || [];
-
-  my $by_model = $dbh->selectall_arrayref(
-    "SELECT
-       COALESCE(model, '') AS model,
-       COUNT(*) AS requests,
-       COALESCE(SUM(total_tokens), 0) AS total_tokens,
-       COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
-     FROM usage_events
-     $where_sql
-     GROUP BY model
-     ORDER BY total_cost_usd DESC, requests DESC",
-    { Slice => {} },
-    @bind,
-  ) || [];
-
-  my $recent = $dbh->selectall_arrayref(
-    "SELECT
-       id, created_at, api_format, endpoint, api_key_id, model, node_id, status_code, ok,
-       input_tokens, output_tokens, total_tokens, tool_calls, cost_total_usd
-     FROM usage_events
-     $where_sql
-     ORDER BY id DESC
-     LIMIT ?",
-    { Slice => {} },
-    @bind,
-    $limit,
-  ) || [];
-
-  return {
-    ok        => 1,
-    enabled   => 1,
-    backend   => $backend,
-    db_path   => ($backend eq 'sqlite' ? ($self->usage_db_path // '') : ''),
-    since     => ($filters->{since} // ''),
-    totals    => {
-      requests       => _num($totals->{requests}),
-      input_tokens   => _num($totals->{input_tokens}),
-      output_tokens  => _num($totals->{output_tokens}),
-      total_tokens   => _num($totals->{total_tokens}),
-      tool_calls     => _num($totals->{tool_calls}),
-      total_cost_usd => _num($totals->{total_cost_usd}),
-    },
-    by_key   => [ map {
-      +{
-        api_key_id     => ($_->{api_key_id} // ''),
-        requests       => _num($_->{requests}),
-        total_tokens   => _num($_->{total_tokens}),
-        total_cost_usd => _num($_->{total_cost_usd}),
-      }
-    } @$by_key ],
-    by_model => [ map {
-      +{
-        model          => ($_->{model} // ''),
-        requests       => _num($_->{requests}),
-        total_tokens   => _num($_->{total_tokens}),
-        total_cost_usd => _num($_->{total_cost_usd}),
-      }
-    } @$by_model ],
-    recent   => [ map {
-      +{
-        id            => _num($_->{id}),
-        created_at    => ($_->{created_at} // ''),
-        api_format    => ($_->{api_format} // ''),
-        endpoint      => ($_->{endpoint} // ''),
-        api_key_id    => ($_->{api_key_id} // ''),
-        model         => ($_->{model} // ''),
-        node_id       => ($_->{node_id} // ''),
-        status_code   => _num($_->{status_code}),
-        ok            => ($_->{ok} ? 1 : 0),
-        input_tokens  => _num($_->{input_tokens}),
-        output_tokens => _num($_->{output_tokens}),
-        total_tokens  => _num($_->{total_tokens}),
-        tool_calls    => _num($_->{tool_calls}),
-        cost_total_usd => _num($_->{cost_total_usd}),
-      }
-    } @$recent ],
-  };
+  my $store = $self->_usage_store_obj;
+  return { ok => 0, enabled => 0, error => 'usage_store not configured' } unless $store;
+  return $store->report($filters);
 }
-
 sub _usage_object {
   my ($self, %args) = @_;
   return Langertha::Usage->from_hash($args{usage}) if ref($args{usage}) eq 'HASH';
@@ -1157,6 +798,12 @@ sub _route_key {
   my ($self, %args) = @_;
   my $model  = $args{model}  // '';
   my $engine = $self->normalize_engine_id($args{engine} // '');
+  my $tags   = join(',', @{$self->normalize_tags($args{tags})});
+  my $deny   = join(',', @{$self->normalize_tags($args{deny_tags})});
+  # Tags belong in the key: two selections over the same model address different node sets, and
+  # a shared round-robin cursor across different-sized sets picks the wrong node. Denied tags
+  # too -- a key that may not use cloud addresses a smaller set than one that may.
+  return join('|', $model, $engine, $tags, ($deny ? "-$deny" : ())) if length($tags) || length($deny);
   return join('|', $model, $engine);
 }
 
@@ -1166,35 +813,65 @@ sub _node_can_take {
   return 0 unless ($node->{healthy} // 0);
   my $id = $node->{id} // '';
   return 0 unless length $id;
+
   my $max = 0 + ($node->{max_conns} // 0);
   my $inflight = 0 + ($self->_inflight->{$id} // 0);
   return 1 if $max <= 0;
   return $inflight < $max ? 1 : 0;
 }
 
-sub _eligible_nodes {
-  my ($self, %args) = @_;
-  my $model  = $args{model};
-  my $engine = $self->normalize_engine_id($args{engine} // '');
-  my @nodes = @{$self->nodes || []};
-
-  @nodes = grep {
-    !defined($model) || !length($model) || !defined($_->{model}) || !length($_->{model}) || $_->{model} eq $model
-  } @nodes;
-  @nodes = grep {
-    !defined($engine) || !length($engine) || !defined($_->{engine}) || !length($_->{engine}) || $_->{engine} eq $engine
-  } @nodes;
-  @nodes = grep { ($_->{healthy} // 0) ? 1 : 0 } @nodes;
-
-  return [ map { +{%$_} } @nodes ];
+sub _node_has_tags {
+  my ($self, $node, $tags) = @_;
+  return 1 unless $tags && @$tags;
+  my %have = map { $_ => 1 } @{$node->{tags} || []};
+  for my $tag (@$tags) {
+    return 0 unless $have{$tag};
+  }
+  return 1;
 }
 
-sub pick_node {
-  my ($self, %args) = @_;
-  my $eligible = $self->_eligible_nodes(%args);
-  return unless @$eligible;
+# The deny side is ANY, not ALL: one forbidden tag on a node is enough to rule it out. A policy
+# that denies "cloud" must exclude a node tagged [cloud, groq] without having to name groq too.
+sub _node_has_any_tag {
+  my ($self, $node, $tags) = @_;
+  return 0 unless $tags && @$tags;
+  my %have = map { $_ => 1 } @{$node->{tags} || []};
+  for my $tag (@$tags) {
+    return 1 if $have{$tag};
+  }
+  return 0;
+}
 
-  my @nodes = sort { ($a->{id} // '') cmp ($b->{id} // '') } @$eligible;
+# Everything derived from the inventory -- which nodes are eligible, their round-robin order
+# and their weights -- is computed once per selection and reused until the inventory changes.
+# Only admission stays per request, because inflight is the one part that moves between two
+# requests to the same selection.
+sub _route_entry {
+  my ($self, %args) = @_;
+  my $cache = $self->_route_cache;
+  if (($cache->{generation} // -1) != $self->_inventory_generation) {
+    $cache = { generation => $self->_inventory_generation, entries => {} };
+    $self->_route_cache($cache);
+  }
+
+  my $key = $self->_route_key(%args);
+  my $entry = $cache->{entries}{$key};
+  return $entry if $entry;
+
+  my $model  = $args{model};
+  my $engine = $self->normalize_engine_id($args{engine} // '');
+  my $tags   = $self->normalize_tags($args{tags});
+  my $deny   = $self->normalize_tags($args{deny_tags});
+
+  my @nodes = grep {
+    (!defined($model) || !length($model) || !defined($_->{model}) || !length($_->{model}) || $_->{model} eq $model)
+      && (!defined($engine) || !length($engine) || !defined($_->{engine}) || !length($_->{engine}) || $_->{engine} eq $engine)
+      && (($_->{healthy} // 0) ? 1 : 0)
+      && $self->_node_has_tags($_, $tags)
+      && !$self->_node_has_any_tag($_, $deny)
+  } @{$self->nodes || []};
+
+  @nodes = sort { ($a->{id} // '') cmp ($b->{id} // '') } @nodes;
   my @weights = map {
     my $w = 0 + ($_->{weight} // 1);
     $w = 1 if $w < 1;
@@ -1202,6 +879,314 @@ sub pick_node {
   } @nodes;
   my $total_weight = 0;
   $total_weight += $_ for @weights;
+
+  return $cache->{entries}{$key} = {
+    nodes        => \@nodes,
+    weights      => \@weights,
+    total_weight => $total_weight,
+  };
+}
+
+# Returns the live node hashrefs, not copies. Callers read them and must not mutate them --
+# pick_node builds its own hash for the node it returns.
+sub _eligible_nodes {
+  my ($self, %args) = @_;
+  return $self->_route_entry(%args)->{nodes};
+}
+
+=method set_model_alias
+
+  $skeid->set_model_alias('our-fast-model', {
+    tiers => [
+      { tags => ['local'], model => 'qwen3-32b',              wait_ms => 200 },
+      { tags => ['cloud'], model => 'llama-3.3-70b-versatile' },
+    ],
+  });
+
+Defines a client-facing model name as an ordered list of tiers. A bare arrayref of tiers is
+accepted as shorthand for C<< { tiers => [...] } >>.
+
+Per tier: C<tags> selects nodes, C<model> is the model actually asked of them (defaulting to
+the alias name itself, for the case where nodes carry that name), C<engine> optionally
+constrains the engine, and C<wait_ms> is how long to wait for capacity in this tier before
+falling through to the next.
+
+C<wait_ms> defaults to B<0>. Writing tiers means "try here, then there"; waiting is the
+exception you opt into, and a tier that waits by default would send traffic to a paid cloud
+only after a delay nobody asked for -- or, worse, make a cheap tier look slow.
+
+=cut
+
+sub set_model_alias {
+  my ($self, $name, $spec) = @_;
+  croak 'alias name required' unless defined $name && length $name;
+
+  my $tiers = ref($spec) eq 'ARRAY' ? $spec
+            : ref($spec) eq 'HASH'  ? $spec->{tiers}
+            : croak "alias '$name': must be a hashref with tiers, or an arrayref of tiers";
+  croak "alias '$name': tiers must be an arrayref" unless ref($tiers) eq 'ARRAY';
+  croak "alias '$name': needs at least one tier" unless @$tiers;
+
+  my @normalized;
+  for my $tier (@$tiers) {
+    croak "alias '$name': each tier must be a hashref" unless ref($tier) eq 'HASH';
+    push @normalized, {
+      tags    => $self->normalize_tags($tier->{tags}),
+      model   => ((defined($tier->{model}) && length($tier->{model})) ? "$tier->{model}" : $name),
+      engine  => $self->normalize_engine_id($tier->{engine} // ''),
+      wait_ms => (defined($tier->{wait_ms}) && $tier->{wait_ms} > 0 ? 0 + $tier->{wait_ms} : 0),
+    };
+  }
+
+  $self->model_aliases->{$name} = { tiers => \@normalized };
+  return 1;
+}
+
+=method set_policy
+
+  $skeid->set_policy('standard-local-only', { deny_tags => ['cloud'] });
+
+Defines a named policy profile. Profiles are the "standard setups" most customers take
+unchanged; a customer needing something precise gets the profile plus overrides, or a profile
+of their own.
+
+=cut
+
+sub set_policy {
+  my ($self, $name, $spec) = @_;
+  croak 'policy name required' unless defined $name && length $name;
+  $self->policies->{$name} = $self->resolve_policy($spec, $name);
+  return 1;
+}
+
+=method resolve_policy
+
+  my $policy = $skeid->resolve_policy({ models => ['house-model'], deny_tags => ['cloud'] });
+
+Turns a policy spec into the immutable form routing uses: C<models> (or C<aliases>) becomes a
+lookup hash of the requested model names the key may ask for, absent meaning all of them, and
+C<deny_tags> becomes a normalized tag list.
+
+=cut
+
+sub resolve_policy {
+  my ($self, $spec, $name) = @_;
+  $spec = {} unless ref($spec) eq 'HASH';
+
+  my $allow = $spec->{models} // $spec->{aliases};
+  my $allow_models;
+  if (defined $allow) {
+    my @list = ref($allow) eq 'ARRAY' ? @$allow : split(/[,\s]+/, "$allow");
+    @list = grep { defined && length } @list;
+    # An explicit '*' is the same as saying nothing, and saying it out loud reads better in a
+    # config than an absent key.
+    $allow_models = (grep { $_ eq '*' } @list) ? undef : { map { $_ => 1 } @list };
+  }
+
+  return {
+    name         => ($name // $spec->{name} // ''),
+    allow_models => $allow_models,
+    deny_tags    => $self->normalize_tags($spec->{deny_tags}),
+  };
+}
+
+# Resolves the whole policy section once, at config load. Nothing here happens per request:
+# a request costs one hash lookup, and identical resolutions share a single object, so a
+# thousand keys on three profiles are three policy objects and a thousand pointers.
+sub _load_policies {
+  my ($self, $cfg) = @_;
+
+  my %policies;
+  if (ref($cfg->{policies}) eq 'HASH') {
+    for my $name (keys %{$cfg->{policies}}) {
+      $policies{$name} = $self->resolve_policy($cfg->{policies}{$name}, $name);
+    }
+  }
+
+  my %interned = map { $self->_policy_fingerprint($_) => $_ } values %policies;
+  my $intern = sub {
+    my ($policy) = @_;
+    my $print = $self->_policy_fingerprint($policy);
+    return $interned{$print} ||= $policy;
+  };
+
+  my $default;
+  if (defined $cfg->{default_policy} && length $cfg->{default_policy}) {
+    $default = $policies{$cfg->{default_policy}};
+    croak "default_policy '$cfg->{default_policy}' is not defined in policies" unless $default;
+  }
+
+  my %key_policies;
+  if (ref($cfg->{keys}) eq 'HASH') {
+    for my $key (keys %{$cfg->{keys}}) {
+      my $entry = $cfg->{keys}{$key};
+
+      if (!ref($entry)) {
+        my $policy = $policies{$entry};
+        croak "key '$key' references undefined policy '$entry'" unless $policy;
+        $key_policies{$key} = $policy;
+        next;
+      }
+
+      croak "key '$key' must be a policy name or a hashref" unless ref($entry) eq 'HASH';
+
+      my $base = {};
+      if (defined $entry->{policy} && length $entry->{policy}) {
+        my $named = $policies{$entry->{policy}};
+        croak "key '$key' references undefined policy '$entry->{policy}'" unless $named;
+        $base = $named;
+      } elsif ($default) {
+        $base = $default;
+      }
+
+      # Overrides are sparse: an absent field keeps the profile's value, so "same as standard
+      # but allowed to use cloud" is one line rather than a restated profile.
+      my $overrides = ref($entry->{overrides}) eq 'HASH' ? $entry->{overrides} : $entry;
+      my $merged = {
+        name         => ($base->{name} // ''),
+        allow_models => (exists($overrides->{models}) || exists($overrides->{aliases})
+                          ? $self->resolve_policy($overrides)->{allow_models}
+                          : $base->{allow_models}),
+        deny_tags    => (exists($overrides->{deny_tags})
+                          ? $self->normalize_tags($overrides->{deny_tags})
+                          : ($base->{deny_tags} // [])),
+      };
+      $key_policies{$key} = $intern->($merged);
+    }
+  }
+
+  $self->policies(\%policies);
+  $self->default_policy($default);
+  $self->key_policies(\%key_policies);
+  return 1;
+}
+
+sub _policy_fingerprint {
+  my ($self, $policy) = @_;
+  my $models = defined($policy->{allow_models}) ? join(',', sort keys %{$policy->{allow_models}}) : '*';
+  return join("\0", $models, join(',', @{$policy->{deny_tags}}));
+}
+
+=method key_id_for_key
+
+  my $id = Langertha::Skeid->key_id_for_key('sk-alice-secret');   # k_5f0e...
+
+The customer key id derived from the presented API key. This is the name a C<keys:> entry has
+to use, and C<skeid keyid> prints it, because the config must be able to name a customer
+without holding that customer's key.
+
+It is a truncated digest, not a secret: it identifies, it does not authenticate. What
+authenticates is that the caller presented the key it was derived from.
+
+=cut
+
+sub key_id_for_key {
+  my ($self, $api_key) = @_;
+  return 'anonymous' unless defined($api_key) && length($api_key);
+  return 'k_' . substr(sha1_hex($api_key), 0, 12);
+}
+
+=method policy_for_key
+
+  my $policy = $skeid->policy_for_key('alice');
+
+The policy a customer key routes under. Unlisted keys take the default policy, which is what
+makes a deployment with ten thousand identically-configured customers a config with zero key
+entries. Returns undef when no policies are configured at all.
+
+=cut
+
+sub policy_for_key {
+  my ($self, $api_key_id) = @_;
+  return $self->key_policies->{$api_key_id}
+    if defined($api_key_id) && length($api_key_id) && $self->key_policies->{$api_key_id};
+  return $self->default_policy;
+}
+
+=method route_plan
+
+  my $plan = $skeid->route_plan(model => 'our-fast-model', api_key_id => 'alice');
+  # { tiers => [...], permitted => 1, reason => '' }
+
+The ordered tiers to try for a requested model, under the policy of the key that asked. A model
+with no alias yields a single implicit tier that selects on the name itself and inherits the
+global C<route_wait_timeout_ms>, which is what makes an aliasless config behave exactly as it
+did before aliases existed.
+
+C<permitted> is false when the policy does not grant this model, or when every tier of it was
+denied. Both mean the same thing to a caller — this key may not reach this model — and neither
+is a capacity problem, so they must not be reported as one.
+
+Tiers carry the policy's C<deny_tags> down into node selection. Dropping a denied tier is only
+the reporting half; without the node-level filter, a key denied C<cloud> could still reach a
+cloud node by asking for its raw model name instead of the alias.
+
+=cut
+
+sub route_plan {
+  my ($self, %args) = @_;
+  my $model  = $args{model} // '';
+  my $policy = $self->policy_for_key($args{api_key_id});
+  my $deny   = $policy ? $policy->{deny_tags} : [];
+
+  if ($policy && $policy->{allow_models} && !$policy->{allow_models}{$model}) {
+    return { tiers => [], permitted => 0, reason => 'model_not_permitted' };
+  }
+
+  my $alias = $self->model_aliases->{$model};
+  my @tiers = $alias
+    ? (map { +{ %$_, deny_tags => $deny } } @{$alias->{tiers}})
+    : ({
+        tags      => [],
+        model     => $model,
+        engine    => $self->normalize_engine_id($args{engine} // ''),
+        wait_ms   => 0 + ($self->route_wait_timeout_ms // 0),
+        deny_tags => $deny,
+      });
+
+  my $before = scalar @tiers;
+  if (@$deny) {
+    my %denied = map { $_ => 1 } @$deny;
+    @tiers = grep {
+      my $tier = $_;
+      !grep { $denied{$_} } @{$tier->{tags} || []};
+    } @tiers;
+  }
+
+  return { tiers => [], permitted => 0, reason => 'all_tiers_denied' }
+    if $before && !@tiers;
+
+  return { tiers => \@tiers, permitted => 1, reason => '' };
+}
+
+=method select_nodes
+
+  my $local = $skeid->select_nodes(tags => ['local']);
+
+Nodes carrying every listed tag, as copies. No tags selects everything. Selection is by tag,
+never by node id, so a config can talk about C<local> or C<cloud> without naming machines.
+
+=cut
+
+sub select_nodes {
+  my ($self, %args) = @_;
+  my $tags = $self->normalize_tags($args{tags});
+  my $deny = $self->normalize_tags($args{deny_tags});
+  return [
+    map { +{%$_} }
+    grep { $self->_node_has_tags($_, $tags) && !$self->_node_has_any_tag($_, $deny) }
+    @{$self->nodes || []}
+  ];
+}
+
+sub pick_node {
+  my ($self, %args) = @_;
+  my $entry = $self->_route_entry(%args);
+  my @nodes = @{$entry->{nodes}};
+  return unless @nodes;
+
+  my @weights = @{$entry->{weights}};
+  my $total_weight = $entry->{total_weight};
   return unless $total_weight > 0;
 
   my $key = $self->_route_key(%args);
@@ -1239,6 +1224,8 @@ sub route_state {
   return {
     model          => ($args{model} // ''),
     engine         => $engine,
+    tags           => $self->normalize_tags($args{tags}),
+    deny_tags      => $self->normalize_tags($args{deny_tags}),
     eligible_count => scalar(@$eligible),
     available_count => scalar(@$available),
     has_eligible   => @$eligible ? 1 : 0,
@@ -1329,6 +1316,27 @@ sub call_function {
   if ($name eq 'nodes.list') {
     return { nodes => $self->list_nodes };
   }
+  if ($name eq 'nodes.select') {
+    return { nodes => $self->select_nodes(tags => $args->{tags}, deny_tags => $args->{deny_tags}) };
+  }
+  if ($name eq 'alias.set') {
+    my $alias = $args->{name} // croak 'alias.set: name required';
+    return { ok => $self->set_model_alias($alias, $args->{alias} // $args) ? 1 : 0 };
+  }
+  if ($name eq 'route.plan') {
+    return $self->route_plan(
+      model      => ($args->{model} // ''),
+      engine     => $args->{engine},
+      api_key_id => $args->{api_key_id},
+    );
+  }
+  if ($name eq 'policy.set') {
+    my $policy = $args->{name} // croak 'policy.set: name required';
+    return { ok => $self->set_policy($policy, $args->{policy} // $args) ? 1 : 0 };
+  }
+  if ($name eq 'policy.for_key') {
+    return { policy => $self->policy_for_key($args->{api_key_id}) };
+  }
   if ($name eq 'nodes.set_health') {
     return { ok => $self->set_node_health($args->{id}, $args->{healthy}) ? 1 : 0 };
   }
@@ -1342,6 +1350,8 @@ sub call_function {
     my $node = $self->pick_node(
       model  => ($args->{model} // ''),
       engine => $self->normalize_engine_id($args->{engine} // ''),
+      tags   => $args->{tags},
+      deny_tags => $args->{deny_tags},
     );
     return { node => $node };
   }
@@ -1350,6 +1360,8 @@ sub call_function {
     return $self->route_state(
       model  => ($args->{model} // ''),
       engine => $engine,
+      tags   => $args->{tags},
+      deny_tags => $args->{deny_tags},
     );
   }
   if ($name eq 'request.start') {
@@ -1379,7 +1391,15 @@ sub call_function {
 
 sub DEMOLISH {
   my ($self) = @_;
-  $self->_disconnect_usage_dbh;
+  $self->_disconnect_usage_store;
+}
+
+sub _disconnect_usage_store {
+  my ($self) = @_;
+  my $store = $self->_usage_store_obj or return;
+  $store->disconnect;
+  $self->_usage_store_obj(undef);
+  return;
 }
 
 1;

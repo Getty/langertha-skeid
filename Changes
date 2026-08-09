@@ -2,6 +2,82 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Fix SSE streaming, which was broken end to end: the relay finished the
+      response on its first chunk, so clients received correct headers, a 200,
+      and an empty body. Chunks are now queued and drained through write_chunk
+      with a drain callback, and empty chunks are never relayed
+    - Fix usage accounting for streamed responses: SSE frames split across read
+      boundaries were dropped, which most often lost the final frame carrying
+      the token counts
+    - Support admin_api_key_env / admin.api_key_env, consistent with
+      usage_store's password_env. The shipped service stack used api_key_env
+      and silently ran with the admin API disabled
+    - Split protocol translation into Langertha::Skeid::Protocol::Anthropic
+      and ::Ollama, and the usage store into Langertha::Skeid::UsageStore
+      with ::JsonLog and ::DBI backends
+    - Fix jsonlog usage store ignoring a reconfigured path
+    - Declare File::ShareDir, namespace::clean and HTTP::Tiny in cpanfile;
+      all three were used at runtime but undeclared
+    - Stop forwarding hop-by-hop headers upstream (RFC 7230). A client sending
+      "Connection: close" made Skeid close its own upstream connection, so the
+      connection pool never held anything
+    - Raise the upstream connection pool from Mojo::UserAgent's default of 5 to
+      100, overridable with SKEID_UPSTREAM_POOL
+    - Remove the unused synchronous twins of the async request path
+    - Nodes carry tags, and routing can select by them (select_nodes,
+      nodes.select, and a tags argument on pick_node / route_state). Tags are
+      the grouping the per-key routing policy of ADR 0008 is built on
+    - Cache the node lists routing derives from the inventory, invalidated by
+      any change to it
+    - Model aliases: a client-facing model name resolves to an ordered list of
+      tiers, each selecting nodes by tag, naming the model to ask them for, and
+      carrying its own wait window. A saturated tier falls through to the next;
+      a tier with no eligible node is skipped without waiting. An exhausted
+      plan is 503 when nothing was ever eligible and 429 when everything was
+      busy. A model without an alias routes exactly as before
+    - Usage events record requested_model alongside model, so an alias cannot
+      silently lose which product a request was billed for.
+      Langertha::Skeid::UsageStore::DBI adds the column to a pre-existing table
+    - Per-key routing policy: a customer key decides which models it may ask
+      for and which node tags it may not be served from. Named profiles with a
+      default_policy and sparse per-key overrides, resolved once at config load
+      into shared immutable objects, so ten thousand identically-configured
+      customers cost no key entries and a request costs one hash lookup. A
+      refusal is 403, never a capacity code; running out of permitted capacity
+      stays 429 rather than falling through to a denied node
+    - deny_tags filters node selection, not just the routing plan. Denying the
+      cloud tier of an alias was otherwise worthless: the same node still
+      answered to its own model name
+    - SECURITY: stop taking the customer key id from the client's
+      x-skeid-key-id / x-api-key-id header. It selects the routing policy and
+      the invoice, and any client could set it to another customer's. The id is
+      now derived from the presented API key; the header is honoured only under
+      routing.trust_key_id_header, for deployments that authenticate callers in
+      front of Skeid. Deployments relying on the header must either set that
+      option or move to derived ids
+    - Add "skeid keyid", which prints the key id a customer key resolves to --
+      the name a keys: entry uses, so the config never holds a customer key
+    - Declare Digest::SHA in cpanfile; it was used at runtime but undeclared
+    - Add bench/: a C fake-LLM server with configurable TTFT and token rate,
+      plus a measuring client for TTFT and throughput distributions
+
+0.003     2026-05-16 17:10:00Z
+
+    - Add OpenBao KeyBroker integration (Langertha::Skeid::KeyBroker::OpenBao)
+      for secure API key management with AppRole auth
+    - Fix OpenBao AppRole token lifecycle: initial token is renew-only,
+      refresh() uses renew-self to get client_token for API calls
+    - Fix needs_refresh() to trigger on first call when no client_token exists
+    - Add streaming token tracking via SSE chunk parsing
+    - Add content byte tracking for usage estimation when provider doesn't
+      return usage in streaming chunks (GROQ compatibility)
+    - Add service stack Docker Compose example with OpenBao + PostgreSQL
+    - Add init-skeid.sh for automatic AppRole setup and customer key creation
+    - Add usage_schema.sql for PostgreSQL usage events schema
+    - Add skeid.yaml example for service stack configuration
+    - Dockerfile: add libpq-dev, jq, explicit DBI/DBD::Pg install
+    - cpanfile: fix DBI from recommends to requires for PostgreSQL users
+
 0.002     2026-04-10 00:37:36Z
 
     - Drop Langertha::Knarr dependency. Skeid no longer goes through

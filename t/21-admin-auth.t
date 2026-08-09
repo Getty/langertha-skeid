@@ -85,4 +85,32 @@ sub _request {
   is($tx4->res->code, 404, 'dynamic config: removing key disables routes again');
 }
 
+# admin.api_key_env: the deployed stack names the variable in the config and injects the value
+# as an environment variable, so the key never sits in a file that gets mounted into a
+# container. Without support for it the config names a key Skeid cannot see, and the admin API
+# silently disables itself -- a 404 that looks like a routing bug, not a config one.
+{
+  local $ENV{SKEID_ADMIN_API_KEY} = 'from-env-key';
+  my $skeid = Langertha::Skeid->new(
+    config_loader => sub {
+      return {
+        admin => { api_key_env => 'SKEID_ADMIN_API_KEY' },
+        nodes => [
+          { id => 'env-1', url => 'http://127.0.0.1:22002/v1', model => 'qwen2.5' },
+        ],
+      };
+    },
+  );
+  my $app = Langertha::Skeid::Proxy->build_app(skeid => $skeid);
+
+  my $tx1 = _request($app, 'GET', '/skeid/nodes');
+  is($tx1->res->code, 401, 'api_key_env: admin API is enabled, not 404');
+
+  my $tx2 = _request($app, 'GET', '/skeid/nodes', { Authorization => 'Bearer from-env-key' });
+  is($tx2->res->code, 200, 'api_key_env: value from the environment authorizes');
+
+  my $tx3 = _request($app, 'GET', '/skeid/nodes', { Authorization => 'Bearer SKEID_ADMIN_API_KEY' });
+  is($tx3->res->code, 401, 'api_key_env: the variable name is not itself the key');
+}
+
 done_testing;

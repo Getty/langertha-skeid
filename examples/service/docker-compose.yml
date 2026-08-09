@@ -4,8 +4,9 @@ services:
     container_name: skeid-openbao
     restart: unless-stopped
     environment:
-      # Dev mode - single server with file backend
-      BAO_DEV_ROOT_TOKEN: skeid-root-token
+      # Dev mode - single server with file backend.
+      # skeid-init authenticates with this same token; keep the two in sync via .env.
+      BAO_DEV_ROOT_TOKEN: ${OPENBAO_ROOT_TOKEN:-skeid-dev-root-token}
     volumes:
       - openbao-data:/opt/openbao/file
     ports:
@@ -46,8 +47,8 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      OPENBAO_ADDR: http://openbao:5501
-      OPENBAO_ROOT_TOKEN: skeid-root-token
+      OPENBAO_ADDR: http://openbao:8200
+      OPENBAO_ROOT_TOKEN: ${OPENBAO_ROOT_TOKEN:-skeid-dev-root-token}
       # These are written to OpenBao KV - secrets for app to use
       # In prod: use docker secret or external init
       SKEID_OPENAI_KEY: ${SKEID_OPENAI_KEY:-}

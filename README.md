@@ -9,12 +9,90 @@
 - Dynamic YAML reload on each task dispatch
 - Built-in usage store: `jsonlog` (recommended), `sqlite`, or `postgresql`
 - Pluggable usage backend: override via callback or subclass
+- **NEW**: OpenBao KeyBroker for secure API key management with AppRole auth
 
 ## Install
 
 ```bash
 cpanm --installdeps .
 ```
+
+## Quick Start (Single Container)
+
+```bash
+# Minimal SQLite setup
+docker run -d --name skeid \
+  -p 8090:8090 \
+  -v "$PWD/skeid-config:/etc/skeid:ro" \
+  -v "$PWD/skeid-data:/data/skeid" \
+  raudssus/langertha-skeid \
+  bin/skeid serve --listen 0.0.0.0:8090 --config /etc/skeid/skeid.yaml
+```
+
+## Service Stack (OpenBao + PostgreSQL)
+
+For production with secure key management:
+
+```bash
+cd examples/service
+docker compose up -d
+```
+
+This starts:
+- **openbao** — Secrets Vault with AppRole auth (KV v2)
+- **postgres** — Usage storage and config storage
+- **skeid** — LLM Proxy with OpenBao KeyBroker integration
+
+### Service Stack Architecture
+
+```
+Client Request (Authorization: Bearer sk-alice-...)
+       │
+       ▼
+   ┌─────────┐
+   │  Skeid  │
+   │  Proxy  │ ◄── Admin API key for /skeid/* routes
+   └────┬────┘
+        │
+        ├──────────────────┬────────────────────┐
+        │                  │                    │
+        ▼                  ▼                    ▼
+┌──────────────┐   ┌──────────────┐    ┌──────────────┐
+│   OpenBao    │   │  PostgreSQL  │    │  LLM Nodes   │
+│  (Keys/Certs)│   │   (Usage)    │    │ (OpenAI/etc) │
+└──────────────┘   └──────────────┘    └──────────────┘
+```
+
+### Customer API Keys
+
+Keys stored in OpenBao at `secret/skeid/customer/<key-id>`:
+
+```bash
+# Example: Request with customer key
+curl -X POST http://localhost:5591/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-alice-secret-key" \
+  -d '{"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+The key id this bills and routes under is derived from the key itself — `skeid keyid
+sk-alice-secret-key` prints it, and that is what a `keys:` entry names. Skeid ignores a
+client-supplied `x-skeid-key-id` unless `routing.trust_key_id_header` is set, which is only
+correct when something in front of Skeid authenticates the caller: otherwise any client could
+name itself into another customer's routing policy and invoice.
+
+### Node Config with OpenBao Keys
+
+```yaml
+nodes:
+  - id: groq-main
+    url: https://api.groq.com/openai/v1
+    model: llama-3.3-70b-versatile
+    engine: openai
+    api_key_ref: secret/skeid/remote/groq  # KeyBroker → OpenBao
+```
+
+Skeid resolves `api_key_ref` via KeyBroker → OpenBao. Keys live only in memory.
 
 ## Run Proxy
 
@@ -40,7 +118,7 @@ Admin route protection:
 
 - If no admin key is configured, `/skeid/*` returns `404` (effectively disabled).
 - If configured, all `/skeid/*` routes require `Authorization: Bearer <admin-key>`.
-- Admin key is dynamic config (`admin.api_key` or `admin_api_key`) and is reloaded on request dispatch.
+- Admin key is dynamic config (`admin.api_key`, `admin.api_key_env` or `admin_api_key`) and is reloaded on request dispatch.
 
 ## Cloud Provider Scenario (Multi-API + Billing)
 
@@ -51,7 +129,8 @@ Typical setup:
 
 1. Register many upstream nodes (for example OpenAI-compatible cloud endpoints and local vLLM/SGLang).
 2. Define model pricing in `pricing` to normalize cost per request.
-3. Send a tenant key id in `x-skeid-key-id` (or `x-api-key-id`) on each request.
+3. Have tenants send their API key as usual — the tenant id follows from it. Run
+   `skeid keyid <key>` to see the id a key resolves to.
 4. Read tenant/model totals via `GET /skeid/usage` or `bin/skeid usage --json`.
 
 This gives you one unified API edge and one usage ledger for invoice/export workflows.
