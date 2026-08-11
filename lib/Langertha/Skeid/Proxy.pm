@@ -743,7 +743,8 @@ sub _proxy_openai_stream {
         $accumulated_usage->{total}  += ($usage->{total_tokens} // 0);
       }
 
-      $translated .= $stream->delta($json) if $stream;
+      my $out = $stream ? $stream->delta($json) : '';
+      $translated .= $out;
     }
 
     # The first read event fires with an empty chunk as soon as the upstream headers are
