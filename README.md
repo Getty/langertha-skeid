@@ -656,6 +656,15 @@ Optional filters:
 - `--api-key-id k_...`
 - `--model qwen2.5-7b-instruct`
 
+## Capacity Probes
+
+For local engines that publish their own load, Skeid's `capacity.probe: prometheus` reads the
+node's `/metrics` endpoint and uses that as the source of truth instead of counting only what
+this process sent. Covered engines: **vLLM** (`vllm:num_requests_running` + `vllm:num_requests_waiting`),
+**SGLang** (`sglang:num_running_reqs` + `sglang:num_queue_reqs`), **TGI** (`tgi_batch_current_size`
++ `tgi_queue_size`). Override the names per node via `capacity.running` / `capacity.waiting` if an
+engine ships different ones.
+
 ## Saturation Behavior
 
 Wenn alle passenden Nodes auf `max_conns` stehen, wartet Skeid kurz auf einen freien Slot:
