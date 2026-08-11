@@ -2,6 +2,19 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Stream Anthropic tool_use in SSE: when the upstream OpenAI stream emits
+      tool_calls, each one becomes its own content_block_start(type=tool_use),
+      every arguments chunk becomes an input_json_delta with partial_json, and
+      a content_block_stop closes it before message_delta. Parallel tool calls
+      get distinct Anthropic indices, allocated in order of first appearance.
+      content_block_start is now lazy: it fires on the first delta that fills
+      the block, not on message_start, so a stream whose first content is a
+      tool call no longer emits an empty text block before it
+    - Add t/33-agent-flow.t, a Claude-Code-style scenario test: three
+      sequential streamed turns at /v1/messages on a shared messages array,
+      with a synthetic prior tool_use and tool_result, plus a standalone
+      tool_use turn. Exercises translation, streaming, the usage accumulator
+      and admission control together -- the path a real agent client walks
     - Fix SSE streaming, which was broken end to end: the relay finished the
       response on its first chunk, so clients received correct headers, a 200,
       and an empty body. Chunks are now queued and drained through write_chunk
