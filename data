@@ -1,0 +1,18 @@
+---
+class: standard
+created: 2026-08-11T04:20:33Z
+id: 24
+priority: low
+status: backlog
+tags:
+- docs
+- adr
+title: Stale ADR 0001 Consequences sentence
+updated: 2026-08-11T04:22:38Z
+---
+
+ADR 0001 'Consequences' says 'Anthropic and Ollama streaming is refused with 501 rather than half-supported'. That sentence is now false as of karr #8: the proxy rewrites Anthropic SSE events and Ollama NDJSON from a single OpenAI upstream stream (Anthropic::Stream, Ollama::Stream, t/31-stream-translation.t). The decision still holds - one upstream call, all formats translated - but the implementation no longer supports the 501 carve-out.
+
+Fix is a one-line edit to docs/adr/0001-one-upstream-call-shape-all-client-formats-translated.md, around the existing consequences bullet. Replace 'is refused with 501' with 'is translated at the client edge from a single OpenAI upstream stream (see Anthropic/Stream.pm, Ollama/Stream.pm)'.
+
+Why this is its own ticket and not folded into karr #8: #8 was about closing the POD/code gap; an ADR is a deliberate doc-edit so it lands as its own commit, with a clear diff to review against the original. Mixing the two makes a future reader grep for the streaming decision and find the wrong commit.
