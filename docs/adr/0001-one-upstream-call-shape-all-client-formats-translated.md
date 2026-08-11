@@ -35,9 +35,13 @@ way in and back into its own dialect on the way out.
   by configuration alone.
 - The OpenAI dialect is load-bearing. If a provider diverges from it in a way translation
   cannot absorb, that is an architectural event, not a patch — it needs a new ADR.
-- Anthropic and Ollama streaming is refused with `501` rather than half-supported (ADR 0005
-  explains why the seam is drawn there): translation and SSE re-chunking have not been made to
-  coexist, and a partially correct stream is worse than a clear refusal.
+- Anthropic and Ollama streaming is translated at the client edge from the same OpenAI
+  upstream stream, not refused: `stream: true` is rewritten to an OpenAI stream with
+  `stream_options.include_usage` and the response is re-emitted as the Anthropic event protocol
+  (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`,
+  `message_delta`, `message_stop`) or as Ollama's newline-delimited JSON. The OpenAI pass-through
+  is unchanged; only the formats that need translation are rewritten. See
+  `Langertha::Skeid::Protocol::Anthropic::Stream`, `::Ollama::Stream`, and `t/31-stream-translation.t`.
 - Response fidelity is bounded by the translation, not by the upstream. Fields no translator
   maps are dropped, deliberately and visibly, rather than leaking a foreign dialect to a client
   that cannot parse it.
