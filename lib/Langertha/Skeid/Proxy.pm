@@ -11,7 +11,9 @@ use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
+use Langertha::Skeid::Protocol::Anthropic::Stream;
 use Langertha::Skeid::Protocol::Ollama;
+use Langertha::Skeid::Protocol::Ollama::Stream;
 use Langertha::ToolCall;
 
 sub build_app {
@@ -314,16 +316,7 @@ sub _handle_anthropic_messages {
     return;
   }
 
-  if ($body->{stream}) {
-    $c->render(json => {
-      error => {
-        message => 'Anthropic streaming is not implemented in Skeid proxy yet',
-        type    => 'not_supported_error',
-      }
-    }, status => 501);
-    return;
-  }
-
+  my $wants_stream = $body->{stream} ? 1 : 0;
   my $openai_body = Langertha::Skeid::Protocol::Anthropic->request_to_openai($body);
   my $model = $openai_body->{model} // '';
   my $api_key_id = _request_api_key_id($c);
@@ -349,6 +342,19 @@ sub _handle_anthropic_messages {
       requested_model  => $model,
       route_url        => ($route->{url} // ''),
     };
+
+    if ($wants_stream) {
+      # Ask upstream for a stream in the one dialect Skeid speaks to nodes, and rewrite it at
+      # the client edge (ADR 0001). include_usage because Anthropic clients read token counts
+      # from message_delta, and an OpenAI stream omits usage unless asked.
+      $openai_body->{stream} = \1;
+      $openai_body->{stream_options} = { include_usage => \1 };
+      _proxy_openai_stream($c, $url, $openai_body, $node_id, $started, $meta,
+        Langertha::Skeid::Protocol::Anthropic::Stream->new(model => $model));
+      return;
+    }
+
+    delete $openai_body->{stream};
     $c->render_later;
     _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
       my ($res, $err, $status) = @_;
@@ -370,10 +376,9 @@ sub _handle_ollama_chat {
     return;
   }
 
-  if ($body->{stream}) {
-    $c->render(json => { error => 'Ollama streaming is not implemented in Skeid proxy yet' }, status => 501);
-    return;
-  }
+  # Ollama defaults stream to true when the field is absent, unlike everyone else. A client
+  # that omits it is asking for a stream and will sit waiting for newline-delimited JSON.
+  my $wants_stream = exists $body->{stream} ? ($body->{stream} ? 1 : 0) : 1;
 
   my $openai_body = Langertha::Skeid::Protocol::Ollama->request_to_openai($body);
   my $model = $openai_body->{model} // '';
@@ -400,6 +405,16 @@ sub _handle_ollama_chat {
       requested_model => $model,
       route_url       => ($route->{url} // ''),
     };
+
+    if ($wants_stream) {
+      $openai_body->{stream} = \1;
+      $openai_body->{stream_options} = { include_usage => \1 };
+      _proxy_openai_stream($c, $url, $openai_body, $node_id, $started, $meta,
+        Langertha::Skeid::Protocol::Ollama::Stream->new(model => $model));
+      return;
+    }
+
+    delete $openai_body->{stream};
     $c->render_later;
     _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
       my ($res, $err, $status) = @_;
@@ -629,8 +644,12 @@ sub _proxy_openai_json_async {
   return;
 }
 
+# $stream is an optional translator (Protocol::*::Stream). Without one the upstream's bytes are
+# relayed untouched, which is what an OpenAI client wants and the only path that cannot lose
+# anything in translation. With one, each OpenAI chunk is decoded and re-emitted in the
+# client's own format -- the same edge-translation seam as the non-streaming path (ADR 0001).
 sub _proxy_openai_stream {
-  my ($c, $url, $body, $node_id, $started, $meta) = @_;
+  my ($c, $url, $body, $node_id, $started, $meta, $stream) = @_;
   $meta ||= {};
 
   my %fwd_headers = _forward_headers($c);
@@ -686,19 +705,30 @@ sub _proxy_openai_stream {
       for my $name (@{$tx->res->headers->names}) {
         my $lc = lc($name);
         next if $lc eq 'content-length' || $lc eq 'transfer-encoding' || $lc eq 'content-encoding';
+        # A translated stream is not the upstream's media type any more. Relaying
+        # text/event-stream to an Ollama client tells it to parse something it does not speak.
+        next if $stream && $lc eq 'content-type';
         $c->res->headers->header($name => $tx->res->headers->header($name));
       }
+      $c->res->headers->header('content-type' => $stream->content_type) if $stream;
       $c->res->headers->header('x-skeid-node' => $node_id);
       $headers_sent = 1;
     }
 
-    # Parse SSE lines and accumulate usage + content bytes. The relayed bytes are never
-    # modified -- this reads along, it does not rewrite.
+    # Parse SSE lines and accumulate usage + content bytes. Without a translator the relayed
+    # bytes are never modified -- this reads along, it does not rewrite.
     $pending .= $bytes;
+    my $translated = '';
     while ($pending =~ s/\A([^\n]*)\n//) {
       my $line = $1;
       next unless $line =~ /^data: (.+?)\s*$/;
-      my $json = eval { decode_json($1) };
+      my $payload = $1;
+
+      # OpenAI closes with a literal [DONE] sentinel, which is not JSON and has no equivalent
+      # in either target format -- the translated stream ends with its own closing events.
+      next if $payload eq '[DONE]';
+
+      my $json = eval { decode_json($payload) };
       next unless $json && ref($json) eq 'HASH';
 
       if (my $delta = $json->{choices}[0]{delta}) {
@@ -712,14 +742,20 @@ sub _proxy_openai_stream {
         $accumulated_usage->{output} += ($usage->{completion_tokens} // $usage->{output_tokens} // 0);
         $accumulated_usage->{total}  += ($usage->{total_tokens} // 0);
       }
+
+      $translated .= $stream->delta($json) if $stream;
     }
 
     # The first read event fires with an empty chunk as soon as the upstream headers are
     # parsed, and writing an empty chunk finalizes a Mojolicious response. Relaying it would
     # end the stream before its first token -- headers, no body, no error.
-    return unless length $bytes;
-
-    push @queue, $bytes;
+    if ($stream) {
+      return unless length $translated;
+      push @queue, $translated;
+    } else {
+      return unless length $bytes;
+      push @queue, $bytes;
+    }
     $drain->() unless $draining;
   });
 
@@ -777,6 +813,17 @@ sub _proxy_openai_stream {
       duration_ms  => $duration_ms,
       metrics      => $metrics,
     });
+
+    # A translated stream has to be closed in its own format: both target protocols end with
+    # events the client waits for, and the OpenAI stream this was built from carries no
+    # equivalent. Queued like any other chunk so it lands after the deltas already in flight.
+    if ($stream && $headers_sent) {
+      my $tail = $stream->finish;
+      if (length $tail) {
+        push @queue, $tail;
+        $drain->() unless $draining;
+      }
+    }
 
     # Only finish once the queue has drained, or the tail of the stream is cut off. If the
     # drain loop is still running it will finish for us when it empties.

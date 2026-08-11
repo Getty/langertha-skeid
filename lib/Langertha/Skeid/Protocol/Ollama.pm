@@ -12,8 +12,16 @@ Serves C<POST /api/chat> and C<GET /api/tags>. Ollama-specific field names — C
 C<prompt_eval_count>, C<eval_count> — live here and nowhere else in Skeid.
 
 Ollama's messages are already OpenAI-shaped, so the request translation is small — but it is
-not empty: generation settings arrive nested under C<options> with Ollama's own names. As with
-the Anthropic format, C<stream: true> is refused with C<501> rather than half-supported.
+not empty: generation settings arrive nested under C<options> with Ollama's own names.
+
+Streaming is translated, not refused. C<stream: true> on this route — and an absent
+C<stream> field, which Ollama defaults to true — is rewritten to an OpenAI stream with
+C<stream_options.include_usage>; the response is re-emitted as Ollama's newline-delimited
+JSON, one line per delta and a closing line that carries C<done>, C<done_reason>, and the
+token counts an Ollama client reads from. C<done_reason> is the OpenAI C<finish_reason>
+passed through verbatim — there is no translation to do. See
+L<Langertha::Skeid::Protocol::Ollama::Stream> for the per-chunk rewrite and
+F<t/31-stream-translation.t> for what the wire looks like end-to-end.
 
 =method request_to_openai
 

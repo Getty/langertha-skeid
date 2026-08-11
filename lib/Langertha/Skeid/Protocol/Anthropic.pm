@@ -18,9 +18,21 @@ L<Langertha::ToolChoice> own what a tool looks like in each dialect, including r
 Hermes-style C<< <tool_call> >> blocks from plain text. A format Langertha cannot express is a
 Langertha ticket, not a parser here.
 
-Streaming is not translated: C<stream: true> on this route is refused with C<501> by the proxy,
-because SSE deltas would have to be re-chunked into Anthropic events with the usage accumulator
-carried through. See F<docs/adr/0001-one-upstream-call-shape-all-client-formats-translated.md>.
+Streaming is translated, not refused: C<stream: true> is rewritten to an OpenAI stream with
+C<stream_options.include_usage> set, so the token counts an Anthropic client reads from
+C<message_delta> actually arrive; the response is re-emitted at the client edge as the
+Anthropic event protocol — C<message_start>, C<content_block_start>,
+C<content_block_delta>, C<content_block_stop>, C<message_delta>, C<message_stop>. The same
+single upstream call (ADR 0001) carries the load; the format-specific framing is the only
+thing that changes between the wire Skeid speaks and the wire the client reads. See
+L<Langertha::Skeid::Protocol::Anthropic::Stream> for the per-chunk rewrite and the usage
+accumulator, and F<t/31-stream-translation.t> for what the wire looks like end-to-end.
+
+C<< finish_reason >> mapping is the same as the non-streaming path: C<tool_calls> becomes
+C<tool_use>, C<length> becomes C<max_tokens>, anything else becomes C<end_turn>. Tool calls
+emitted during a stream are not yet re-emitted as C<tool_use> content blocks — only the
+closing C<stop_reason> reports C<tool_use> today; streaming tool calls is a separate ticket
+that touches the translator's delta shape.
 
 =method request_to_openai
 
