@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-08-11T04:20:15Z
+claimed_by: skeid-orchestrator
+class: standard
+completed: 2026-08-11T04:20:15Z
+created: 2026-08-09T04:09:43Z
+id: 19
+priority: medium
+started: 2026-08-11T04:20:15Z
+status: done
+tags:
+- capacity
+- probe
+- docs
+- test
+title: vLLM/SGLang probe coverage already in Prometheus.pm -- document and add per-engine
+  test
+updated: 2026-08-11T04:20:15Z
+---
+
+Status: vLLM and SGLang coverage already exists via Langertha::Skeid::CapacityProbe::Prometheus (the default metric names: vllm:num_requests_running + vllm:num_requests_waiting, sglang:num_running_reqs + sglang:num_queue_reqs; tgi_batch_current_size + tgi_queue_size for TGI). ADR 0009 codifies why probing is preferred over counting.
+
+What this ticket asks for, since you said you want vLLM and friends explicitly supported:
+1. A README line that lists supported probe engines and points at the Prometheus probe. Today the README does not say vLLM/SGLang have a built-in probe -- an operator has to read the source.
+2. A test fixture per engine (vLLM, SGLang, TGI) that feeds the parsed text format and asserts the right sum lands in set_capacity_reading. Skips the HTTP layer so the test is hermetic.
+3. A bench/ snapshot: with a fake-LLM upstream, run capacity: { probe: prometheus, url: bench/fakellm-metrics } and confirm admission narrows correctly. Optional -- the existing bench covers throughput, not admission.
+
+NOT in scope: building probes for engines that do not speak Prometheus (LM Studio, Ollama native, llamacpp). Their paths go through CapacityProbe::Inflight / CapacityProbe::Custom.
