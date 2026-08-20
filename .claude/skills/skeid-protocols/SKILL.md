@@ -1,6 +1,6 @@
 ---
 name: skeid-protocols
-description: "Wire protocols Skeid speaks — OpenAI/Anthropic/Ollama client formats, translation to the upstream OpenAI call, SSE streaming, tool calls via Langertha::Tool/ToolCall, header and auth forwarding, Langertha engine ids."
+description: Load when working on the protocols Skeid speaks — OpenAI, Anthropic and Ollama client formats, translation upstream, SSE streaming, tool calls, header and auth forwarding.
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 ---

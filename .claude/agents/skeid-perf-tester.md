@@ -8,7 +8,7 @@ briefing:
     - skeid-benchmark
     - skeid-core
     - skeid-protocols
-    - karr
+    - kanban-issues-karr-cli
 ---
 
 You are the skeid-perf-tester for **Langertha::Skeid**.

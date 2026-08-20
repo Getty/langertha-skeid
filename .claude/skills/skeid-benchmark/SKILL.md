@@ -1,6 +1,6 @@
 ---
 name: skeid-benchmark
-description: "Measuring Skeid — the bench/ harness (C fake-LLM server + measuring client), TTFT and throughput methodology, comparing against other proxies, and the resource discipline a shared box requires."
+description: Use when measuring Skeid — the bench/ harness, TTFT and throughput methodology, comparing against other proxies, and the resource discipline a shared box needs.
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 ---

@@ -7,9 +7,9 @@ briefing:
   skills:
     - skeid-core
     - skeid-protocols
-    - perl-core
-    - perl-moo
-    - karr
+    - getty-perl-core
+    - getty-perl-moo
+    - kanban-issues-karr-cli
 ---
 
 You are the skeid-proxy-test-writer.

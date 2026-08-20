@@ -9,9 +9,9 @@ briefing:
     - skeid-core
     - skeid-service-stack
     - perl-ai-langertha
-    - perl-core
-    - perl-moo
-    - karr
+    - getty-perl-core
+    - getty-perl-moo
+    - kanban-issues-karr-cli
 ---
 
 You are the skeid-protocol-worker for **Langertha::Skeid**.

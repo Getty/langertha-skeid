@@ -1,6 +1,6 @@
 ---
 name: skeid-core
-description: "Langertha::Skeid control plane — node inventory, weighted routing, admission control, config reload, usage accounting, admin API. Vocabulary is CONTEXT.md."
+description: Load when working on the Langertha::Skeid control plane — node inventory, weighted routing, admission control, config reload, usage accounting, the admin API.
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 ---

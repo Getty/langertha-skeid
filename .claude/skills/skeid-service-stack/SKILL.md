@@ -1,6 +1,6 @@
 ---
 name: skeid-service-stack
-description: "Deploying Skeid — OpenBao KeyBroker and AppRole token lifecycle, the docker compose stack (openbao + postgres + skeid), ENV surface, customer keys, usage schema, Docker image build."
+description: Use when deploying Skeid — the OpenBao KeyBroker and AppRole token lifecycle, the docker compose stack, the ENV surface, customer keys, the usage schema.
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 ---

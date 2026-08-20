@@ -6,10 +6,10 @@ allowed-tools: Read, Edit, Write, Bash, Glob, Grep
 briefing:
   skills:
     - skeid-core
-    - perl-core
-    - perl-moo
-    - perl-release-author-getty
-    - karr
+    - getty-perl-core
+    - getty-perl-moo
+    - getty-perl-release-author-getty
+    - kanban-issues-karr-cli
 ---
 
 You are the skeid-worker for **Langertha::Skeid**, the LLM routing service.
