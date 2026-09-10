@@ -723,6 +723,13 @@ sub normalize_engine_id {
 sub record_usage {
   my ($self, %args) = @_;
 
+  # Disabled fast path: with no sink at all, the event has nowhere to go, so
+  # skip building it. record_usage runs once per forwarded request, and a
+  # deployment that meters nothing should not pay for a normalized event it is
+  # only going to throw away in _store_usage_event. (karr #15)
+  return { ok => 0, error => 'usage_store not configured' }
+    unless $self->_has_usage_sink;
+
   my $metrics = ref($args{metrics}) eq 'HASH' ? $args{metrics} : {};
   my $usage = ref($metrics->{usage}) eq 'HASH' ? $metrics->{usage} : {};
   my $tool_calls = ref($metrics->{tool_names}) eq 'ARRAY'
@@ -771,6 +778,20 @@ sub _store_usage_event {
   return { ok => 0, error => 'usage_store not configured' } unless $store;
   return $store->store($event);
 }
+
+# True when a usage event has somewhere to go: a store_usage_event callback, a
+# configured usage store object, or a subclass that overrides _store_usage_event
+# (documented in README, exercised by t/14) -- the last is why this cannot be a
+# plain attribute check. record_usage consults this before building an event.
+sub _has_usage_sink {
+  my ($self) = @_;
+  return 1 if $self->has_store_usage_event;
+  return 1 if $self->_usage_store_obj;
+  my $impl = $self->can('_store_usage_event');
+  return 1 if $impl && $impl != \&_store_usage_event;
+  return 0;
+}
+
 sub usage_report {
   my ($self, %args) = @_;
 
