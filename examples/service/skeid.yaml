@@ -64,10 +64,19 @@ routing:
 #   trial:     { models: [house-model] }  # one product, and it may go anywhere
 # default_policy: standard
 # keys:
-#   k_5f0e1a2b3c4d: burstable
-#   k_9c8b7a6f5e4d:
+#   alice: burstable                      # by readable name, via the names: registry below
+#   bigcorp:
 #     policy: standard
 #     deny_tags: [cloud, eu-outside]      # replaces the profile's deny list
+#   k_1122334455aa: burstable             # or still by the raw key id, with no name entry
+#
+# names: is a readable-name -> key-id registry that lives here in the config. It makes the
+# keys: lines legible and turns key rotation into a one-line edit -- repoint the name and every
+# policy that named the customer follows. Its values are ids from `skeid keyid`, never customer
+# keys, and it is read only at config load, never on the request path (ADR 0008).
+# names:
+#   alice:   k_5f0e1a2b3c4d               # `skeid keyid sk-alice-secret-key` prints this
+#   bigcorp: k_9c8b7a6f5e4d
 #
 # Unlisted keys take default_policy, so a deployment where every customer is configured the
 # same way carries no key entries at all.

@@ -124,16 +124,26 @@ Which nodes a customer key may be served from, and which models it may ask for:
     standard:  { deny_tags: [cloud] }        # our own hardware only
     burstable: {}                            # cloud is fine when local is full
   default_policy: standard
+  names:
+    alice:   k_5f0e1a2b3c4d                   # id from `skeid keyid <key>` -- never the key
+    bigcorp: k_9c8b7a6f5e4d
   keys:
-    k_5f0e1a2b3c4d: burstable                # id from `skeid keyid <key>`
-    k_9c8b7a6f5e4d:
+    alice: burstable                          # a keys: entry may be written by name ...
+    bigcorp:
       policy: standard
       models: [house-model]                  # sparse override of one field
+    k_1122334455aa: burstable                 # ... or still by the raw key id
 
 Resolved once at config load: a request costs one hash lookup, keys on the same profile share
 one policy object, and a key that takes the default is not listed at all. C<deny_tags> filters
 node selection, not just the plan, so a denied node cannot be reached by asking for its own
 model name instead of an alias. A refusal is C<403>, never a capacity error.
+
+The optional C<names:> section maps a readable name to a customer key id (karr #17). It makes
+C<keys:> entries legible and confines key rotation to a single line -- change the id a name
+points at, and every policy line that named the customer follows. Its values are ids from
+C<skeid keyid>, never customer keys, so the config still holds no secret; it is read only at
+config load and never on the request path.
 
 Identity comes from the API key the caller presented — see L</key_id_for_key>. See also ADR
 0008 in the distribution repository.
@@ -179,6 +189,15 @@ has default_policy => (
 # Key id -> resolved policy. Identical resolutions share one object, and a key that takes the
 # default is not listed at all, so ten thousand identical customers cost nothing here.
 has key_policies => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+# Readable name -> customer key id, from the config `names:` section. A config-authoring
+# convenience only: it lets `keys:` entries be written by name and localises key rotation to
+# one line, and is resolved to key ids once at config load. It never reaches the request path
+# -- a request still carries a derived key id, and policy_for_key still costs one hash lookup.
+has key_names => (
   is      => 'rw',
   default => sub { {} },
 );
@@ -525,7 +544,8 @@ sub reload_config {
     }
   }
 
-  if (ref($cfg->{policies}) eq 'HASH' || exists $cfg->{default_policy} || ref($cfg->{keys}) eq 'HASH') {
+  if (ref($cfg->{policies}) eq 'HASH' || exists $cfg->{default_policy}
+      || ref($cfg->{keys}) eq 'HASH' || ref($cfg->{names}) eq 'HASH') {
     $self->_load_policies($cfg);
   }
 
@@ -1167,24 +1187,52 @@ sub _load_policies {
     croak "default_policy '$cfg->{default_policy}' is not defined in policies" unless $default;
   }
 
+  # names: is a readable-name -> key-id registry that lives in the config, resolved to key ids
+  # here and never consulted on the request path (karr #17, ADR 0008). A value must be an id
+  # from `skeid keyid`, never a customer key -- the config still holds no keys. With it, a
+  # keys: entry may be written by name, and rotating a customer's key is a one-line edit here
+  # rather than a rewrite of every policy line that named them by id.
+  my %key_names;
+  if (ref($cfg->{names}) eq 'HASH') {
+    for my $name (keys %{$cfg->{names}}) {
+      my $id = $cfg->{names}{$name};
+      croak "name '$name' must map to a key id string, not a structure" if ref $id;
+      croak "name '$name' maps to an empty key id" unless defined($id) && length($id);
+      $key_names{$name} = $id;
+    }
+  }
+
+  # Resolve a keys: entry's label through the names registry, if it is a known name; otherwise
+  # it is taken to be a key id already. Two labels resolving to the same id is a config error,
+  # not a silent last-wins -- it usually means a name and its own id were both listed.
+  my %seen_id;
+  my $resolve_key_id = sub {
+    my ($label) = @_;
+    my $id = exists $key_names{$label} ? $key_names{$label} : $label;
+    croak "keys entry '$label' resolves to key id '$id', which another entry already claims"
+      if $seen_id{$id}++;
+    return $id;
+  };
+
   my %key_policies;
   if (ref($cfg->{keys}) eq 'HASH') {
-    for my $key (keys %{$cfg->{keys}}) {
-      my $entry = $cfg->{keys}{$key};
+    for my $label (keys %{$cfg->{keys}}) {
+      my $key   = $resolve_key_id->($label);
+      my $entry = $cfg->{keys}{$label};
 
       if (!ref($entry)) {
         my $policy = $policies{$entry};
-        croak "key '$key' references undefined policy '$entry'" unless $policy;
+        croak "key '$label' references undefined policy '$entry'" unless $policy;
         $key_policies{$key} = $policy;
         next;
       }
 
-      croak "key '$key' must be a policy name or a hashref" unless ref($entry) eq 'HASH';
+      croak "key '$label' must be a policy name or a hashref" unless ref($entry) eq 'HASH';
 
       my $base = {};
       if (defined $entry->{policy} && length $entry->{policy}) {
         my $named = $policies{$entry->{policy}};
-        croak "key '$key' references undefined policy '$entry->{policy}'" unless $named;
+        croak "key '$label' references undefined policy '$entry->{policy}'" unless $named;
         $base = $named;
       } elsif ($default) {
         $base = $default;
@@ -1209,6 +1257,7 @@ sub _load_policies {
   $self->policies(\%policies);
   $self->default_policy($default);
   $self->key_policies(\%key_policies);
+  $self->key_names(\%key_names);
   return 1;
 }
 
@@ -1252,6 +1301,23 @@ sub policy_for_key {
   return $self->key_policies->{$api_key_id}
     if defined($api_key_id) && length($api_key_id) && $self->key_policies->{$api_key_id};
   return $self->default_policy;
+}
+
+=method key_id_for_name
+
+  my $id = $skeid->key_id_for_name('alice');   # k_5f0e1a2b3c4d, or undef
+
+The customer key id a readable name maps to under the config C<names:> section, or undef when
+the name is not registered. The registry is a config-authoring convenience -- it lets a
+C<keys:> entry be written by name and confines key rotation to one line -- and is resolved to
+ids at config load, so it never appears on the request path.
+
+=cut
+
+sub key_id_for_name {
+  my ($self, $name) = @_;
+  return undef unless defined($name) && length($name);
+  return $self->key_names->{$name};
 }
 
 =method route_plan

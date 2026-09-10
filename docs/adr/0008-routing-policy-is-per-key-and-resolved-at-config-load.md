@@ -85,7 +85,9 @@ of Skeid and set it themselves.
 
 The cost is that the config names customers by a derived id rather than by name, which is why
 `skeid keyid` exists. A mapping from real keys to readable names belongs next to the keys in
-OpenBao, not in a file — that is left open here.
+OpenBao, not in a file — that is left open here. (Resolved the other way in ADR 0011: the
+name-to-id mapping lives in the config, keyed by readable name, and is erased to ids at load so
+it never reaches the request path.)
 
 ## Consequences
 

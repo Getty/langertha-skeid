@@ -140,6 +140,71 @@ use Langertha::Skeid::Proxy;
     'and is distinguishable from a model the key was never granted');
 }
 
+# --- names: a readable-name -> key-id registry that lives in the config (karr #17, ADR 0008) ---
+{
+  my $skeid = Langertha::Skeid->new(config_loader => sub {
+    return {
+      policies => {
+        standard  => { deny_tags => ['cloud'] },
+        burstable => {},
+      },
+      default_policy => 'standard',
+      names => {
+        alice   => 'k_5f0e1a2b3c4d',
+        bigcorp => 'k_9c8b7a6f5e4d',
+      },
+      keys => {
+        alice          => 'burstable',                 # written by readable name ...
+        bigcorp        => { policy => 'standard', deny_tags => [] },
+        k_1122334455aa => 'burstable',                 # ... or still by the raw key id
+      },
+    };
+  });
+
+  is($skeid->key_id_for_name('alice'), 'k_5f0e1a2b3c4d', 'a name resolves to the customer key id it was given');
+  is($skeid->key_id_for_name('nobody'), undef, 'an unregistered name resolves to nothing');
+
+  # The registry is a config-authoring convenience: it is resolved to ids at load, so the
+  # request path still keys on the derived id the caller's key produces, one hash lookup.
+  is_deeply($skeid->policy_for_key('k_5f0e1a2b3c4d')->{deny_tags}, [],
+    'a keys: entry written by name attaches its policy to the id the name maps to');
+  is_deeply($skeid->policy_for_key('k_9c8b7a6f5e4d')->{deny_tags}, [],
+    "the named override reaches the mapped id, not the name");
+  is_deeply($skeid->policy_for_key('k_1122334455aa')->{deny_tags}, [],
+    'and a raw-id entry alongside the named ones still resolves');
+
+  # The name itself is never a customer key id, so it must not be a policy key -- looking it up
+  # as one falls through to the default, proving the name never leaks onto the request path.
+  is($skeid->policy_for_key('alice'), $skeid->default_policy,
+    'the readable name is not itself an identity -- as a key id it takes the default');
+}
+
+# --- names: the config errors fail loud rather than granting the wrong access ---
+{
+  ok(!eval {
+    Langertha::Skeid->new(config_loader => sub {
+      { names => { alice => { id => 'k_5f0e1a2b3c4d' } } };
+    });
+    1;
+  }, 'a name mapping to a structure croaks -- a name points at one key id, not an object');
+
+  ok(!eval {
+    Langertha::Skeid->new(config_loader => sub { { names => { alice => '' } } });
+    1;
+  }, 'a name mapping to an empty id croaks');
+
+  ok(!eval {
+    Langertha::Skeid->new(config_loader => sub {
+      {
+        policies => { p => {} },
+        names    => { alice => 'k_5f0e1a2b3c4d' },
+        keys     => { alice => 'p', k_5f0e1a2b3c4d => 'p' },
+      };
+    });
+    1;
+  }, 'a name and its own id both listed in keys: croaks rather than silently letting one win');
+}
+
 # --- integration: the policy has to survive contact with a client that is trying to get around it ---
 my %served;
 
