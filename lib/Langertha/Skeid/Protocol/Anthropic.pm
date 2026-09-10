@@ -166,7 +166,7 @@ sub response_from_openai {
   my $choice = (ref($res->{choices}) eq 'ARRAY' ? $res->{choices}[0] : {}) || {};
   my $msg = $choice->{message} || {};
   my $text = $msg->{content} // '';
-  my @calls = Langertha::ToolCall->extract($res || {});
+  my @calls = Langertha::ToolCall->extract('openai', $res || {});
 
   if (!@calls && length($text)) {
     my ($clean, $extracted) = Langertha::ToolCall->extract_hermes_from_text($text);

@@ -1,4 +1,4 @@
-requires 'Langertha', '0.400';
+requires 'Langertha', '0.503';
 requires 'Moo', '2.005005';
 recommends 'DBI', '1.643';
 recommends 'DBD::SQLite', '1.66';

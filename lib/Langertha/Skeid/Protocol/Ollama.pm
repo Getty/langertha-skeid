@@ -69,7 +69,7 @@ sub response_from_openai {
   my $tool_calls = [];
 
   if (ref($msg->{tool_calls}) eq 'ARRAY') {
-    my @calls = Langertha::ToolCall->extract($res || {});
+    my @calls = Langertha::ToolCall->extract('openai', $res || {});
     $tool_calls = [ map { $_->to_ollama } @calls ];
   } elsif (length($text)) {
     my ($clean, $calls) = Langertha::ToolCall->extract_hermes_from_text($text);

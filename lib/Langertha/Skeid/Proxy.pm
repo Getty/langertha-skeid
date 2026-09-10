@@ -614,7 +614,7 @@ sub _proxy_openai_json_async {
     my $payload = eval { $res->json };
     my $metrics = {};
     if (ref($payload) eq 'HASH') {
-      my $tool_calls = eval { [ map { $_->to_hash } Langertha::ToolCall->extract($payload) ] } || [];
+      my $tool_calls = eval { [ map { $_->to_hash } Langertha::ToolCall->extract('openai', $payload) ] } || [];
       $metrics = eval {
         $c->skeid->call_function('metrics.normalize', {
           provider    => ($meta->{provider} || 'skeid'),
