@@ -357,10 +357,12 @@ sub _handle_anthropic_messages {
     delete $openai_body->{stream};
     $c->render_later;
     _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
-      my ($res, $err, $status) = @_;
+      my ($res, $err, $status, $upstream) = @_;
       return if $err;
 
-      my $payload = Langertha::Skeid::Protocol::Anthropic->response_from_openai($res, $model);
+      # response_from_openai reads a decoded OpenAI response ($upstream->{choices}, ...); the
+      # raw Mojo $res would read as all-undef and yield a well-formed but empty envelope (karr #26).
+      my $payload = Langertha::Skeid::Protocol::Anthropic->response_from_openai($upstream, $model);
       $c->res->code($status || 200);
       $c->res->headers->header('x-skeid-node' => $node_id);
       $c->render(json => $payload);
@@ -417,10 +419,12 @@ sub _handle_ollama_chat {
     delete $openai_body->{stream};
     $c->render_later;
     _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
-      my ($res, $err, $status) = @_;
+      my ($res, $err, $status, $upstream) = @_;
       return if $err;
 
-      my $payload = Langertha::Skeid::Protocol::Ollama->response_from_openai($res);
+      # See the Anthropic path above: the translator needs the decoded upstream body, not the
+      # Mojo response object, or every field reads undef and the client gets empty content (karr #26).
+      my $payload = Langertha::Skeid::Protocol::Ollama->response_from_openai($upstream);
       $c->res->code($status || 200);
       $c->res->headers->header('x-skeid-node' => $node_id);
       $c->render(json => $payload);
@@ -637,7 +641,7 @@ sub _proxy_openai_json_async {
       metrics      => (ref($metrics) eq 'HASH' ? $metrics : {}),
     });
 
-    $cb->($res, 0, $status);
+    $cb->($res, 0, $status, (ref($payload) eq 'HASH' ? $payload : {}));
   });
   });
 
