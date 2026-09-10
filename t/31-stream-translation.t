@@ -186,6 +186,13 @@ sub sse_events {
     'one tool call whose arguments arrive in a single chunk still produces a complete tool_use '
     . 'event sequence -- no missing events, no duplicated indices';
 
+  my ($start_event) = grep { $_->[0] eq 'message_start' } @got;
+  is $start_event->[1]{type}, 'message_start',
+    'message_start carries type "message_start" in its data -- the SDKs dispatch on that field, '
+    . 'not on the event line, and "message" there is a frame they ignore';
+  is $start_event->[1]{message}{type}, 'message',
+    'while the message object inside it is typed "message", as the API specifies';
+
   my ($tool_open) = grep { $_->[0] eq 'content_block_start' } @got;
   is $tool_open->[1]{index}, 0, 'the tool_use block opens at Anthropic index 0';
   is $tool_open->[1]{content_block}{type}, 'tool_use', 'typed tool_use, which is what a client dispatches on';

@@ -79,8 +79,11 @@ sub start {
   return '' if $self->{started};
   $self->{started} = 1;
 
+  # The SSE event name and the "type" inside its data must agree: the official SDKs dispatch on
+  # the data field, not on the event line, so a message_start carrying type "message" is a
+  # frame they do not recognise as the start of anything.
   return _event('message_start', {
-    type    => 'message',
+    type    => 'message_start',
     message => {
       id            => $self->{message_id},
       type          => 'message',
