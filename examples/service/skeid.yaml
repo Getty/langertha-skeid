@@ -15,7 +15,12 @@ nodes:
     # api_key_ref resolved via KeyBroker -> OpenBao secret/skeid/remote/groq
     api_key_ref: secret/skeid/remote/groq
 
-# Usage storage via PostgreSQL
+# Usage storage via PostgreSQL.
+# This stack chooses postgresql over the (faster, simpler) jsonlog dir mode on
+# purpose: it is a multi-frontend deployment that wants one queryable billing
+# store with real SQL reports across every worker and container. A single-node
+# quick start is better served by `backend: jsonlog, path: /var/log/skeid/events/`
+# (see the README "Traffic / event logging" section) -- no database to run.
 usage_store:
   backend: postgresql
   dsn: "dbi:Pg:dbname=skeid;host=postgres;port=5432"

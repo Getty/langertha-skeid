@@ -264,6 +264,23 @@ usage_store:
 
 Events are appended as one JSON line each, with file locking.
 
+### Traffic / event logging
+
+For fast **and** safe traffic logging, use `jsonlog` in directory mode (the default): one
+`<id>.json` file per event, so there is no shared lock and no interleaved or torn write, and a
+crash costs at most the single event in flight (ADR 0004). It is also the fastest of the built-in
+stores under concurrency. Turn on `fsync: true` if even that one in-flight event must survive a
+crash — off by default, at a throughput cost.
+
+Tail or aggregate the directory with `jq` — each file is one self-contained event:
+
+```bash
+jq -s 'group_by(.model)[] | {model: .[0].model, requests: length, total_tokens: (map(.total_tokens) | add)}' /var/log/skeid/events/*.json
+```
+
+Under Docker, mount the events directory to a host volume so the log survives the container:
+`-v "$PWD/skeid-events:/var/log/skeid/events"`, with `path: /var/log/skeid/events/` in the config.
+
 ### Custom Usage Backend
 
 You can replace the storage layer without subclassing — pass callbacks as constructor parameters:
