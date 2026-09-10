@@ -5,6 +5,7 @@ use Moo;
 use strict;
 use warnings;
 use POSIX qw(strftime);
+use IO::Handle;
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
 use File::Spec;
@@ -34,6 +35,17 @@ JSON line per event under an exclusive C<flock>.
 
 has path => (is => 'ro', required => 1);
 has mode => (is => 'ro', default => sub { 'dir' });
+
+=attr fsync
+
+When true, an event's bytes are flushed and C<fsync>'d to disk before C<store> returns, at a
+throughput cost. Default off: ADR 0004 already accepts that one in-flight event is lost on a
+crash, and the kernel's own writeback covers the rest under normal operation. Opt in where a
+crash losing an already-answered request's event is unacceptable.
+
+=cut
+
+has fsync => (is => 'ro', default => sub { 0 });
 
 =method backend
 
@@ -95,12 +107,14 @@ sub store {
     my $file = File::Spec->catfile($self->path, "${id}.json");
     open my $fh, '>', $file or return { ok => 0, error => "Cannot write $file: $!" };
     print $fh $json, "\n";
+    if ($self->fsync) { $fh->flush; $fh->sync }
     close $fh;
   } else {
     my $path = $self->path;
     open my $fh, '>>', $path or return { ok => 0, error => "Cannot append $path: $!" };
     flock($fh, 2); # LOCK_EX
     print $fh $json, "\n";
+    if ($self->fsync) { $fh->flush; $fh->sync }
     close $fh;
   }
 

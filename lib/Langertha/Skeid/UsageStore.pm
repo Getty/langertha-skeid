@@ -92,6 +92,7 @@ sub normalize_config {
       backend => 'jsonlog',
       path    => $path,
       mode    => $mode,
+      fsync   => ($cfg->{fsync} ? 1 : 0),
     };
   }
 
@@ -117,8 +118,9 @@ sub for_config {
   if ($backend eq 'jsonlog') {
     require Langertha::Skeid::UsageStore::JsonLog;
     return Langertha::Skeid::UsageStore::JsonLog->new(
-      path => ($cfg->{path} // ''),
-      mode => ($cfg->{mode} // 'dir'),
+      path  => ($cfg->{path} // ''),
+      mode  => ($cfg->{mode} // 'dir'),
+      fsync => ($cfg->{fsync} ? 1 : 0),
     );
   }
 
