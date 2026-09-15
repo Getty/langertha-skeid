@@ -1,0 +1,40 @@
+---
+claimed_at: 2026-09-15T18:02:55Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-15T18:02:55Z
+created: 2026-09-15T17:39:06Z
+id: 27
+priority: medium
+started: 2026-09-15T17:46:28Z
+status: done
+tags:
+- usage
+- langertha
+title: Record prompt-cache tokens (cached_tokens) in the usage event
+updated: 2026-09-15T18:02:55Z
+---
+
+Langertha 0.503 adds Langertha::Usage->cached_tokens / cache_write_tokens (upstream karr k130/k159/k160), parsed from every provider wire spelling by Usage->from_hash. NOT a compatibility requirement -- Skeid runs green on 0.503 as-is (673 tests) -- but the value is now available and Skeid does not record it.
+
+Scope if picked up: record_usage pulls cached_tokens from the upstream usage hash (route $res->{usage} through Langertha::Usage->from_hash and read ->cached_tokens, single source of truth for all wire spellings); new nullable column in usage_events for sqlite AND postgresql; DBI additive migration on prepare (same story as requested_model); JsonLog totals; UsageStore::DBI insert/report; GET /skeid/usage and bin/skeid usage.
+
+Pricing caveat: Langertha::Pricing->cost_for does NOT model cache-discount rates in 0.503 (Pricing.pm only version-bumped). Cache-aware cost attribution needs a Langertha::Pricing change FIRST -- recording the raw count is standalone; discounting it is blocked on upstream. Decide record-only vs wait for cache pricing.
+
+2026-09-15 17:59 Implemented RECORD/PASS-THROUGH of cached_tokens (prompt-cache read count), uncommitted in the working tree.
+
+Wire spelling: extracted from the raw OpenAI-shaped upstream usage -- primary prompt_tokens_details.cached_tokens (nested), plus tolerant fallbacks (flat cached_tokens, normalized "cached"), missing->0. NOTE: card said route through Langertha::Usage->from_hash->cached_tokens, but installed Langertha::Usage 0.503 has NO cached_tokens accessor (verified empirically), and metrics.normalize drops the count -- so extraction is off the raw JSON, mirroring the existing prompt/completion_tokens reads, per the launching agent's correction.
+
+Schema/migration: nullable cached_tokens column added to BOTH share/sql schemas (sqlite INTEGER, postgresql BIGINT); UsageStore::DBI @ADDED_COLUMNS gains ["cached_tokens","BIGINT"] -- additive ALTER on prepare, same story as requested_model, never drops/rewrites. Nullable so old rows read NULL (not-measured) vs a measured 0.
+
+Wired surfaces: record_usage event builder (Skeid.pm); Proxy _cached_tokens helper + streaming accumulator + non-streaming raw-payload injection + _record_usage_event pass-through; DBI insert + report totals/recent; JsonLog totals/recent; GET /skeid/usage (via usage.report); bin/skeid usage totals+recent lines.
+
+Tests: t/36-usage-cached-tokens.t (34 subtests) -- helper spellings, event carries cached_tokens, JsonLog+SQLite write/report, additive migration idempotent, old-row NULL backward-compat, end-to-end streaming + non-streaming extraction. Full suite: prove -lr t/ = 707 tests, all pass (was 673).
+
+ADR: docs/adr/0013-cached-tokens-are-recorded-pricing-is-deferred.md.
+
+DEFERRED (open item): cache-aware PRICING is NOT built. Langertha::Pricing 0.503 models no cache-discount rate, so cached tokens still bill at the normal input rate; cost_* unchanged. The billing correction is blocked on Langertha::Pricing (and, to price from the normalized path, Langertha::Usage exposing the count). Recording lands now; discounting waits on upstream.
+
+2026-09-15 17:59 Recording/pass-through of cached_tokens complete and uncommitted for review. Full suite green (prove -lr t/ = 707). Cache-aware PRICING deliberately deferred/blocked on Langertha::Pricing -- stays an open item on this card.
+
+2026-09-15 18:02 Recording implementiert, Selbst-Review durch Haupt-Agent, Suite 707 grün, committet 4c8f3ef. Cache-aware Pricing bleibt deferred (blockiert auf Langertha::Pricing) -> eigenes Folge-Ticket. -> done.
