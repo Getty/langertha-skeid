@@ -207,12 +207,21 @@ admin:
 routing:
   wait_timeout_ms: 2000
   wait_poll_ms: 25
+  frontend_count: 1        # separate Skeid hosts sharing these nodes; each admits max_conns / frontend_count
 ```
 
 Equivalent env/CLI options:
 
 - `SKEID_ADMIN_API_KEY=...`
 - `bin/skeid serve --admin-api-key ...`
+- `SKEID_FRONTEND_COUNT=...` (same as `routing.frontend_count`)
+
+`routing.frontend_count` (default `1`) partitions each node's `max_conns` across the separate
+Skeid hosts in front of it: set it to the number of frontends and each admits
+`max_conns / frontend_count`, the way `--workers N` divides a node's allowance among prefork
+workers of one process — the two multiply. There is no probe to detect the count, so it must be
+declared; a frontend that omits it silently over-admits the node by that factor. A node with a
+capacity probe does not need it. See ADR 0012.
 
 Cloud-mix example:
 
