@@ -84,7 +84,7 @@ B<Constructor callbacks> (custom backend, no subclassing):
   my $skeid = Langertha::Skeid->new(
     store_usage_event => sub {
       my ($self, $event) = @_;
-      # $event is a hashref with all 22 normalized columns
+      # $event is a hashref with all normalized usage columns
       publish_to_nats($event);
       return { ok => 1 };
     },
@@ -800,6 +800,15 @@ sub record_usage {
   my $input_tokens  = _num($usage->{input}) || _num($usage->{prompt_tokens}) || _num($metrics->{input_tokens});
   my $output_tokens = _num($usage->{output}) || _num($usage->{completion_tokens}) || _num($metrics->{output_tokens});
   my $total_tokens  = _num($usage->{total}) || _num($metrics->{total_tokens}) || ($input_tokens + $output_tokens);
+  # Prompt-cache read count (k27). Read the same way as the token counts above: the normalized
+  # name first, then the OpenAI wire spelling (nested under prompt_tokens_details on a real
+  # OpenAI usage payload), then a flat cached_tokens some compatible servers use, then the
+  # flattened metrics fallback. Recording only -- Langertha::Pricing 0.503 has no cache-discount
+  # rate, so cost below is unchanged and cached tokens still bill at the normal rate (ADR 0013).
+  my $cached_tokens = _num($usage->{cached})
+    || _num($usage->{cached_tokens})
+    || _num(ref($usage->{prompt_tokens_details}) eq 'HASH' ? $usage->{prompt_tokens_details}{cached_tokens} : undef)
+    || _num($metrics->{cached_tokens});
   my $cost_input    = _num($metrics->{cost_input_usd}) || _num($metrics->{input_cost_usd});
   my $cost_output   = _num($metrics->{cost_output_usd}) || _num($metrics->{output_cost_usd});
   my $cost_total    = _num($metrics->{cost_total_usd}) || _num($metrics->{total_cost_usd});
@@ -822,6 +831,7 @@ sub record_usage {
     input_tokens  => $input_tokens,
     output_tokens => $output_tokens,
     total_tokens  => $total_tokens,
+    cached_tokens => $cached_tokens,
     tool_calls    => _num($tool_calls),
     cost_input_usd  => $cost_input,
     cost_output_usd => $cost_output,

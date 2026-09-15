@@ -160,11 +160,12 @@ sub _run_usage {
   print "\n";
 
   my $tot = $report->{totals} || {};
-  printf "Totals: requests=%d input=%d output=%d total=%d tools=%d cost=\$%.8f\n",
+  printf "Totals: requests=%d input=%d output=%d total=%d cached=%d tools=%d cost=\$%.8f\n",
     ($tot->{requests} // 0),
     ($tot->{input_tokens} // 0),
     ($tot->{output_tokens} // 0),
     ($tot->{total_tokens} // 0),
+    ($tot->{cached_tokens} // 0),
     ($tot->{tool_calls} // 0),
     ($tot->{total_cost_usd} // 0);
 
@@ -191,7 +192,7 @@ sub _run_usage {
   print "\nRecent:\n";
   print "  (none)\n" unless @{$report->{recent} || []};
   for my $row (@{$report->{recent} || []}) {
-    printf "  #%d %s %-9s %-20s model=%s status=%d tokens=%d cost=\$%.8f\n",
+    printf "  #%d %s %-9s %-20s model=%s status=%d tokens=%d cached=%d cost=\$%.8f\n",
       ($row->{id} // 0),
       ($row->{created_at} || ''),
       ($row->{api_format} || ''),
@@ -199,6 +200,7 @@ sub _run_usage {
       ($row->{model} || ''),
       ($row->{status_code} // 0),
       ($row->{total_tokens} // 0),
+      ($row->{cached_tokens} // 0),
       ($row->{cost_total_usd} // 0);
   }
 

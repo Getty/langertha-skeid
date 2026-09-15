@@ -100,6 +100,10 @@ sub prepare {
 # ever drops or rewrites one.
 my @ADDED_COLUMNS = (
   ['requested_model', 'TEXT'],
+  # Prompt-cache read count (k27). Nullable on purpose: an old row that predates it reads NULL
+  # ("was not measured"), which is not the same as a measured zero. BIGINT is INTEGER affinity
+  # in SQLite and a 64-bit integer in PostgreSQL, so one type serves both ALTER statements.
+  ['cached_tokens', 'BIGINT'],
 );
 
 sub _add_missing_columns {
@@ -229,9 +233,9 @@ sub store {
   my $sth = $dbh->prepare_cached(q{
     INSERT INTO usage_events (
       created_at, request_id, api_format, endpoint, api_key_id, provider, engine, model, node_id, route_url,
-      status_code, ok, duration_ms, input_tokens, output_tokens, total_tokens, tool_calls,
+      status_code, ok, duration_ms, input_tokens, output_tokens, total_tokens, cached_tokens, tool_calls,
       cost_input_usd, cost_output_usd, cost_total_usd, error_type, error_message, requested_model
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   });
   $sth->execute(
     $event->{created_at},
@@ -250,6 +254,8 @@ sub store {
     $event->{input_tokens},
     $event->{output_tokens},
     $event->{total_tokens},
+    # Nullable: an event that carried no cache count writes NULL, not a measured zero.
+    $event->{cached_tokens},
     $event->{tool_calls},
     $event->{cost_input_usd},
     $event->{cost_output_usd},
@@ -313,6 +319,7 @@ sub report {
        COALESCE(SUM(input_tokens), 0) AS input_tokens,
        COALESCE(SUM(output_tokens), 0) AS output_tokens,
        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
        COALESCE(SUM(tool_calls), 0) AS tool_calls,
        COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
      FROM usage_events $where_sql",
@@ -351,7 +358,7 @@ sub report {
   my $recent = $dbh->selectall_arrayref(
     "SELECT
        id, created_at, api_format, endpoint, api_key_id, model, requested_model, node_id, status_code, ok,
-       input_tokens, output_tokens, total_tokens, tool_calls, cost_total_usd
+       input_tokens, output_tokens, total_tokens, cached_tokens, tool_calls, cost_total_usd
      FROM usage_events
      $where_sql
      ORDER BY id DESC
@@ -372,6 +379,7 @@ sub report {
       input_tokens   => $num->($totals->{input_tokens}),
       output_tokens  => $num->($totals->{output_tokens}),
       total_tokens   => $num->($totals->{total_tokens}),
+      cached_tokens  => $num->($totals->{cached_tokens}),
       tool_calls     => $num->($totals->{tool_calls}),
       total_cost_usd => $num->($totals->{total_cost_usd}),
     },
@@ -406,6 +414,7 @@ sub report {
         input_tokens  => $num->($_->{input_tokens}),
         output_tokens => $num->($_->{output_tokens}),
         total_tokens  => $num->($_->{total_tokens}),
+        cached_tokens => $num->($_->{cached_tokens}),
         tool_calls    => $num->($_->{tool_calls}),
         cost_total_usd => $num->($_->{cost_total_usd}),
       }

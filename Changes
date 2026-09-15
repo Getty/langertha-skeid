@@ -2,6 +2,16 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Record cached_tokens (the prompt-cache read count) on every usage event.
+      It is read off the upstream usage payload (OpenAI's
+      prompt_tokens_details.cached_tokens, plus a flat cached_tokens fallback) on
+      both the streaming and non-streaming paths, stored in a new nullable
+      cached_tokens column added additively to the sqlite and postgresql schemas
+      (old tables migrate on prepare, like requested_model), and surfaced in the
+      usage report, GET /skeid/usage and bin/skeid usage. Recording only: cost is
+      still priced with no cache discount, so cached tokens currently bill at the
+      normal input rate -- the pricing correction waits on Langertha::Pricing
+      modelling a cache-discount rate (ADR 0013)
     - Partition max_conns across multiple Skeid frontends: routing.frontend_count
       (or SKEID_FRONTEND_COUNT) divides a node's max_conns among the separate
       Skeid hosts in front of it, the way worker_count divides it among prefork

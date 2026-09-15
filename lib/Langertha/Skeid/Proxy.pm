@@ -630,6 +630,13 @@ sub _proxy_openai_json_async {
           tool_calls  => $tool_calls,
         });
       } || {};
+      # metrics.normalize routes through Langertha::Usage, which in 0.503 does not model the
+      # prompt-cache read count -- so it is dropped there. Pull it straight off the raw upstream
+      # usage and carry it flat, the way input/output survive as metrics->{*_tokens} (k27).
+      if (ref($metrics) eq 'HASH') {
+        my $cached = _cached_tokens($payload->{usage});
+        $metrics->{cached_tokens} = $cached if $cached;
+      }
     }
 
     _record_usage_event($c, {
@@ -668,7 +675,7 @@ sub _proxy_openai_stream {
   my $headers_sent = 0;
   my $had_error = 0;
   my $status = 200;
-  my $accumulated_usage = { input => 0, output => 0, total => 0 };
+  my $accumulated_usage = { input => 0, output => 0, total => 0, cached => 0 };
   my $accumulated_content_bytes = 0;
 
   # Upstream chunks arrive faster than they can be written out, so they are queued and drained
@@ -745,6 +752,8 @@ sub _proxy_openai_stream {
         $accumulated_usage->{input}   += ($usage->{prompt_tokens} // $usage->{input_tokens} // 0);
         $accumulated_usage->{output} += ($usage->{completion_tokens} // $usage->{output_tokens} // 0);
         $accumulated_usage->{total}  += ($usage->{total_tokens} // 0);
+        # Prompt-cache read count, nested under prompt_tokens_details on an OpenAI usage payload (k27).
+        $accumulated_usage->{cached} += _cached_tokens($usage);
       }
 
       my $out = $stream ? $stream->delta($json) : '';
@@ -1008,6 +1017,10 @@ sub _record_usage_event {
       input  => 0 + ($usage->{input} // $usage->{prompt_tokens} // 0),
       output => 0 + ($usage->{output} // $usage->{completion_tokens} // 0),
       total  => 0 + ($usage->{total} // 0),
+      # This reshaping drops prompt_tokens_details, so the cache count has to be carried across
+      # it explicitly or record_usage never sees it. Streaming leaves it on usage->{cached};
+      # the non-streaming path injects a flat metrics->{cached_tokens} from the raw payload (k27).
+      cached => (_cached_tokens($usage) || 0 + ($metrics->{cached_tokens} // 0)),
     },
   };
 
@@ -1040,6 +1053,23 @@ sub _record_usage_event {
   }
 
   return $recorded;
+}
+
+# The prompt-cache read count off a raw OpenAI-shaped upstream usage hash (k27). OpenAI nests it
+# under prompt_tokens_details.cached_tokens; some OpenAI-compatible servers expose a flat
+# cached_tokens, and Skeid's own streaming accumulator carries it as `cached`. Missing -> 0, the
+# same fault-tolerance the other token reads here have. This reads a count off a response Skeid
+# already holds -- every upstream answers in the OpenAI dialect (ADR 0001) -- it does not
+# translate a client format. Recording only: Langertha::Pricing 0.503 models no cache-discount
+# rate, so the count is stored but not yet priced (ADR 0013).
+sub _cached_tokens {
+  my ($usage) = @_;
+  return 0 unless ref($usage) eq 'HASH';
+  my $details = $usage->{prompt_tokens_details};
+  return 0 + ($usage->{cached}
+    // $usage->{cached_tokens}
+    // (ref($details) eq 'HASH' ? $details->{cached_tokens} : undef)
+    // 0);
 }
 
 # The model a tier asks its nodes for. Falls back to what the client requested, which is what

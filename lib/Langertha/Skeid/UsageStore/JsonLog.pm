@@ -166,13 +166,15 @@ sub report {
     @events = grep { ($_->{model} // '') eq $filters->{model} } @events;
   }
 
-  my %totals = (requests => 0, input_tokens => 0, output_tokens => 0, total_tokens => 0, tool_calls => 0, total_cost_usd => 0);
+  my %totals = (requests => 0, input_tokens => 0, output_tokens => 0, total_tokens => 0, cached_tokens => 0, tool_calls => 0, total_cost_usd => 0);
   my (%by_key, %by_model);
   for my $ev (@events) {
     $totals{requests}++;
     $totals{input_tokens}  += $num->($ev->{input_tokens});
     $totals{output_tokens} += $num->($ev->{output_tokens});
     $totals{total_tokens}  += $num->($ev->{total_tokens});
+    # Old events predate the field and read undef; num() treats that as zero (k27).
+    $totals{cached_tokens} += $num->($ev->{cached_tokens});
     $totals{tool_calls}    += $num->($ev->{tool_calls});
     $totals{total_cost_usd} += $num->($ev->{cost_total_usd});
 
@@ -210,7 +212,8 @@ sub report {
         requested_model => ($_->{requested_model} // $_->{model} // ''),
         node_id => ($_->{node_id} // ''), status_code => $num->($_->{status_code}), ok => ($_->{ok} ? 1 : 0),
         input_tokens => $num->($_->{input_tokens}), output_tokens => $num->($_->{output_tokens}),
-        total_tokens => $num->($_->{total_tokens}), tool_calls => $num->($_->{tool_calls}),
+        total_tokens => $num->($_->{total_tokens}), cached_tokens => $num->($_->{cached_tokens}),
+        tool_calls => $num->($_->{tool_calls}),
         cost_total_usd => $num->($_->{cost_total_usd}),
       }
     } @recent ],
