@@ -158,6 +158,42 @@ use Langertha::Skeid::Proxy;
   is $mixed->{limit}, 4, 'header names are matched case-insensitively';
 }
 
+# --- AKI.IO publishes no capacity signal (karr k16) ---
+# Verified live against aki.io on 2026-09-15 with a real key: every route
+# (GET /api/endpoints, GET /api/endpoints/<model>, POST /api/call/<model>)
+# answers from a bare Apache with only Access-Control-Allow-Origin,
+# Content-Length, Content-Type, Date and Server -- no x-ratelimit-*, no
+# ratelimit-*, no anthropic-ratelimit-*, no Retry-After. AKI's per-key monthly
+# euro budget and endpoint entitlements are enforced server-side and surface in
+# the JSON body (success:false / "Client not authorized ...") on an HTTP 200,
+# never as a header or a 429 status. So the passive ratelimit probe has nothing
+# to read and there is no quota field to poll: AKI nodes fall back to inflight,
+# which is correct for a single frontend. This pins that -- if a spelling ever
+# grew that matched one of AKI's bare headers, it would fail here.
+{
+  my $skeid = Langertha::Skeid->new;
+  $skeid->add_node(id => 'aki', url => 'https://aki.io', model => 'llama3_8b_chat');
+
+  my %aki_headers = (
+    'Access-Control-Allow-Origin' => '*',
+    'Content-Length'              => '297',
+    'Content-Type'                => 'application/json',
+    'Date'                        => 'Tue, 15 Sep 2026 17:06:58 GMT',
+    'Server'                      => 'Apache',
+  );
+
+  ok !$skeid->observe_response_headers('aki', { %aki_headers }),
+    'AKI response headers carry no rate-limit signal, so nothing is recorded';
+
+  # A budget/authorization failure rides in the body on a 200 -- it must not be
+  # mistaken for a 429 backoff, because the status is what triggers that path.
+  ok !$skeid->observe_response_headers('aki', { %aki_headers }, status => 200),
+    'and an in-body AKI error on HTTP 200 still records nothing';
+
+  ok !$skeid->capacity_reading('aki'),
+    'no capacity reading exists for an AKI node -- admission stays on inflight';
+}
+
 # --- 429 becomes a backoff, and touches nothing else ---
 {
   my $skeid = Langertha::Skeid->new;
