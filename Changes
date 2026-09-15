@@ -2,6 +2,14 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Partition max_conns across multiple Skeid frontends: routing.frontend_count
+      (or SKEID_FRONTEND_COUNT) divides a node's max_conns among the separate
+      Skeid hosts in front of it, the way worker_count divides it among prefork
+      workers. The two compose -- a process admits max_conns/(frontend_count *
+      worker_count) -- and a max_conns that cannot be split cleanly warns at
+      startup. Default 1 leaves single-frontend deployments unchanged. It does
+      not scale probe or vault timers: separate frontends each hold their own
+      (ADR 0012)
     - Stream Anthropic tool_use in SSE: when the upstream OpenAI stream emits
       tool_calls, each one becomes its own content_block_start(type=tool_use),
       every arguments chunk becomes an input_json_delta with partial_json, and

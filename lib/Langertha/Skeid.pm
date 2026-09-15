@@ -347,6 +347,39 @@ has worker_count => (
   trigger => sub { $_[0]->_bump_inventory },
 );
 
+=attr frontend_count
+
+How many separate Skeid frontends stand in front of one node (default 1).
+
+C<worker_count> partitions C<max_conns> across the prefork workers of one process; this
+partitions it across the distinct Skeid hosts sharing a node — a number only the operator
+knows, because two frontends are two processes on two machines with nothing between them to
+count each other's C<inflight> (there is no probe and no shared state; that absence is the
+whole reason this has to be declared rather than detected). With F frontends each admits its
+share C<max_conns/F>, so the group as a whole never admits more than the node was configured
+for (ADR 0009, ADR 0012).
+
+It composes with C<worker_count>: the two divisors multiply, so one worker's share is
+C<max_conns/(F*N)> — partitioned across frontends first, then across workers, which integer
+division makes the same thing either way. Unlike the worker divisor it does not scale anything
+on a timer: separate frontends each run their own probes and hold their own vault token, the
+same reason vault renewal is not scaled per worker (ADR 0010).
+
+Explicit and opt-in: the default 1 is today's behaviour, unchanged. An operator who runs two
+frontends and forgets to say so over-admits the node by a factor of two, silently — which is
+exactly the failure this field exists to prevent.
+
+=cut
+
+has frontend_count => (
+  is      => 'rw',
+  default => sub {
+    return (defined($ENV{SKEID_FRONTEND_COUNT}) && length($ENV{SKEID_FRONTEND_COUNT}))
+      ? 0 + $ENV{SKEID_FRONTEND_COUNT}
+      : 1;
+  },
+);
+
 has _stats => (
   is      => 'rw',
   default => sub { {} },
@@ -577,6 +610,15 @@ sub reload_config {
     }
     if (defined $cfg->{routing}{trust_key_id_header}) {
       $self->trust_key_id_header($cfg->{routing}{trust_key_id_header} =~ /^(1|true|yes|on)$/i ? 1 : 0);
+    }
+    if (defined $cfg->{routing}{frontend_count}) {
+      # How many Skeid hosts share the nodes. Only the config knows it -- there is nothing to
+      # detect -- and forgetting it over-admits every node by that factor (ADR 0012). Floor at
+      # one, so a stray 0 falls back to today's single-frontend behaviour instead of dividing
+      # max_conns to nothing.
+      my $frontends = int(0 + $cfg->{routing}{frontend_count});
+      $frontends = 1 if $frontends < 1;
+      $self->frontend_count($frontends);
     }
   }
 
@@ -923,12 +965,14 @@ sub _inflight_allows {
 
   my $share = $skeid->worker_max_conns($node);
 
-This process's share of a node's C<max_conns> (ADR 0010). With one worker that is the
-configured value; with N it is the configured value divided by N, so the group as a whole never
-admits more than was asked for.
+This process's share of a node's C<max_conns> (ADR 0010, ADR 0012). With one worker and one
+frontend that is the configured value; otherwise it is the configured value divided by the
+number of processes sharing the node — C<frontend_count> separate Skeid hosts times the
+C<worker_count> prefork workers of this one — so the group as a whole never admits more than was
+asked for.
 
-Never less than 1 when a limit is set: a worker that may admit nothing is a worker that does
-nothing. That means C<max_conns> below the worker count cannot be honoured, and
+Never less than 1 when a limit is set: a process that may admit nothing is a process that does
+nothing. That means a C<max_conns> below that combined process count cannot be honoured, and
 L</worker_share_warnings> is what says so out loud.
 
 =cut
@@ -938,19 +982,34 @@ sub worker_max_conns {
   my $max = 0 + ((ref($node) eq 'HASH' ? $node->{max_conns} : $node) // 0);
   return 0 if $max <= 0;
 
-  my $workers = 0 + ($self->worker_count // 1);
-  return $max if $workers <= 1;
+  my $divisor = $self->_admission_divisor;
+  return $max if $divisor <= 1;
 
-  my $share = int($max / $workers);
+  my $share = int($max / $divisor);
   return $share > 0 ? $share : 1;
+}
+
+# How many processes across the whole deployment share one node's max_conns: the prefork workers
+# of this process (worker_count) times the separate Skeid frontends in front of the node
+# (frontend_count). max_conns is partitioned across frontends first and then across workers, but
+# integer division composes -- floor(floor(max/F)/N) == floor(max/(F*N)) -- so the product is
+# the only number admission needs (ADR 0012).
+sub _admission_divisor {
+  my ($self) = @_;
+  my $workers   = 0 + ($self->worker_count   // 1);
+  my $frontends = 0 + ($self->frontend_count // 1);
+  $workers   = 1 if $workers   < 1;
+  $frontends = 1 if $frontends < 1;
+  return $workers * $frontends;
 }
 
 =method worker_share_warnings
 
   warn $_ for @{ $skeid->worker_share_warnings };
 
-The nodes whose C<max_conns> cannot be divided among the workers without exceeding it. Returned
-rather than warned so the caller decides where they go; C<bin/skeid> prints them at startup.
+The nodes whose C<max_conns> cannot be divided among the processes sharing them without
+exceeding it — C<frontend_count> frontends times C<worker_count> workers. Returned rather than
+warned so the caller decides where they go; C<bin/skeid> prints them at startup.
 
 Silence here would be the bad kind: the operator wrote a number, and the process group is about
 to ignore it.
@@ -959,18 +1018,37 @@ to ignore it.
 
 sub worker_share_warnings {
   my ($self) = @_;
-  my $workers = 0 + ($self->worker_count // 1);
-  return [] if $workers <= 1;
+  my $workers   = 0 + ($self->worker_count   // 1);
+  my $frontends = 0 + ($self->frontend_count // 1);
+  $workers   = 1 if $workers   < 1;
+  $frontends = 1 if $frontends < 1;
+  my $divisor = $workers * $frontends;
+  return [] if $divisor <= 1;
+
+  # Name the axes that are actually in play, and the matching fix: the operator can only shed
+  # what they configured. With both dividing, "worker" alone would misname where the surplus
+  # comes from.
+  my ($split, $fix);
+  if ($frontends > 1 && $workers > 1) {
+    $split = sprintf('%d frontends x %d workers = %d processes', $frontends, $workers, $divisor);
+    $fix   = 'fewer frontends or workers, or raise max_conns';
+  } elsif ($frontends > 1) {
+    $split = sprintf('%d frontends', $frontends);
+    $fix   = 'fewer frontends or raise max_conns';
+  } else {
+    $split = sprintf('%d workers', $workers);
+    $fix   = 'fewer workers or raise max_conns';
+  }
 
   my @warnings;
   for my $node (@{$self->nodes}) {
     my $max = 0 + ($node->{max_conns} // 0);
     next if $max <= 0;
-    next if $max >= $workers;
+    next if $max >= $divisor;
     push @warnings, sprintf(
-      "node '%s': max_conns %d cannot be split across %d workers; each will admit 1, "
-      . "so the node may see up to %d concurrent requests. Use fewer workers or raise max_conns.",
-      ($node->{id} // '?'), $max, $workers, $workers,
+      "node '%s': max_conns %d cannot be split across %s; each process will admit 1, "
+      . "so the node may see up to %d concurrent requests. Use %s.",
+      ($node->{id} // '?'), $max, $split, $divisor, $fix,
     );
   }
   return \@warnings;

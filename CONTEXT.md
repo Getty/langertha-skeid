@@ -78,8 +78,12 @@ undercount the moment anything else shares it.
 _Avoid_: load, queue depth, connections.
 
 **Worker share**:
-This process's slice of a node's `max_conns` under `--workers N` — the configured value divided
-by N. `max_conns` names what the *node* may take; the share is what one process may send.
+This process's slice of a node's `max_conns` — the configured value divided by the number of
+processes sharing the node: the `--workers N` prefork workers of this process, times the
+`frontend_count` separate Skeid hosts in front of the node (ADR 0010, ADR 0012). The two
+divisors multiply and the split is static; `max_conns` names what the *node* may take, the share
+is what one process may send. A capacity probe reads the node's real occupancy and makes the
+divisor redundant where it exists.
 _Avoid_: quota, limit, per-worker max_conns.
 
 **Capacity probe**:
