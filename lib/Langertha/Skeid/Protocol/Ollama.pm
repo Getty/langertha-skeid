@@ -335,4 +335,21 @@ sub manifest_endpoint {
   };
 }
 
+=method error_body
+
+  my $body = Langertha::Skeid::Protocol::Ollama->error_body("Model 'x' is not available for this key");
+
+Ollama's error envelope, C<< { error => $message } >> -- the message as a plain string, not an
+object: the Ollama clients decode C<error> as a string (the Go client's C<StatusError>) and fail
+on anything else. Every error Skeid answers on C</api/*> is rendered from this, with the HTTP
+status of the failure, and so is the mid-stream error line (see
+L<Langertha::Skeid::Protocol::Ollama::Stream/error_event>) (skeid #47).
+
+=cut
+
+sub error_body {
+  my ($class, $message) = @_;
+  return { error => '' . ($message // '') };
+}
+
 1;

@@ -140,23 +140,31 @@ sub build_app {
     _handle_anthropic_messages($c);
   });
 
-  # Ollama format
-  $r->post('/api/chat' => sub {
+  # Ollama format. Every error on these routes has to be Ollama-shaped, {"error": "<string>"}:
+  # an Ollama client decodes the error as a string and fails on the OpenAI object (skeid #47).
+  # _render_error reads this.
+  my $ollama = $r->under('/api' => sub {
+    my ($c) = @_;
+    $c->stash('skeid.error_format' => 'ollama');
+    return 1;
+  });
+
+  $ollama->post('/chat' => sub {
     my ($c) = @_;
     _handle_ollama($c, 'chat');
   });
 
-  $r->post('/api/generate' => sub {
+  $ollama->post('/generate' => sub {
     my ($c) = @_;
     _handle_ollama($c, 'generate');
   });
 
-  $r->get('/api/tags' => sub {
+  $ollama->get('/tags' => sub {
     my ($c) = @_;
     $c->render(json => Langertha::Skeid::Protocol::Ollama->tags_from_nodes($c->skeid->list_nodes));
   });
 
-  $r->get('/api/ps' => sub {
+  $ollama->get('/ps' => sub {
     my ($c) = @_;
     $c->render(json => { models => [] });
   });
@@ -473,7 +481,7 @@ sub _handle_ollama {
   my $face = $OLLAMA_FACE{$kind};
   my $body = $c->req->json;
   unless (ref($body) eq 'HASH') {
-    $c->render(json => { error => 'Invalid JSON body' }, status => 400);
+    _render_error($c, 400, 'Invalid JSON body', 'invalid_request_error');
     return;
   }
 
@@ -737,7 +745,7 @@ sub _proxy_openai_stream {
 
   my $headers_sent = 0;
   my $had_error = 0;
-  # A translator that can report errors in its own format (the Anthropic one) takes the failure
+  # A translator that can report errors in its own format (Anthropic, Ollama) takes the failure
   # paths too: an upstream error status before the stream opens becomes a plain HTTP error in
   # the client's shape, a failure after it becomes an in-band error event (core karr #224).
   my $stream_errors = $stream && $stream->can('error_event');
@@ -961,15 +969,20 @@ sub _proxy_openai_stream {
 # Renders an error in the shape of the face the client called. The Anthropic Messages face
 # gets Anthropic's envelope, {type: "error", error: {type, message}}, with the type taken from
 # the HTTP status, because that is what an Anthropic SDK parses and raises on (core karr #224).
-# Every other face keeps the OpenAI shape it always had, with $openai_type as its type. The face
-# is read off the stash, which the /v1/messages route sets; a controller without one (a unit
-# test's stand-in) is an OpenAI face.
+# The Ollama face gets Ollama's {error: "<message>"}, a plain string, because that is what the
+# Ollama clients decode (skeid #47). Every other face keeps the OpenAI shape it always had, with
+# $openai_type as its type. The face is read off the stash, which the /v1/messages and /api/*
+# routes set; a controller without one (a unit test's stand-in) is an OpenAI face.
 sub _render_error {
   my ($c, $status, $message, $openai_type) = @_;
   my $format = $c->can('stash') ? ($c->stash('skeid.error_format') // '') : '';
   if ($format eq 'anthropic') {
     $c->render(json => Langertha::Skeid::Protocol::Anthropic->error_body($status, $message),
       status => $status);
+    return;
+  }
+  if ($format eq 'ollama') {
+    $c->render(json => Langertha::Skeid::Protocol::Ollama->error_body($message), status => $status);
     return;
   }
   $c->render(json => { error => { message => $message, type => $openai_type } }, status => $status);

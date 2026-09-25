@@ -198,7 +198,8 @@ sub near {
   my $res = generate({ model => 'm1', prompt => 'hi', stream => JSON::MaybeXS::false },
     Authorization => "Bearer $NARROW_KEY");
   is $res->code, 403, 'a key whose policy does not grant the model is refused';
-  is $res->json->{error}{type}, 'permission_error', 'as a permission answer';
+  # Ollama's error shape, a plain string under error, not the OpenAI object (skeid #47).
+  like $res->json->{error}, qr/not available for this key/, 'as a permission answer, in Ollama\'s string shape';
   is scalar(@upstream_bodies), 0, 'and the upstream was never called';
 }
 
@@ -208,6 +209,7 @@ for my $stream (0, 1) {
   my $res = generate({ model => 'm401', prompt => 'hi',
     stream => ($stream ? JSON::MaybeXS::true : JSON::MaybeXS::false) });
   is $res->code, 401, "$label: the upstream's 401 reaches the client";
+  like $res->json->{error}, qr/invalid upstream key/, "$label: as an Ollama error carrying the upstream's message";
   is scalar(@events), 1, "$label: one usage event";
   is $events[0]{ok}, 0, "$label: recorded as failed";
   is $events[0]{status_code}, 401, "$label: with the upstream status";
@@ -223,6 +225,7 @@ for my $stream (0, 1) {
   Mojo::IOLoop->start;
   Mojo::IOLoop->remove($guard);
   is $tx->res->code, 400, 'a body that is not a JSON object is a 400';
+  is_deeply $tx->res->json, { error => 'Invalid JSON body' }, 'in Ollama\'s error shape';
 }
 
 done_testing;

@@ -4,6 +4,7 @@ our $VERSION = '0.003';
 use strict;
 use warnings;
 use Langertha::Skeid::Protocol;
+use Langertha::Skeid::Protocol::Ollama;
 
 =head1 DESCRIPTION
 
@@ -38,6 +39,7 @@ sub new {
     output_tokens => 0,
     done_reason   => undef,
     text_bytes    => 0,
+    errored       => 0,
   }, $class;
 }
 
@@ -79,13 +81,23 @@ sub start {
 
 One decoded OpenAI chunk becomes one Ollama line, or nothing when the chunk carries no text
 (an opening role-only chunk, or the final usage-only one). Usage and finish reason are recorded
-for the closing line.
+for the closing line. A chunk carrying an OpenAI error object instead of choices ends the
+stream with L</error_event>.
 
 =cut
 
 sub delta {
   my ($self, $chunk) = @_;
   return '' unless ref($chunk) eq 'HASH';
+  return '' if $self->{finished};
+
+  # Some servers report a failure inside an open stream as a chunk carrying an OpenAI error
+  # object. The HTTP status is already 200, so an Ollama client can only learn of it in-band,
+  # as Ollama's own error line -- and nothing after it (skeid #47).
+  if (ref($chunk->{error}) eq 'HASH') {
+    my $message = $chunk->{error}{message} // 'upstream error';
+    return $self->error_event(500, "Upstream error: $message");
+  }
 
   if (my $usage = $chunk->{usage}) {
     $self->{input_tokens}  = 0 + ($usage->{prompt_tokens}     // $usage->{input_tokens}  // $self->{input_tokens});
@@ -131,6 +143,38 @@ sub finish {
     eval_count        => 0 + ($args{output_tokens} // $self->{output_tokens} // 0),
   });
 }
+
+=method error_event
+
+  my $bytes = $stream->error_event(500, 'Upstream error: ...');
+
+Ends the stream with Ollama's error line, C<{"error":"<message>"}> -- how Ollama itself reports a
+failure after the stream has opened, and what its clients check every line for. The status is
+accepted for the same call shape as L<Langertha::Skeid::Protocol::Anthropic::Stream/error_event>
+and is not on the wire: the HTTP status went out with the first line.
+
+The stream is finished afterwards: C<delta> and C<finish> return nothing, so no C<done: true>
+line follows and a client cannot mistake a failed stream for a complete one. Returns nothing if
+the stream has already finished.
+
+=cut
+
+sub error_event {
+  my ($self, $status, $message) = @_;
+  return '' if $self->{finished};
+  $self->{finished} = 1;
+  $self->{errored}  = 1;
+  return _line(Langertha::Skeid::Protocol::Ollama->error_body($message));
+}
+
+=method errored
+
+True once L</error_event> ended the stream, so the proxy records the request as failed even
+though the HTTP status was 200.
+
+=cut
+
+sub errored { $_[0]->{errored} }
 
 =method usage
 

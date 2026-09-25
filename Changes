@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Errors on the Ollama routes (/api/chat, /api/generate, /api/tags,
+      /api/ps) are answered in Ollama's shape, {"error": "<message>"} with
+      the failure's HTTP status, instead of the OpenAI error object an
+      Ollama client cannot decode: invalid body, key policy, no capacity,
+      no node, and upstream errors with the upstream's own message. A
+      stream that fails after it opened ends with an Ollama error line and
+      no done:true line
     - Ollama format reaches the model on /api/chat and /api/generate:
       "json" is sent upstream as response_format json_object, a JSON schema
       as response_format json_schema (named ollama_format, no strict). The
