@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Answer an Anthropic request that carries a provider built-in tool
+      (web_search_20250305, bash_*, text_editor_*, computer_*, mcp_toolset, ...)
+      with a JSON 400 invalid_request_error naming the tool type and its
+      category, instead of an HTML 500. Skeid forwards function tools only.
+      Any other failure to translate a /v1/messages body is a JSON 400 too.
+      Needs a Langertha with Langertha::Tool->classify
     - Record cached_tokens (the prompt-cache read count) on every usage event.
       It is read off the upstream usage payload (OpenAI's
       prompt_tokens_details.cached_tokens, plus a flat cached_tokens fallback) on

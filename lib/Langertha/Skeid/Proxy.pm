@@ -317,7 +317,22 @@ sub _handle_anthropic_messages {
   }
 
   my $wants_stream = $body->{stream} ? 1 : 0;
-  my $openai_body = Langertha::Skeid::Protocol::Anthropic->request_to_openai($body);
+
+  # Translation reads the client's body, so a failure there is the client's malformed request
+  # -- a provider built-in tool skeid cannot forward, or a shape the translator cannot read.
+  # Uncaught it escapes as Mojolicious' HTML 500; answer a 400 an Anthropic SDK can parse, before
+  # anything is routed or metered (core karr #216).
+  my $openai_body = eval { Langertha::Skeid::Protocol::Anthropic->request_to_openai($body) };
+  unless ($openai_body) {
+    my $msg = $@ || 'unknown error';
+    $msg =~ s/ at \S+ line \d+\.?\n?\z//;
+    chomp $msg;
+    $c->render(json => {
+      type  => 'error',
+      error => { message => "Invalid request: $msg", type => 'invalid_request_error' },
+    }, status => 400);
+    return;
+  }
   my $model = $openai_body->{model} // '';
   my $api_key_id = _request_api_key_id($c);
 

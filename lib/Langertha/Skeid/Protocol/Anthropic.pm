@@ -45,6 +45,12 @@ fold to text; C<tool_use> blocks become C<tool_calls> on the assistant message; 
 blocks become their own C<role => 'tool'> message carrying C<tool_call_id>, which is why a
 single Anthropic message can expand into several OpenAI ones.
 
+Only function tools are translated. A provider built-in in C<tools> (C<web_search_20250305>,
+C<bash_20250124>, C<text_editor_*>, C<computer_*>, C<mcp_toolset>, ...) or a definition
+L<Langertha::Tool/classify> does not recognise makes it die with a one-line message naming the
+tool type and its category; the proxy answers that, and any other failure to translate the
+request, as a C<400 invalid_request_error>.
+
 =cut
 
 sub request_to_openai {
@@ -133,6 +139,19 @@ sub request_to_openai {
   );
 
   if (ref($body->{tools}) eq 'ARRAY') {
+    # Skeid forwards one OpenAI chat call (ADR 0001); a provider built-in has no function shape
+    # there and nothing downstream would run it. from_list croaks on one (Langertha k210), so
+    # ask the non-croaking classifier first and refuse with a message the client can act on.
+    # Non-hash entries are left to from_list, which skips them.
+    my $i = -1;
+    for my $tool (@{$body->{tools}}) {
+      $i++;
+      next unless ref($tool) eq 'HASH';
+      my ($category, undef, $label) = Langertha::Tool->classify($tool, 'anthropic');
+      next if $category eq 'function';
+      die "tools[$i]: tool type '" . ($label // '') . "' ($category) is not supported: "
+        . "skeid does not forward provider built-in tools, only function tools\n";
+    }
     my $tools = Langertha::Tool->from_list($body->{tools});
     $out{tools} = [ map { $_->to_openai } @$tools ];
   }
