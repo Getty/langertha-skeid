@@ -1,0 +1,19 @@
+---
+claimed_at: 2026-09-25T16:28:51Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T16:28:51Z
+created: 2026-09-25T16:02:10Z
+id: 37
+priority: medium
+started: 2026-09-25T16:28:51Z
+status: done
+tags:
+- security
+- keys
+title: 'Customer key id is a short truncated digest (key_id_for_key): widen or derive
+  via keyed HMAC'
+updated: 2026-09-25T16:28:51Z
+---
+
+From skeid #29 review M5: Skeid.pm:1624 key_id_for_key derives the customer key id as a short truncated digest; it is the sole separator of customers' routing, billing and (since #29) manifests. Collision/guessing margin is thin. Options: widen the digest (e.g. full SHA-256 hex or >=128 bits), or keyed HMAC with a server secret (prevents offline mapping key->id); both change existing ids -> migration for stored usage events and config keys: sections (accept old ids for a transition, document re-issue). Needs a decision + skeid ADR.
