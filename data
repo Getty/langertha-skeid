@@ -1,0 +1,20 @@
+---
+claimed_at: 2026-09-25T16:29:00Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T16:29:00Z
+created: 2026-09-25T16:08:30Z
+id: 39
+priority: medium
+started: 2026-09-25T16:29:00Z
+status: done
+tags:
+- config
+- reload
+- errors
+title: Failed hot reload with a config_loader turns every triggering request into
+  a 500 until the config is fixed
+updated: 2026-09-25T16:29:00Z
+---
+
+From skeid #29: since the atomic reload (k29 I1) the old state is kept, but the reload error is re-raised into the request that triggered it. With a config file this happens once (mtime moves on); with a config_loader every reloading request gets a 500 until the config is fixed. Fix: log the reload failure (and expose it on admin/health), serve the request with the kept state, back off retries. Test.
