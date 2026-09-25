@@ -120,6 +120,9 @@ sub build_app {
   # Anthropic format
   $r->post('/v1/messages' => sub {
     my ($c) = @_;
+    # Every error this request produces, wherever it is rendered, has to be Anthropic-shaped
+    # (core karr #224). _render_error reads this.
+    $c->stash('skeid.error_format' => 'anthropic');
     _handle_anthropic_messages($c);
   });
 
@@ -312,7 +315,7 @@ sub _handle_anthropic_messages {
   my ($c) = @_;
   my $body = $c->req->json;
   unless (ref($body) eq 'HASH') {
-    $c->render(json => { error => { message => 'Invalid JSON body', type => 'invalid_request_error' } }, status => 400);
+    _render_error($c, 400, 'Invalid JSON body', 'invalid_request_error');
     return;
   }
 
@@ -327,10 +330,7 @@ sub _handle_anthropic_messages {
     my $msg = $@ || 'unknown error';
     $msg =~ s/ at \S+ line \d+\.?\n?\z//;
     chomp $msg;
-    $c->render(json => {
-      type  => 'error',
-      error => { message => "Invalid request: $msg", type => 'invalid_request_error' },
-    }, status => 400);
+    _render_error($c, 400, "Invalid request: $msg", 'invalid_request_error');
     return;
   }
   my $model = $openai_body->{model} // '';
@@ -473,12 +473,7 @@ sub _begin_route_async {
   # it. Both are permission answers, and neither improves by retrying -- so neither may be
   # reported as a capacity problem.
   if (!$decision->{permitted}) {
-    $c->render(json => {
-      error => {
-        message => "Model '$model' is not available for this key",
-        type    => 'permission_error',
-      }
-    }, status => 403);
+    _render_error($c, 403, "Model '$model' is not available for this key", 'permission_error');
     $cb->();
     return;
   }
@@ -504,35 +499,20 @@ sub _begin_route_async {
         $without_deny = 1, last if ref($state) eq 'HASH' && $state->{has_eligible};
       }
       if ($without_deny) {
-        $c->render(json => {
-          error => {
-            message => "Model '$model' is not available for this key",
-            type    => 'permission_error',
-          }
-        }, status => 403);
+        _render_error($c, 403, "Model '$model' is not available for this key", 'permission_error');
         $cb->();
         return;
       }
     }
 
     if (!$saw_eligible) {
-      $c->render(json => {
-        error => {
-          message => "No healthy node available for model '$model'",
-          type    => 'model_not_found',
-        }
-      }, status => 503);
+      _render_error($c, 503, "No healthy node available for model '$model'", 'model_not_found');
     } else {
       my $waited_ms = int((time - $started) * 1000);
       my $msg = length($last_node_id)
         ? "Timed out waiting for free capacity on node '$last_node_id' (waited ${waited_ms}ms)"
         : "Timed out waiting for free capacity for model '$model' (waited ${waited_ms}ms)";
-      $c->render(json => {
-        error => {
-          message => $msg,
-          type    => 'rate_limit_error',
-        }
-      }, status => 429);
+      _render_error($c, 429, $msg, 'rate_limit_error');
     }
     $cb->();
     return;
@@ -610,12 +590,8 @@ sub _proxy_openai_json_async {
         error_message => ($err->{message} // 'unknown'),
         metrics       => {},
       });
-      $c->render(json => {
-        error => {
-          message => 'Upstream error: ' . ($err->{message} // 'unknown'),
-          type    => 'upstream_error',
-        }
-      }, status => ($err->{code} || 502));
+      _render_error($c, ($err->{code} || 502),
+        'Upstream error: ' . ($err->{message} // 'unknown'), 'upstream_error');
       $cb->(undef, 1, ($err->{code} || 502));
       return;
     }
@@ -689,6 +665,11 @@ sub _proxy_openai_stream {
 
   my $headers_sent = 0;
   my $had_error = 0;
+  # A translator that can report errors in its own format (the Anthropic one) takes the failure
+  # paths too: an upstream error status before the stream opens becomes a plain HTTP error in
+  # the client's shape, a failure after it becomes an in-band error event (core karr #224).
+  my $stream_errors = $stream && $stream->can('error_event');
+  my $upstream_failed = 0;
   my $status = 200;
   my $accumulated_usage = { input => 0, output => 0, total => 0, cached => 0 };
   my $accumulated_content_bytes = 0;
@@ -725,8 +706,16 @@ sub _proxy_openai_stream {
 
   $tx->res->content->unsubscribe('read')->on(read => sub {
     my ($content, $bytes) = @_;
+    return if $upstream_failed;
     unless ($headers_sent) {
       $status = $tx->res->code // 200;
+      # The upstream refused before streaming anything. Opening an SSE response for it would
+      # hand the client a 4xx/5xx event stream with no events in it; leave the response unsent
+      # and let the completion callback answer it as an error, as the non-streaming path does.
+      if ($stream_errors && $status >= 400) {
+        $upstream_failed = 1;
+        return;
+      }
       $c->res->code($status);
       for my $name (@{$tx->res->headers->names}) {
         my $lc = lc($name);
@@ -795,6 +784,7 @@ sub _proxy_openai_stream {
       $had_error = 1;
       unless ($headers_sent) {
         my $duration_ms = _duration_ms($started);
+        my $err_status = $err->{code} || 502;
         $c->skeid->call_function('request.finish', {
           id => $node_id,
           ok => 0,
@@ -803,22 +793,43 @@ sub _proxy_openai_stream {
         _record_usage_event($c, {
           %$meta,
           node_id       => $node_id,
-          status_code   => 502,
+          status_code   => $err_status,
           ok            => 0,
           duration_ms   => $duration_ms,
           error_type    => 'upstream_error',
           error_message => ($err->{message} // 'unknown'),
           metrics       => $accumulated_usage->{total} > 0 ? { usage => $accumulated_usage } : {},
         });
-        $c->render(json => {
-          error => {
-            message => 'Upstream error: ' . ($err->{message} // 'unknown'),
-            type    => 'upstream_error',
-          }
-        }, status => 502);
+        _render_error($c, $err_status,
+          'Upstream error: ' . ($err->{message} // 'unknown'), 'upstream_error');
         return;
       }
     }
+
+    # The stream is open, so the status is already sent. A translator that can say so in-band
+    # ends a failed stream with its error event instead of a closing sequence that would read
+    # as a complete answer. Mojo::UserAgent reports an upstream that hangs up mid-body as no
+    # error at all once the status line has arrived, so the body's own framing (the chunked
+    # terminator, Content-Length) is the witness for that case; a close-delimited body cannot
+    # be told apart from a complete one.
+    if ($stream_errors && $headers_sent) {
+      my $content = $tx_done->res->content;
+      my $framed = $content->is_chunked || length($content->headers->content_length // '');
+      my $cut = !$had_error && $framed && !$content->is_finished;
+      if ($had_error || $cut) {
+        $had_error = 1;
+        my $reason = $cut ? 'Premature connection close' : ($tx_done->error->{message} // 'unknown');
+        my $frame = $stream->error_event(500, "Upstream error: $reason");
+        if (length $frame) {
+          push @queue, $frame;
+          $drain->() unless $draining;
+        }
+      }
+    }
+
+    # An upstream that reported its failure inside the stream (an error chunk) was answered
+    # with an error event by the translator; the request still failed.
+    $had_error = 1 if $stream && $stream->can('errored') && $stream->errored;
 
     my $duration_ms = _duration_ms($started);
     _observe_capacity($c, $node_id, $tx_done->res);
@@ -863,6 +874,24 @@ sub _proxy_openai_stream {
     }
   });
   });
+}
+
+# Renders an error in the shape of the face the client called. The Anthropic Messages face
+# gets Anthropic's envelope, {type: "error", error: {type, message}}, with the type taken from
+# the HTTP status, because that is what an Anthropic SDK parses and raises on (core karr #224).
+# Every other face keeps the OpenAI shape it always had, with $openai_type as its type. The face
+# is read off the stash, which the /v1/messages route sets; a controller without one (a unit
+# test's stand-in) is an OpenAI face.
+sub _render_error {
+  my ($c, $status, $message, $openai_type) = @_;
+  my $format = $c->can('stash') ? ($c->stash('skeid.error_format') // '') : '';
+  if ($format eq 'anthropic') {
+    $c->render(json => Langertha::Skeid::Protocol::Anthropic->error_body($status, $message),
+      status => $status);
+    return;
+  }
+  $c->render(json => { error => { message => $message, type => $openai_type } }, status => $status);
+  return;
 }
 
 sub _render_upstream_response {

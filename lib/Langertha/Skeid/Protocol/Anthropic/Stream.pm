@@ -4,6 +4,7 @@ our $VERSION = '0.003';
 use strict;
 use warnings;
 use Langertha::Skeid::Protocol;
+use Langertha::Skeid::Protocol::Anthropic;
 
 =head1 DESCRIPTION
 
@@ -33,6 +34,7 @@ sub new {
     message_id => ($args{message_id} // ('msg_' . int(time * 1000))),
     started       => 0,
     finished      => 0,
+    errored       => 0,
     output_tokens => 0,
     input_tokens  => 0,
     stop_reason   => undef,
@@ -111,11 +113,24 @@ The translator carries enough state for parallel tool calls: each OpenAI tool_ca
 mapped to its own Anthropic content block, allocated in order of first appearance, and the
 list of still-open blocks is closed in order when C<finish> runs.
 
+A chunk carrying an OpenAI C<error> object instead of choices (how some servers report a
+failure inside an open stream) ends the stream with L</error_event>.
+
 =cut
 
 sub delta {
   my ($self, $chunk) = @_;
   return '' unless ref($chunk) eq 'HASH';
+
+  return '' if $self->{finished};
+
+  # Some servers report a failure inside an open stream as a chunk carrying an OpenAI error
+  # object instead of choices. The HTTP status is already 200, so it can only reach an
+  # Anthropic client in-band, as an error event -- and nothing after it (core karr #224).
+  if (ref($chunk->{error}) eq 'HASH') {
+    my $message = $chunk->{error}{message} // 'upstream error';
+    return $self->error_event(500, "Upstream error: $message");
+  }
 
   my $out = '';
   $out .= $self->start unless $self->{started};
@@ -256,6 +271,39 @@ sub finish {
   $out .= _event('message_stop', { type => 'message_stop' });
   return $out;
 }
+
+=method error_event
+
+  my $bytes = $stream->error_event(500, 'Upstream error: ...');
+
+Ends the stream with an Anthropic C<event: error> frame, the way Anthropic reports a failure
+after the stream has opened (the HTTP status is already 200 by then). The frame's data is
+L<Langertha::Skeid::Protocol::Anthropic/error_body>, so its C<error.type> follows the same
+status mapping as every other error on C</v1/messages>.
+
+The stream is finished afterwards: C<delta> and C<finish> return nothing, so no
+C<message_stop> follows and a client cannot mistake a failed stream for a complete one. Open
+content blocks are left unclosed, as Anthropic leaves them. Returns nothing if the stream has
+already finished.
+
+=cut
+
+sub error_event {
+  my ($self, $status, $message) = @_;
+  return '' if $self->{finished};
+  $self->{finished} = 1;
+  $self->{errored}  = 1;
+  return _event('error', Langertha::Skeid::Protocol::Anthropic->error_body($status, $message));
+}
+
+=method errored
+
+True once L</error_event> ended the stream, so the proxy records the request as failed even
+though the HTTP status was 200.
+
+=cut
+
+sub errored { $_[0]->{errored} }
 
 =method usage
 
