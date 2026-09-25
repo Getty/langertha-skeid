@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - An Ollama client's replayed tool round-trip reaches the OpenAI upstream
+      in OpenAI's shape on /api/chat: tool_calls arguments objects become JSON
+      strings (non-ASCII intact), calls without an id get call_skeid_N, and
+      each tool message is tied to its call by tool_call_id (matched by
+      tool_name, else in order)
     - Non-ASCII text in tool_use input and structured tool_result content
       reaches the upstream intact on /v1/messages instead of double-encoded into
       mojibake

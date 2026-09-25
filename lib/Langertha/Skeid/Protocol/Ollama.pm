@@ -40,12 +40,77 @@ sub request_to_openai {
 
   return {
     model => ($body->{model} // ''),
-    messages => ($body->{messages} || []),
+    messages => _messages_to_openai($body->{messages}),
     (defined($options->{temperature}) ? (temperature => 0 + $options->{temperature}) : ()),
     (defined($options->{num_predict}) ? (max_tokens  => 0 + $options->{num_predict}) : ()),
     (defined($body->{tools}) ? (tools => $body->{tools}) : ()),
     (defined($body->{tool_choice}) ? (tool_choice => $body->{tool_choice}) : ()),
   };
+}
+
+# Assistant tool_calls: arguments object -> character JSON string, ids synthesized; tool
+# messages: tool_name -> tool_call_id of the matching call of the preceding assistant turn.
+sub _messages_to_openai {
+  my ($messages) = @_;
+  return [] unless ref($messages) eq 'ARRAY';
+
+  my $next_id = 0;
+  my @unanswered;   # [ id, name ] of the latest assistant turn's calls, not yet answered
+  my @out;
+
+  for my $msg (@$messages) {
+    if (ref($msg) ne 'HASH') {
+      push @out, $msg;
+      next;
+    }
+    my $role = $msg->{role} // '';
+
+    if ($role eq 'assistant' && ref($msg->{tool_calls}) eq 'ARRAY') {
+      @unanswered = ();
+      my @calls;
+      for my $call (@{$msg->{tool_calls}}) {
+        if (ref($call) ne 'HASH') {
+          push @calls, $call;
+          next;
+        }
+        my $function = ref($call->{function}) eq 'HASH' ? $call->{function} : {};
+        my $args = $function->{arguments};
+        my $id = (defined($call->{id}) && length($call->{id})) ? $call->{id} : 'call_skeid_' . $next_id++;
+        push @calls, {
+          %$call,
+          id       => $id,
+          type     => 'function',
+          function => {
+            %$function,
+            arguments => (ref($args) ? Langertha::Skeid::Protocol::encode_json_text_safe($args)
+                                     : ($args // '{}')),
+          },
+        };
+        push @unanswered, [ $id, $function->{name} // '' ];
+      }
+      push @out, { %$msg, tool_calls => \@calls };
+      next;
+    }
+
+    if ($role eq 'tool') {
+      my %tool = %$msg;
+      my $tool_name = delete $tool{tool_name};
+      if (defined($tool{tool_call_id}) && length($tool{tool_call_id})) {
+        @unanswered = grep { $_->[0] ne $tool{tool_call_id} } @unanswered;
+      } elsif (@unanswered) {
+        my ($pick) = grep { defined($tool_name) && $unanswered[$_][1] eq $tool_name } 0 .. $#unanswered;
+        $pick //= 0;
+        $tool{tool_call_id} = $unanswered[$pick][0];
+        splice @unanswered, $pick, 1;
+      }
+      push @out, \%tool;
+      next;
+    }
+
+    push @out, $msg;
+  }
+
+  return \@out;
 }
 
 =method response_from_openai
