@@ -755,7 +755,7 @@ sub _proxy_openai_stream {
 
       if (my $delta = $json->{choices}[0]{delta}) {
         if (my $delta_content = $delta->{content}) {
-          $accumulated_content_bytes += length($delta_content);
+          $accumulated_content_bytes += Langertha::Skeid::Protocol::utf8_length($delta_content);
         }
       }
 

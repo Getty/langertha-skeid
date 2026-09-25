@@ -167,7 +167,7 @@ sub delta {
         content_block => { type => 'text', text => '' },
       });
     }
-    $self->{text_bytes} += length $text;
+    $self->{text_bytes} += Langertha::Skeid::Protocol::utf8_length($text);
     $out .= _event('content_block_delta', {
       type  => 'content_block_delta',
       index => $self->{text_index},
@@ -326,8 +326,8 @@ sub errored { $_[0]->{errored} }
 
   my ($input, $output, $content_bytes) = $stream->usage;
 
-What the stream carried, for the usage event. C<content_bytes> is the fallback when an
-upstream never reports token counts.
+What the stream carried, for the usage event. C<content_bytes> (UTF-8 bytes) is the fallback
+when an upstream never reports token counts.
 
 =cut
 

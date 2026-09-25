@@ -87,7 +87,7 @@ sub delta {
   return '' unless defined($text) && length($text);
 
   $self->{started} = 1;
-  $self->{text_bytes} += length $text;
+  $self->{text_bytes} += Langertha::Skeid::Protocol::utf8_length($text);
   return _line({
     model      => $self->{model},
     created_at => Langertha::Skeid::Protocol::iso8601_now(),
@@ -123,7 +123,7 @@ sub finish {
 
   my ($input, $output, $content_bytes) = $stream->usage;
 
-What the stream carried, for the usage event.
+What the stream carried, for the usage event. C<content_bytes> counts UTF-8 bytes.
 
 =cut
 

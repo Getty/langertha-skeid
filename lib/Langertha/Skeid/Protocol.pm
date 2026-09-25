@@ -64,6 +64,20 @@ sub encode_json_text_safe {
   return eval { $TEXT_JSON->encode($value) } || '{}';
 }
 
+=method utf8_length
+
+Length of a character string in UTF-8 B<bytes> -- what a C<content_bytes> count means.
+C<length> on decoded text counts characters and undercounts every non-ASCII answer.
+
+=cut
+
+sub utf8_length {
+  my ($text) = @_;
+  return 0 unless defined $text;
+  utf8::encode(my $octets = $text);
+  return length $octets;
+}
+
 =method decode_json_safe
 
 Decodes a JSON string of UTF-8 B<bytes> (a raw body or SSE payload), returning C<undef> instead

@@ -2,6 +2,8 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A stream's content_bytes on the Anthropic and Ollama faces is the
+      UTF-8 byte count of its text, non-ASCII included, not a character count
     - An Ollama client's replayed tool round-trip reaches the OpenAI upstream
       in OpenAI's shape on /api/chat: tool_calls arguments objects become JSON
       strings (non-ASCII intact), calls without an id get call_skeid_N, and
