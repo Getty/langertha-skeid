@@ -5,6 +5,7 @@ use strict;
 use warnings;
 use POSIX qw(strftime);
 use JSON::MaybeXS qw(encode_json decode_json);
+use MIME::Base64 qw(decode_base64);
 
 # Nested JSON (a document carried as a string inside another) must be characters: the body
 # around it is byte-encoded once when it is sent (skeid #33, core k252).
@@ -95,6 +96,50 @@ sub decode_json_safe {
   return $@ ? undef : $decoded;
 }
 
+=method image_media_type
+
+  my $mt = Langertha::Skeid::Protocol::image_media_type($base64);   # 'image/jpeg'
+
+The media type of a base64-encoded image, read from its magic bytes: PNG, JPEG, GIF and WebP
+are recognised, anything else is reported as C<image/png>. For a client format that sends
+raw base64 without saying what it is (Ollama's C<images>), so the data URL the OpenAI
+upstream needs can name a type.
+
+=cut
+
+sub image_media_type {
+  my ($base64) = @_;
+  return 'image/png' unless defined($base64) && !ref($base64);
+  (my $head = substr($base64, 0, 64)) =~ s/\s+//g;
+  my $bytes = decode_base64(substr($head, 0, 16));
+  return 'image/png'  if $bytes =~ /\A\x89PNG\r\n\x1a\n/;
+  return 'image/jpeg' if $bytes =~ /\A\xFF\xD8\xFF/;
+  return 'image/gif'  if $bytes =~ /\AGIF8[79]a/;
+  return 'image/webp' if $bytes =~ /\ARIFF.{4}WEBP/s;
+  return 'image/png';
+}
+
+=method image_url_part
+
+  my $part = Langertha::Skeid::Protocol::image_url_part($url);
+  my $part = Langertha::Skeid::Protocol::image_url_part(undef, $base64, $media_type);
+
+An OpenAI C<image_url> content part: C<< { type => 'image_url', image_url => { url => ... } } >>.
+Given a URL, it is used as is. Given base64 data, it becomes a C<data:> URL with
+C<$media_type>, or with L</image_media_type> when none is given.
+
+=cut
+
+sub image_url_part {
+  my ($url, $base64, $media_type) = @_;
+  unless (defined($url) && length($url)) {
+    $base64 //= '';
+    $media_type = image_media_type($base64) unless defined($media_type) && length($media_type);
+    $url = "data:$media_type;base64,$base64";
+  }
+  return { type => 'image_url', image_url => { url => "$url" } };
+}
+
 =method openai_manifest_endpoint
 
   my $spec = Langertha::Skeid::Protocol->openai_manifest_endpoint;
@@ -121,6 +166,7 @@ sub openai_manifest_endpoint {
       parallel_tool_use
       response_format_json_object response_format_json_schema
       reasoning_effort temperature seed response_size prompt_cache_key
+      image_input
     )],
   };
 }

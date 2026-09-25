@@ -202,6 +202,34 @@ unless ($HAS_MANIFEST) {
   like($@, qr/prompt_cache.*not carried/, 'named in the error');
 }
 
+# --- image_input: every face carries images upstream (skeid #42) ---
+# The Anthropic and Ollama translators turn image blocks / message.images into OpenAI image_url
+# parts, so a vision claim holds on all three faces. Whether image_input may be claimed at all
+# is the installed core's call (Builder->model_capabilities, core k266), not a list in Skeid.
+{
+  my $core_knows = grep { $_ eq 'image_input' } Langertha::Manifest::Builder->model_capabilities;
+  my $cfg = base_config(%ENABLED, capabilities => { 'house-model' => { image_input => 1 } });
+  if ($core_knows) {
+    my ($t) = app_for($cfg);
+    $t->get_ok('/.well-known/langertha.json' => { Authorization => "Bearer $ALICE_KEY" })->status_is(200);
+    my $manifest = Langertha::Manifest->from_json($t->tx->res->body);
+    my (%house, %qwen);
+    for my $entry (@{$manifest->models}) {
+      $house{$entry->endpoint_ref} = $entry->capabilities if $entry->id eq 'house-model';
+      $qwen{$entry->endpoint_ref}  = $entry->capabilities if $entry->id eq 'qwen3-32b';
+    }
+    is_deeply([sort keys %house], [qw(anthropic ollama openai)], 'house-model on every face');
+    ok($house{$_}{image_input}, "$_ face publishes image_input for the model it is declared on")
+      for qw(openai anthropic ollama);
+    ok(!$qwen{$_}{image_input}, "$_ face does not publish it for a model without the claim")
+      for qw(openai anthropic ollama);
+  } else {
+    ok(!eval { Langertha::Skeid->new(config_loader => sub { $cfg }); 1 },
+      'a core without image_input in its allowlist refuses the claim at load');
+    like($@, qr/image_input.*not a model capability/, 'named in the error');
+  }
+}
+
 # --- the public route never reloads the config ---
 # With a config_loader every reload reruns the loader and replaces the node list, which
 # restarts the capacity probes. A route anybody can hit must not be a way to do that per GET.

@@ -29,8 +29,13 @@ F<t/31-stream-translation.t> for what the wire looks like end-to-end.
 
 Turns an Ollama chat request into the OpenAI chat-completions body Skeid forwards.
 C<options.temperature> and C<options.num_predict> are lifted out of the nested hash to
-C<temperature> and C<max_tokens>; C<messages>, C<tools> and C<tool_choice> pass through
-unchanged.
+C<temperature> and C<max_tokens>; C<tools> and C<tool_choice> pass through unchanged.
+
+A user message's C<images>, raw base64 strings, become an OpenAI content array: the message
+text as a C<text> part, then one C<image_url> part per image, each a C<data:> URL whose media
+type is read from the image's magic bytes (PNG, JPEG, GIF, WebP; PNG otherwise, see
+L<Langertha::Skeid::Protocol/image_media_type>). A message without images keeps its string
+content.
 
 =cut
 
@@ -107,10 +112,30 @@ sub _messages_to_openai {
       next;
     }
 
+    if ($role ne 'assistant' && ref($msg->{images}) eq 'ARRAY' && @{$msg->{images}}) {
+      my %with_images = %$msg;
+      my $images = delete $with_images{images};
+      my $text = $with_images{content};
+      $with_images{content} = [
+        ((defined($text) && !ref($text) && length($text)) ? { type => 'text', text => "$text" } : ()),
+        map { _image_part($_) } grep { defined($_) && !ref($_) && length($_) } @$images,
+      ];
+      push @out, \%with_images;
+      next;
+    }
+
     push @out, $msg;
   }
 
   return \@out;
+}
+
+# Ollama sends images as raw base64 without a type; the OpenAI upstream wants a URL. A client
+# that already sends a data: URL keeps it.
+sub _image_part {
+  my ($image) = @_;
+  return Langertha::Skeid::Protocol::image_url_part($image) if $image =~ /\Adata:/;
+  return Langertha::Skeid::Protocol::image_url_part(undef, $image);
 }
 
 =method response_from_openai
@@ -197,7 +222,7 @@ sub tags_from_nodes {
 How this face appears in the provider manifest (skeid #29): C<ollama> at the public root, and
 the capability flags L</request_to_openai> actually carries to the upstream -- messages
 (a C<system> message included), C<tools>, C<options.temperature>, C<options.num_predict>
-(response size) and C<stream>. A model is published here only with the capabilities declared
+(response size), C<stream> and a message's C<images> (C<image_input>). A model is published here only with the capabilities declared
 for it that are in this list.
 
 Not carried, so never claimed: C<format> (structured output), C<options.seed> and C<think>.
@@ -214,6 +239,7 @@ sub manifest_endpoint {
       chat streaming system_prompt
       tools_native tools_hermes
       temperature response_size
+      image_input
     )],
   };
 }

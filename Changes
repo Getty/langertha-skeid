@@ -2,6 +2,14 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Images reach the model through the Anthropic and Ollama faces. An
+      Anthropic image block (base64 or url source) and an Ollama message's
+      images become OpenAI image_url parts, text and images in the order
+      the client sent them; Ollama's raw base64 gets a data URL typed from
+      its magic bytes (PNG, JPEG, GIF, WebP, else PNG). An Anthropic image
+      from the Files API is answered with 400. The provider manifest may
+      claim image_input for a model on every face, when the installed
+      Langertha's manifest knows the flag
     - Streamed requests are priced: their usage event stores the same
       tokens and costs as the same usage answered in one piece, on the
       OpenAI, Anthropic and Ollama faces. A stream cut after its usage frame

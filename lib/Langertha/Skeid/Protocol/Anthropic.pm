@@ -41,7 +41,11 @@ that touches the translator's delta shape.
 Turns an Anthropic Messages request into the OpenAI chat-completions body Skeid forwards.
 
 C<system> (a string or a block array) becomes a leading system message. Content block arrays
-fold to text; C<tool_use> blocks become C<tool_calls> on the assistant message; C<tool_result>
+fold to text, unless a user message carries an C<image> block: then its text and image blocks
+become an OpenAI content array in the order the client sent them, text as C<text> parts and
+each image as an C<image_url> part -- a C<base64> source as a C<data:> URL with its
+C<media_type>, a C<url> source as that URL. An image source of any other type (a Files API
+C<file_id>) makes it die, answered as a C<400>. C<tool_use> blocks become C<tool_calls> on the assistant message; C<tool_result>
 blocks become their own C<role => 'tool'> message carrying C<tool_call_id>, which is why a
 single Anthropic message can expand into several OpenAI ones.
 
@@ -78,6 +82,8 @@ sub request_to_openai {
 
     if (ref($content) eq 'ARRAY') {
       my @text;
+      my @parts;        # text and image parts in client order, used once an image appears
+      my $has_image;
       my @tool_calls;
 
       for my $block (@$content) {
@@ -86,6 +92,13 @@ sub request_to_openai {
 
         if ($type eq 'text') {
           push @text, ($block->{text} // '');
+          push @parts, { type => 'text', text => ($block->{text} // '') };
+          next;
+        }
+
+        if ($type eq 'image' && $role ne 'assistant') {
+          push @parts, _image_part($block);
+          $has_image = 1;
           next;
         }
 
@@ -124,6 +137,8 @@ sub request_to_openai {
         $msg{tool_calls} = \@tool_calls if @tool_calls;
         $msg{content} = '' if !exists($msg{content}) && !exists($msg{tool_calls});
         push @messages, \%msg;
+      } elsif ($has_image) {
+        push @messages, { role => $role, content => \@parts };
       } elsif (length $text) {
         push @messages, { role => $role, content => $text };
       }
@@ -165,6 +180,20 @@ sub request_to_openai {
   }
 
   return \%out;
+}
+
+# An Anthropic image block as an OpenAI image_url part: a base64 source becomes a data URL
+# with its media_type, a url source is passed as the URL. Any other source (a Files API
+# file_id) has no OpenAI-chat equivalent and is refused like a built-in tool.
+sub _image_part {
+  my ($block) = @_;
+  my $source = ref($block->{source}) eq 'HASH' ? $block->{source} : {};
+  my $kind = $source->{type} // '';
+  return Langertha::Skeid::Protocol::image_url_part(undef, $source->{data}, $source->{media_type})
+    if $kind eq 'base64' && defined($source->{data}) && !ref($source->{data});
+  return Langertha::Skeid::Protocol::image_url_part($source->{url})
+    if $kind eq 'url' && defined($source->{url}) && !ref($source->{url}) && length($source->{url});
+  die "image source type '$kind' is not supported: skeid forwards base64 and url images only\n";
 }
 
 =method response_from_openai
@@ -299,8 +328,8 @@ sub error_body {
 How this face appears in the provider manifest (skeid #29): C<anthropic-compat> at the public
 root, and the capability flags L</request_to_openai> actually carries to the upstream --
 C<system>, function C<tools>, C<tool_choice> (auto, any, none, a named tool), C<max_tokens>,
-C<temperature> and C<stream>. A model is published here only with the capabilities declared
-for it that are in this list.
+C<temperature>, C<stream> and C<image> blocks (C<image_input>). A model is published here
+only with the capabilities declared for it that are in this list.
 
 It is C<anthropic-compat>, not C<anthropic>: C<output_config.format> is not translated, so a
 client takes the synthetic-tool path for structured output, which is what that dialect tells
@@ -318,6 +347,7 @@ sub manifest_endpoint {
       tools_native tools_hermes
       tool_choice_auto tool_choice_any tool_choice_none tool_choice_named
       temperature response_size
+      image_input
     )],
   };
 }
