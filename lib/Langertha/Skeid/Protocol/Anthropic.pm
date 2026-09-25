@@ -227,8 +227,9 @@ sub response_from_openai {
 
 The C<error.type> an Anthropic client expects for an HTTP status, from Anthropic's Messages API
 error reference: 400 C<invalid_request_error>, 401 C<authentication_error>, 402
-C<billing_error>, 403 C<permission_error>, 404 C<not_found_error>, 413 C<request_too_large>,
-429 C<rate_limit_error>, 500 C<api_error>, 504 C<timeout_error>, 529 C<overloaded_error>. A
+C<billing_error>, 403 C<permission_error>, 404 C<not_found_error>, 409 C<conflict_error>, 413
+C<request_too_large>, 429 C<rate_limit_error>, 500 C<api_error>, 504 C<timeout_error>, 529
+C<overloaded_error>. A
 status the reference does not list falls back by class: any other 5xx (Skeid's own 502 and
 503) is C<api_error>, any other 4xx C<invalid_request_error>. The SDKs choose their exception
 class from the HTTP status first, so the fallback only decides the type string.
@@ -241,12 +242,15 @@ my %ERROR_TYPE_FOR_STATUS = (
   402 => 'billing_error',
   403 => 'permission_error',
   404 => 'not_found_error',
+  409 => 'conflict_error',
   413 => 'request_too_large',
   429 => 'rate_limit_error',
   500 => 'api_error',
   504 => 'timeout_error',
   529 => 'overloaded_error',
 );
+
+my %KNOWN_ERROR_TYPE = map { $_ => 1 } values %ERROR_TYPE_FOR_STATUS;
 
 sub error_type_for_status {
   my ($class, $status) = @_;
@@ -257,9 +261,13 @@ sub error_type_for_status {
 =method error_body
 
   my $body = Langertha::Skeid::Protocol::Anthropic->error_body(429, 'Timed out waiting ...');
+  my $body = Langertha::Skeid::Protocol::Anthropic->error_body(500, $message, $upstream_type);
 
 The Anthropic error envelope, C<< { type => 'error', error => { type, message } } >>, with the
-type taken from L</error_type_for_status>. Every error Skeid answers on C</v1/messages> is
+type taken from L</error_type_for_status>. An optional third argument, an error type the
+upstream reported, wins when it is one of the types in that table -- an OpenAI-dialect upstream
+often spells a rate limit or a bad request the same way -- and is ignored otherwise, so a
+foreign type such as C<server_error> never reaches an Anthropic client. Every error Skeid answers on C</v1/messages> is
 rendered from this -- also the C<data> of a mid-stream C<event: error> frame (see
 L<Langertha::Skeid::Protocol::Anthropic::Stream/error_event>) -- so an Anthropic SDK can parse
 it and raise the matching exception.
@@ -267,11 +275,13 @@ it and raise the matching exception.
 =cut
 
 sub error_body {
-  my ($class, $status, $message) = @_;
+  my ($class, $status, $message, $type) = @_;
+  $type = $class->error_type_for_status($status)
+    unless defined($type) && $KNOWN_ERROR_TYPE{$type};
   return {
     type  => 'error',
     error => {
-      type    => $class->error_type_for_status($status),
+      type    => $type,
       message => ($message // ''),
     },
   };

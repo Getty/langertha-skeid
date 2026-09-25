@@ -591,7 +591,7 @@ sub _proxy_openai_json_async {
         metrics       => {},
       });
       _render_error($c, ($err->{code} || 502),
-        'Upstream error: ' . ($err->{message} // 'unknown'), 'upstream_error');
+        'Upstream error: ' . _upstream_error_message($err, $done->res->body), 'upstream_error');
       $cb->(undef, 1, ($err->{code} || 502));
       return;
     }
@@ -670,6 +670,7 @@ sub _proxy_openai_stream {
   # the client's shape, a failure after it becomes an in-band error event (core karr #224).
   my $stream_errors = $stream && $stream->can('error_event');
   my $upstream_failed = 0;
+  my $upstream_error_body = '';
   my $status = 200;
   my $accumulated_usage = { input => 0, output => 0, total => 0, cached => 0 };
   my $accumulated_content_bytes = 0;
@@ -706,7 +707,8 @@ sub _proxy_openai_stream {
 
   $tx->res->content->unsubscribe('read')->on(read => sub {
     my ($content, $bytes) = @_;
-    return if $upstream_failed;
+    # Kept only to lift the upstream's own error message into the error the client gets.
+    return $upstream_error_body .= $bytes if $upstream_failed;
     unless ($headers_sent) {
       $status = $tx->res->code // 200;
       # The upstream refused before streaming anything. Opening an SSE response for it would
@@ -714,6 +716,7 @@ sub _proxy_openai_stream {
       # and let the completion callback answer it as an error, as the non-streaming path does.
       if ($stream_errors && $status >= 400) {
         $upstream_failed = 1;
+        $upstream_error_body .= $bytes;
         return;
       }
       $c->res->code($status);
@@ -801,23 +804,29 @@ sub _proxy_openai_stream {
           metrics       => $accumulated_usage->{total} > 0 ? { usage => $accumulated_usage } : {},
         });
         _render_error($c, $err_status,
-          'Upstream error: ' . ($err->{message} // 'unknown'), 'upstream_error');
+          'Upstream error: ' . _upstream_error_message($err, $upstream_error_body), 'upstream_error');
         return;
       }
     }
 
-    # The stream is open, so the status is already sent. A translator that can say so in-band
-    # ends a failed stream with its error event instead of a closing sequence that would read
-    # as a complete answer. Mojo::UserAgent reports an upstream that hangs up mid-body as no
-    # error at all once the status line has arrived, so the body's own framing (the chunked
-    # terminator, Content-Length) is the witness for that case; a close-delimited body cannot
-    # be told apart from a complete one.
-    if ($stream_errors && $headers_sent) {
+    # The stream is open, so the status is already sent. Mojo::UserAgent reports an upstream
+    # that hangs up mid-body as no error at all once the status line has arrived, so the body's
+    # own framing (the chunked terminator, Content-Length) is the witness for that case; a
+    # close-delimited body cannot be told apart from a complete one. A cut stream failed on
+    # every face: the usage event and request.finish must not mean something different
+    # depending on the client's dialect (ADR 0004).
+    my $cut = 0;
+    if ($headers_sent && !$had_error) {
       my $content = $tx_done->res->content;
       my $framed = $content->is_chunked || length($content->headers->content_length // '');
-      my $cut = !$had_error && $framed && !$content->is_finished;
-      if ($had_error || $cut) {
-        $had_error = 1;
+      $cut = $framed && !$content->is_finished;
+      $had_error = 1 if $cut;
+    }
+
+    # A translator that can say so in-band ends a failed stream with its error event instead of
+    # a closing sequence that would read as a complete answer.
+    if ($stream_errors && $headers_sent) {
+      if ($had_error) {
         my $reason = $cut ? 'Premature connection close' : ($tx_done->error->{message} // 'unknown');
         my $frame = $stream->error_event(500, "Upstream error: $reason");
         if (length $frame) {
@@ -892,6 +901,20 @@ sub _render_error {
   }
   $c->render(json => { error => { message => $message, type => $openai_type } }, status => $status);
   return;
+}
+
+# The message to put after "Upstream error: ". Mojo sets $err->{message} to the HTTP reason
+# phrase for a 4xx/5xx ("Bad Request"); the upstream usually said more in its own body, in the
+# OpenAI dialect every node speaks (ADR 0001), and that is what the client needs to act on.
+sub _upstream_error_message {
+  my ($err, $body) = @_;
+  my $json = (defined($body) && length($body)) ? eval { decode_json($body) } : undef;
+  if (ref($json) eq 'HASH') {
+    my $e = $json->{error};
+    my $msg = ref($e) eq 'HASH' ? $e->{message} : $e;
+    return "$msg" if defined($msg) && !ref($msg) && length($msg);
+  }
+  return $err->{message} // 'unknown';
 }
 
 sub _render_upstream_response {

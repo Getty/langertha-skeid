@@ -32,7 +32,7 @@ $upstream->routes->post('/v1/chat/completions' => sub {
     return $c->render(status => 500,
       json => { error => { message => 'kaputt', type => 'server_error' } });
   }
-  if ($model eq 'cut-model' || $model eq 'errchunk-model') {
+  if ($model eq 'cut-model' || $model eq 'errchunk-model' || $model eq 'ratechunk-model') {
     $c->render_later;
     $c->res->code(200);
     $c->res->headers->content_type('text/event-stream');
@@ -41,11 +41,13 @@ $upstream->routes->post('/v1/chat/completions' => sub {
     );
     push @frames, qq{data: {"error":{"message":"engine fell over","type":"server_error"}}\n\n}
       if $model eq 'errchunk-model';
+    push @frames, qq{data: {"error":{"message":"slow down","type":"rate_limit_error"}}\n\n}
+      if $model eq 'ratechunk-model';
     my $write;
     $write = sub {
       my $frame = shift @frames;
       unless (defined $frame) {
-        return $c->finish if $model eq 'errchunk-model';
+        return $c->finish if $model ne 'cut-model';
         # Drop the connection mid-stream: headers and a token went out, the end never comes.
         Mojo::IOLoop->stream($c->tx->connection)->close;
         return;
@@ -68,6 +70,31 @@ my $up = 'http://127.0.0.1:' . $upstream_daemon->ports->[0] . '/v1';
 # A port nothing listens on: the connection is refused, which is an upstream transport error.
 my $dead_port = Mojo::IOLoop::Server->generate_port;
 
+# Raw-socket upstreams for Content-Length framing, which a Mojolicious app cannot be made to
+# violate: one sends exactly the bytes it announced, the other announces more than it sends and
+# hangs up. The media type carries a charset so Mojo's own SSE parser stays out of the way
+# (that parser is a separate bug, core karr #229).
+my $SSE = join '', map { "data: $_\n\n" }
+  q({"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}),
+  q({"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}),
+  '[DONE]';
+my %raw_port;
+for my $case ([ 'cl-full-model', length $SSE ], [ 'cl-cut-model', 50 + length $SSE ]) {
+  my ($model, $announced) = @$case;
+  my $raw = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
+          . "Content-Length: $announced\r\n\r\n$SSE";
+  my $id = Mojo::IOLoop->server({ address => '127.0.0.1' } => sub {
+    my (undef, $stream) = @_;
+    my $buf = '';
+    $stream->on(read => sub {
+      $buf .= $_[1];
+      return unless $buf =~ /\r\n\r\n/ && $buf =~ /\}\s*\z/;
+      $stream->write($raw => sub { $stream->close });
+    });
+  });
+  $raw_port{$model} = Mojo::IOLoop->acceptor($id)->port;
+}
+
 my @usage_events;
 my $skeid = Langertha::Skeid->new(
   route_wait_poll_ms => 5,
@@ -77,6 +104,7 @@ my $skeid = Langertha::Skeid->new(
       policies => {
         standard => {
           models    => [qw(ok-model busy-model bad-model boom-model cut-model errchunk-model
+                           ratechunk-model cl-full-model cl-cut-model
                            dead-model forbidden-model no-such-model)],
           deny_tags => ['forbidden'],
         },
@@ -87,7 +115,9 @@ my $skeid = Langertha::Skeid->new(
   },
 );
 $skeid->add_node(id => "n-$_", url => $up, model => $_, max_conns => 4)
-  for qw(ok-model bad-model boom-model cut-model errchunk-model);
+  for qw(ok-model bad-model boom-model cut-model errchunk-model ratechunk-model);
+$skeid->add_node(id => "n-$_", url => "http://127.0.0.1:$raw_port{$_}/v1", model => $_, max_conns => 4)
+  for keys %raw_port;
 $skeid->add_node(id => 'n-busy', url => $up, model => 'busy-model', max_conns => 1);
 $skeid->add_node(id => 'n-dead', url => "http://127.0.0.1:$dead_port/v1", model => 'dead-model', max_conns => 4);
 $skeid->add_node(id => 'n-forbidden', url => $up, model => 'forbidden-model', max_conns => 4,
@@ -151,7 +181,8 @@ sub sse_events {
 {
   my %want = (
     400 => 'invalid_request_error', 401 => 'authentication_error', 402 => 'billing_error',
-    403 => 'permission_error',      404 => 'not_found_error',      413 => 'request_too_large',
+    403 => 'permission_error',      404 => 'not_found_error',      409 => 'conflict_error',
+    413 => 'request_too_large',
     429 => 'rate_limit_error',      500 => 'api_error',            504 => 'timeout_error',
     529 => 'overloaded_error',
     # Not in the reference: fall back by class.
@@ -174,24 +205,35 @@ is_anthropic_error(messages('forbidden-model'), 403, 'permission_error', 'model 
 is_anthropic_error(messages('busy-model'), 429, 'rate_limit_error', 'no free capacity');
 is_anthropic_error(messages('no-such-model'), 503, 'api_error', 'no node serves the model');
 
-is_anthropic_error(messages('bad-model'), 400, 'invalid_request_error', 'upstream 400');
+{
+  my $err = is_anthropic_error(messages('bad-model'), 400, 'invalid_request_error', 'upstream 400');
+  like $err->{message}, qr/context too long/,
+    "upstream 400: the upstream's own message, not the HTTP reason phrase";
+}
 is_anthropic_error(messages('boom-model'), 500, 'api_error', 'upstream 500');
 is_anthropic_error(messages('dead-model'), 502, 'api_error', 'upstream unreachable');
 
 # A streamed request that fails before the stream opens is an ordinary HTTP error, as it is at
 # Anthropic: the SDK has nothing to read an event from yet.
 is_anthropic_error(messages('busy-model', stream => \1), 429, 'rate_limit_error', 'streamed, no capacity');
-is_anthropic_error(messages('bad-model', stream => \1), 400, 'invalid_request_error', 'streamed, upstream 400');
+{
+  my $err = is_anthropic_error(messages('bad-model', stream => \1), 400, 'invalid_request_error',
+    'streamed, upstream 400');
+  like $err->{message}, qr/context too long/, "streamed, upstream 400: the upstream's own message";
+}
 is_anthropic_error(messages('boom-model', stream => \1), 500, 'api_error', 'streamed, upstream 500');
 is_anthropic_error(messages('dead-model', stream => \1), 502, 'api_error', 'streamed, upstream unreachable');
 
 # Once the stream is open the status is already 200, so the failure has to travel in-band as an
 # `event: error` frame -- and the stream must not then claim a clean end with message_stop.
+# An error chunk keeps the upstream's error.type when it is one Anthropic knows, else api_error.
 for my $case (
-  [ 'cut-model',      'upstream connection dropped mid-stream' ],
-  [ 'errchunk-model', 'upstream sent an error chunk mid-stream' ],
+  [ 'cut-model',       'api_error',        'upstream connection dropped mid-stream' ],
+  [ 'cl-cut-model',    'api_error',        'upstream sent less than its Content-Length' ],
+  [ 'errchunk-model',  'api_error',        'upstream sent an error chunk mid-stream' ],
+  [ 'ratechunk-model', 'rate_limit_error', 'upstream sent a rate-limit error chunk mid-stream' ],
 ) {
-  my ($model, $name) = @$case;
+  my ($model, $type, $name) = @$case;
   @usage_events = ();
   my $res = messages($model, stream => \1);
   is $res->code, 200, "$name: the stream had started";
@@ -201,12 +243,42 @@ for my $case (
   my ($error) = grep { $_->[0] eq 'error' } @events;
   ok $error, "$name: an error event is sent" or next;
   is $error->[1]{type}, 'error', "$name: its data is typed 'error'";
-  is $error->[1]{error}{type}, 'api_error', "$name: error.type is api_error";
+  is $error->[1]{error}{type}, $type, "$name: error.type is $type";
   ok length($error->[1]{error}{message} // ''), "$name: error.message is set";
   is $events[-1][0], 'error', "$name: the error is the last event";
   ok !(grep { $_->[0] eq 'message_stop' } @events), "$name: no message_stop claims a clean end";
   is scalar(@usage_events), 1, "$name: one usage event";
   is $usage_events[0]{ok}, 0, "$name: recorded as failed";
+}
+
+# A body that delivers exactly its Content-Length is complete, not cut.
+{
+  @usage_events = ();
+  my $res = messages('cl-full-model', stream => \1);
+  my @events = sse_events($res->body);
+  is $events[-1][0], 'message_stop', 'complete Content-Length body: ends with message_stop';
+  ok !(grep { $_->[0] eq 'error' } @events), 'complete Content-Length body: no error event';
+  is $usage_events[0]{ok}, 1, 'complete Content-Length body: recorded as served';
+}
+
+# The usage event is the billing unit (ADR 0004) and request.finish feeds node health: the same
+# upstream failure must be recorded the same way whichever face the client called. Only the
+# in-band error frame is Anthropic's.
+for my $face (
+  [ 'openai', '/v1/chat/completions' ],
+  [ 'ollama', '/api/chat' ],
+  [ 'anthropic', '/v1/messages' ],
+) {
+  my ($name, $path) = @$face;
+  for my $case ([ 'cut-model', 0 ], [ 'cl-cut-model', 0 ], [ 'cl-full-model', 1 ]) {
+    my ($model, $ok) = @$case;
+    @usage_events = ();
+    post($path, json => {
+      model => $model, max_tokens => 16, stream => \1, messages => [{ role => 'user', content => 'hi' }],
+    });
+    is scalar(@usage_events), 1, "$name $model: one usage event";
+    is $usage_events[0]{ok}, $ok, "$name $model: recorded as " . ($ok ? 'served' : 'failed');
+  }
 }
 
 # The happy path is untouched.
@@ -244,8 +316,13 @@ is_openai_error(chat('dead-model', stream => \1), 502, 'upstream_error', 'openai
 is_openai_error(post('/v1/embeddings', json => { model => 'busy-model', input => 'x' }),
   429, 'rate_limit_error', 'openai embeddings: no free capacity');
 
-# An upstream 4xx on the OpenAI chat face keeps its status and its OpenAI upstream_error type.
-is_openai_error(chat('bad-model'), 400, 'upstream_error', 'openai: upstream 400');
+# An upstream 4xx on the OpenAI chat face keeps its status and its OpenAI upstream_error type,
+# and carries the upstream's own message.
+{
+  my $res = chat('bad-model');
+  is_openai_error($res, 400, 'upstream_error', 'openai: upstream 400');
+  like $res->json->{error}{message}, qr/context too long/, "openai: upstream 400 keeps the upstream's message";
+}
 
 $skeid->finish_request('n-busy', ok => 1);
 

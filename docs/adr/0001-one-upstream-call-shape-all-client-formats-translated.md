@@ -45,3 +45,28 @@ way in and back into its own dialect on the way out.
 - Response fidelity is bounded by the translation, not by the upstream. Fields no translator
   maps are dropped, deliberately and visibly, rather than leaking a foreign dialect to a client
   that cannot parse it.
+
+## Update (k224, 2026-09-25): errors are translated at the client edge too
+
+Errors follow the same rule as responses: the upstream speaks OpenAI, the client reads its own
+dialect. The OpenAI and Ollama faces keep the OpenAI error envelope; the Anthropic face renders
+every error — skeid's own (invalid JSON, 403, 429, 503) and the upstream's — as Anthropic's
+`{type: "error", error: {type, message}}`, with `error.type` taken from the HTTP status by
+`Langertha::Skeid::Protocol::Anthropic->error_type_for_status`. That envelope, like every other
+Anthropic field name, lives in the translator; the proxy only picks the face (`_render_error`).
+
+A translated stream fails in one of two places, and each has its own form:
+
+- **Before it opens** — the upstream answers a stream request with a 4xx/5xx. The client gets a
+  plain HTTP error with that status, never an event stream with no events in it.
+- **After it opens** — the status is already sent, so the failure travels in-band: the
+  Anthropic stream ends with an `event: error` frame and no closing sequence (`message_stop`),
+  so a client cannot read a failed stream as a complete one. A stream counts as failed on a
+  transport error, on an upstream error chunk, and when the body stops short of its own
+  framing (chunked terminator, Content-Length) — Mojo::UserAgent reports that last case as
+  success once the status line has arrived. A close-delimited body cannot be told apart from a
+  complete one.
+
+The in-band frame is presentation and belongs to the face. The failure itself is not: a cut
+stream is `ok = 0` on the usage event and on `request.finish` whichever face the client called
+(ADR 0004). The OpenAI pass-through and the Ollama stream get no in-band error frame yet.

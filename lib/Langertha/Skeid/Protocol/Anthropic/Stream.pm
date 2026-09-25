@@ -129,7 +129,7 @@ sub delta {
   # Anthropic client in-band, as an error event -- and nothing after it (core karr #224).
   if (ref($chunk->{error}) eq 'HASH') {
     my $message = $chunk->{error}{message} // 'upstream error';
-    return $self->error_event(500, "Upstream error: $message");
+    return $self->error_event(500, "Upstream error: $message", $chunk->{error}{type});
   }
 
   my $out = '';
@@ -275,11 +275,13 @@ sub finish {
 =method error_event
 
   my $bytes = $stream->error_event(500, 'Upstream error: ...');
+  my $bytes = $stream->error_event(500, $message, $upstream_type);
 
 Ends the stream with an Anthropic C<event: error> frame, the way Anthropic reports a failure
 after the stream has opened (the HTTP status is already 200 by then). The frame's data is
 L<Langertha::Skeid::Protocol::Anthropic/error_body>, so its C<error.type> follows the same
-status mapping as every other error on C</v1/messages>.
+status mapping as every other error on C</v1/messages>; an upstream error type Anthropic also
+uses (an error chunk's C<rate_limit_error>, say) is kept.
 
 The stream is finished afterwards: C<delta> and C<finish> return nothing, so no
 C<message_stop> follows and a client cannot mistake a failed stream for a complete one. Open
@@ -289,11 +291,11 @@ already finished.
 =cut
 
 sub error_event {
-  my ($self, $status, $message) = @_;
+  my ($self, $status, $message, $type) = @_;
   return '' if $self->{finished};
   $self->{finished} = 1;
   $self->{errored}  = 1;
-  return _event('error', Langertha::Skeid::Protocol::Anthropic->error_body($status, $message));
+  return _event('error', Langertha::Skeid::Protocol::Anthropic->error_body($status, $message, $type));
 }
 
 =method errored

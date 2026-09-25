@@ -6,17 +6,25 @@ Revision history for Langertha-Skeid
       {type: "error", error: { type, message } }, so Anthropic SDKs parse it and
       raise the matching exception: invalid JSON, translation failures, 403,
       429, 503 and upstream errors alike. error.type follows the HTTP status
-      per Anthropic's error reference (400 invalid_request_error,
-      401 authentication_error, 403 permission_error, 404 not_found_error,
-      413 request_too_large, 429 rate_limit_error, 500 api_error,
-      529 overloaded_error; 402 billing_error and 504 timeout_error are newer
-      entries taken from the reference without a live check). Statuses it does
-      not list, such as Skeid's own 502 and 503, fall back to api_error (5xx) or
-      invalid_request_error (4xx). A streamed request the upstream refuses gets
-      that HTTP error before any event is sent; a stream that fails after it
-      opened (dropped upstream connection, upstream error chunk) ends with an
-      `event: error` frame and no message_stop, and is metered as failed.
-      The OpenAI and Ollama faces keep their error shape
+      per Anthropic's documented error reference (400 invalid_request_error,
+      401 authentication_error, 402 billing_error, 403 permission_error,
+      404 not_found_error, 409 conflict_error, 413 request_too_large,
+      429 rate_limit_error, 500 api_error, 504 timeout_error,
+      529 overloaded_error; checked against the docs, not live). Statuses it
+      does not list, such as Skeid's own 502 and 503, fall back to api_error
+      (5xx) or invalid_request_error (4xx). A streamed request the upstream
+      refuses gets that HTTP error before any event is sent; a stream that
+      fails after it opened (dropped upstream connection, body shorter than
+      its framing, upstream error chunk) ends with an `event: error` frame and
+      no message_stop. An error chunk keeps the upstream's error.type when
+      Anthropic uses the same one, else api_error. The OpenAI and Ollama
+      faces keep their error shape
+    - Upstream error responses carry the upstream's own error message
+      ("Upstream error: context too long") instead of the HTTP reason phrase,
+      on every face
+    - Meter a stream whose upstream hangs up before the end of its chunked or
+      Content-Length body as failed (ok = 0, and a failed request for the
+      node) on every face
     - Answer an Anthropic request that carries a provider built-in tool
       (web_search_20250305, bash_*, text_editor_*, computer_*, mcp_toolset, ...)
       with a JSON 400 invalid_request_error naming the tool type and its
