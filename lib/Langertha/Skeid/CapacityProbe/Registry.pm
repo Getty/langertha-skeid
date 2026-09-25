@@ -1,0 +1,266 @@
+package Langertha::Skeid::CapacityProbe::Registry;
+our $VERSION = '0.003';
+# ABSTRACT: Capacity probe reading a downstream Skeid's signed registry snapshot
+use Moo;
+use Carp qw(croak);
+use Mojo::UserAgent;
+use JSON::MaybeXS qw(decode_json);
+use Scalar::Util qw(looks_like_number);
+use Time::HiRes ();
+use Langertha::Skeid::Registry;
+use namespace::clean;
+
+extends 'Langertha::Skeid::CapacityProbe';
+
+=head1 SYNOPSIS
+
+  # fronting tier: one node per downstream Skeid
+  nodes:
+    - id: skeid-b
+      url: http://skeid-b:8090/v1
+      model: qwen3-32b
+      max_conns: 64
+      capacity:
+        probe: registry                  # or type: registry
+        admin_key_env: SKEID_B_ADMIN_KEY # bearer for the downstream's admin API
+        secret_env: SKEID_REGISTRY_SECRET
+        interval_ms: 2000
+        # url: http://skeid-b:8090/skeid/registry/snapshot   (default: derived from the node URL)
+        # tags: [local]                  # count only downstream nodes carrying these tags
+        # max_skew_s: 5                  # how far in the future a snapshot may claim to be
+
+=head1 DESCRIPTION
+
+When the node is another Skeid, the number C<inflight> keeps trying to reconstruct already
+exists over there, in memory: per upstream node, what is in flight and what that process may
+admit. This probe pulls it from the downstream's C<GET /skeid/registry/snapshot> (published
+when the downstream sets C<registry.enabled>) and turns it into the node's capacity reading.
+See ADR 0017.
+
+A snapshot is believed only when all of this holds; otherwise the probe forgets its reading
+and admission falls back to C<inflight>:
+
+=over 4
+
+=item * the answer is C<200> and its C<X-Skeid-Registry-Signature> verifies against the exact
+body with the secret from C<secret_env>;
+
+=item * the schema C<version> is 1;
+
+=item * it is fresh -- not older than its own C<ttl>, not more than C<max_skew_s> in the future;
+
+=item * it is not older than the last snapshot this probe accepted (a replay).
+
+=back
+
+A missing C<admin_key_env> or C<secret_env> value forgets too. The probe forgets only its own
+reading, so a C<429> backoff recorded from a response survives a rejected snapshot. The
+reading is stamped with the snapshot's C<generated_at> and expires at C<generated_at + ttl>.
+
+How the snapshot becomes C<used> and C<limit> is
+L<Langertha::Skeid::Registry/reading_from_snapshot>. It is never added to this process's own
+C<inflight>; the node's C<max_conns> stays the guardrail and the reading can only narrow it
+(ADR 0009). Where another probe reads the same node, the tighter reading wins
+(L<Langertha::Skeid/set_capacity_reading>).
+
+Every change of state -- accepted, unreachable, bad signature, malformed, stale, from the
+future, replayed, missing secret -- is warned once, not on every poll.
+
+=cut
+
+my %KNOWN = map { $_ => 1 } qw(probe type url path admin_key_env secret_env interval_ms tags max_skew_s);
+
+=method validate_config
+
+  Langertha::Skeid::CapacityProbe::Registry->validate_config($capacity_block, $node_id);
+
+Croaks on a block this probe cannot work with: no C<secret_env> or C<admin_key_env>, an unknown
+key (a secret written into the config instead of named by variable is the one that matters), a
+non-http(s) C<url>, a non-positive C<interval_ms>. Called when a node is added, so a bad block
+fails the config load or the admin API call instead of forgetting silently on every poll.
+
+=cut
+
+sub validate_config {
+  my ($class, $cfg, $node_id) = @_;
+  my $where = "node '" . ($node_id // '?') . "' capacity (registry)";
+  croak "$where must be a hashref" unless ref($cfg) eq 'HASH';
+  for my $key (sort keys %$cfg) {
+    croak "$where: unknown key '$key' (secrets are named by admin_key_env / secret_env, never "
+      . 'written into the config)'
+      unless $KNOWN{$key};
+  }
+  for my $key (qw(secret_env admin_key_env)) {
+    my $value = $cfg->{$key};
+    croak "$where: $key is required"
+      unless defined($value) && !ref($value) && length($value);
+  }
+  if (defined $cfg->{url}) {
+    croak "$where: url must be an absolute http(s) URL"
+      if ref($cfg->{url}) || $cfg->{url} !~ m{\Ahttps?://[^/?#]+}i;
+  }
+  if (defined $cfg->{interval_ms}) {
+    croak "$where: interval_ms must be a positive number"
+      unless looks_like_number($cfg->{interval_ms}) && $cfg->{interval_ms} > 0;
+  }
+  if (defined $cfg->{max_skew_s}) {
+    croak "$where: max_skew_s must be a number >= 0"
+      unless looks_like_number($cfg->{max_skew_s}) && $cfg->{max_skew_s} >= 0;
+  }
+  if (defined $cfg->{tags}) {
+    croak "$where: tags must be a list or a string"
+      if ref($cfg->{tags}) && ref($cfg->{tags}) ne 'ARRAY';
+  }
+  return 1;
+}
+
+has _ua => (
+  is      => 'lazy',
+  builder => sub {
+    my $ua = Mojo::UserAgent->new;
+    $ua->connect_timeout(2);
+    # Shorter than the poll interval, for the reason the Prometheus probe gives: a poll still
+    # out when the next tick fires is a probe queueing on itself.
+    $ua->request_timeout(3);
+    return $ua;
+  },
+);
+
+has _inflight_poll => (
+  is      => 'rw',
+  default => sub { 0 },
+);
+
+=attr state
+
+The probe's last state: C<accepted>, C<unreachable>, C<bad_signature>, C<malformed>, C<stale>,
+C<future>, C<replayed> or C<missing_secret>; undef before the first answer.
+
+=cut
+
+has state => (
+  is      => 'rwp',
+  default => sub { undef },
+);
+
+# generated_at of the last accepted snapshot; nothing older is believed after it.
+has _last_generated_at => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+=method url
+
+The snapshot endpoint: C<url> from the C<capacity> block, else the node's URL with a trailing
+C</v1> removed plus C</skeid/registry/snapshot> (C<path> overrides that suffix).
+
+=cut
+
+sub url {
+  my ($self) = @_;
+  my $cfg = $self->config;
+  return $cfg->{url} if defined($cfg->{url}) && length($cfg->{url});
+
+  my ($node) = grep { ($_->{id} // '') eq $self->node_id } @{$self->skeid->nodes};
+  my $base = $node ? ($node->{url} // '') : '';
+  $base =~ s{/v\d+/?$}{};
+  $base =~ s{/+$}{};
+  my $path = $cfg->{path} // '/skeid/registry/snapshot';
+  $path = "/$path" unless $path =~ m{^/};
+  return $base . $path;
+}
+
+sub _tags {
+  my ($self) = @_;
+  my $tags = $self->config->{tags};
+  return [] unless defined $tags;
+  return [ ref($tags) eq 'ARRAY' ? @$tags : split(/[,\s]+/, "$tags") ];
+}
+
+sub poll {
+  my ($self) = @_;
+  return if $self->_inflight_poll;
+
+  my $cfg = $self->config;
+  my $secret = defined($cfg->{secret_env})    ? ($ENV{$cfg->{secret_env}}    // '') : '';
+  my $admin  = defined($cfg->{admin_key_env}) ? ($ENV{$cfg->{admin_key_env}} // '') : '';
+  unless (length($secret) && length($admin)) {
+    return $self->_reject(missing_secret => 'admin_key_env or secret_env is not set');
+  }
+
+  $self->_inflight_poll(1);
+  $self->_ua->get($self->url => { Authorization => "Bearer $admin" } => sub {
+    my (undef, $tx) = @_;
+    $self->_inflight_poll(0);
+    # Stopped while the request was out: this answer belongs to no running probe.
+    return if $self->is_stopped;
+    $self->_consume($tx->res, $secret);
+  });
+  return;
+}
+
+sub _consume {
+  my ($self, $res, $secret) = @_;
+  my $status = $res->code // 0;
+  return $self->_reject(unreachable => "HTTP $status")
+    unless $status >= 200 && $status < 300;
+
+  my $body = $res->body;
+  my $signature = $res->headers->header(Langertha::Skeid::Registry->SIGNATURE_HEADER);
+  return $self->_reject(bad_signature => 'signature missing or not valid for this body')
+    unless Langertha::Skeid::Registry->verify($body, $signature, $secret);
+
+  my $snapshot = eval { decode_json($body) };
+  return $self->_reject(malformed => 'body is not a JSON object') unless ref($snapshot) eq 'HASH';
+  return $self->_reject(malformed => 'unknown schema version')
+    unless ($snapshot->{version} // '') eq Langertha::Skeid::Registry->SCHEMA_VERSION;
+  my ($generated_at, $ttl) = @{$snapshot}{qw(generated_at ttl)};
+  return $self->_reject(malformed => 'generated_at / ttl missing')
+    unless looks_like_number($generated_at) && looks_like_number($ttl) && $ttl > 0;
+
+  my $now  = Time::HiRes::time();
+  my $skew = defined($self->config->{max_skew_s}) ? 0 + $self->config->{max_skew_s} : 5;
+  return $self->_reject(future => 'generated_at is ahead of this clock by more than max_skew_s')
+    if $generated_at > $now + $skew;
+  return $self->_reject(stale => 'older than its ttl')
+    if $now - $generated_at > $ttl;
+  my $last = $self->_last_generated_at;
+  return $self->_reject(replayed => 'older than the last snapshot accepted')
+    if defined($last) && $generated_at < $last;
+
+  $self->_last_generated_at(0 + $generated_at);
+  my $reading = Langertha::Skeid::Registry->reading_from_snapshot($snapshot, tags => $self->_tags);
+  $self->skeid->set_capacity_reading(
+    $self->node_id,
+    source     => 'registry',
+    used       => $reading->{used},
+    limit      => $reading->{limit},
+    at         => 0 + $generated_at,
+    expires_at => $generated_at + $ttl,
+  );
+  $self->_enter('accepted');
+  return;
+}
+
+# Unknown means inflight decides -- but only this probe's reading is dropped. A backoff another
+# source recorded is still true whatever this snapshot was.
+sub _reject {
+  my ($self, $state, $detail) = @_;
+  $self->skeid->forget_capacity($self->node_id, source => 'registry');
+  $self->_enter($state, $detail);
+  return;
+}
+
+sub _enter {
+  my ($self, $state, $detail) = @_;
+  my $was = $self->state;
+  $self->_set_state($state);
+  return if defined($was) && $was eq $state;
+  # The first success is the expected case and not worth a line; everything else is.
+  return if !defined($was) && $state eq 'accepted';
+  warn "registry probe for '" . $self->node_id . "': $state"
+    . (defined $detail ? " ($detail)" : '') . "\n";
+  return;
+}
+
+1;

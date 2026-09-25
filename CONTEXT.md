@@ -88,14 +88,23 @@ _Avoid_: quota, limit, per-worker max_conns.
 
 **Capacity probe**:
 How a node's real occupancy is found: `inflight` (default), `ratelimit` (read off responses
-already in hand), `prometheus` (polled from vLLM/SGLang metrics), or `custom`. Never runs on
-the request path.
+already in hand), `prometheus` (polled from vLLM/SGLang metrics), `registry` (polled from a
+downstream Skeid's **Registry snapshot**), or `custom`. Never runs on the request path.
 _Avoid_: health check, monitor, scraper.
+
+**Registry snapshot**:
+What a downstream Skeid publishes about its own nodes for a fronting Skeid to read, signed and
+short-lived (ADR 0017): per node `inflight`, `max_conns`, health, recent errors and any current
+**Capacity reading**. The fronting tier reads it with the `registry` **Capacity probe** and
+never adds it to its own **Inflight**. It is operational telemetry and never carries a **Key
+reference**, a **Customer key ID** or a **Usage event**. Off unless `registry.enabled`.
+_Avoid_: heartbeat, gossip, service discovery, metrics (that word means the usage/ops counters).
 
 **Capacity reading**:
 What a probe reported — `used`, `limit`, an optional `retry_after`, when it was taken, and
 which probe took it. Expires after `capacity_max_age_ms`, because a stale reading is worse than
-none. May only ever *narrow* what `max_conns` allows.
+none. May only ever *narrow* what `max_conns` allows. When two sources report on one node, the
+tighter reading wins (ADR 0017).
 _Avoid_: metrics (that word means the usage/ops counters), load average.
 
 **Backoff** (`retry_after`):

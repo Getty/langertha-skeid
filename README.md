@@ -703,6 +703,65 @@ this process sent. Covered engines: **vLLM** (`vllm:num_requests_running` + `vll
 + `tgi_queue_size`). Override the names per node via `capacity.running` / `capacity.waiting` if an
 engine ships different ones.
 
+### Skeid in front of Skeids: the registry
+
+When a node is itself a Skeid, `capacity.probe: registry` reads that Skeid's own view of its
+load: per upstream node, what is in flight and what it may admit. The fronting tier stops
+guessing from its own `inflight`, which misses traffic that reached the downstream by any other
+path. Both sides are off unless configured (ADR 0017).
+
+Downstream (publishes the snapshot):
+
+```yaml
+admin:
+  api_key_env: SKEID_ADMIN_API_KEY
+registry:
+  enabled: true                       # default false: GET /skeid/registry/snapshot answers 404
+  secret_env: SKEID_REGISTRY_SECRET   # required; an empty variable fails the config load
+  ttl_s: 10                           # optional
+  instance_id: skeid-b                # optional, default hostname
+  error_window_s: 60                  # optional
+```
+
+Fronting tier (one node per downstream):
+
+```yaml
+nodes:
+  - id: skeid-b
+    url: http://skeid-b:8090/v1
+    model: qwen3-32b
+    max_conns: 64                     # still this process's guardrail; the reading only narrows it
+    capacity:
+      probe: registry
+      admin_key_env: SKEID_B_ADMIN_KEY          # the downstream's admin API key
+      secret_env: SKEID_REGISTRY_SECRET         # the same secret as the downstream
+      interval_ms: 2000
+      # url: http://skeid-b:8090/skeid/registry/snapshot   (default: derived from the node url)
+      # tags: [local]                 # count only downstream nodes with these tags
+      # max_skew_s: 5
+```
+
+Operator contract:
+
+- The snapshot is served behind the admin key and signed:
+  `X-Skeid-Registry-Signature: sha256=<HMAC-SHA256 of the exact body>`. It carries per node
+  `id`, `tags`, `healthy`, `inflight`, `max_conns`, `errors_in_window`, `last_failure_at` and a
+  current `capacity` reading if there is one. It never carries node URLs, key references,
+  metadata, customer key ids, policies or usage.
+- The fronting tier believes a snapshot only if the signature verifies, it is younger than its
+  `ttl`, it is not more than `max_skew_s` ahead of the local clock, and it is not older than the
+  last snapshot accepted. Otherwise it forgets the reading and admission falls back to
+  `inflight`. Keep the clocks in sync (NTP).
+- Free slots of a downstream = the sum over its healthy (and tag-matching) nodes of
+  `max_conns - inflight`, taking a node's own tighter probe reading into account. A pending
+  backoff counts as no free slots. An unlimited node makes the downstream unbounded. No healthy
+  node reads as full.
+- The snapshot is never added to the fronting tier's own `inflight`. When a `429` backoff and
+  a snapshot disagree, the tighter reading wins.
+- Errors in the snapshot are informational. They never change admission or health.
+- With `--workers N` on the downstream, a snapshot describes the worker that answered. The
+  fronting tier then under-admits rather than over-admits.
+
 ## Saturation Behavior
 
 Wenn alle passenden Nodes auf `max_conns` stehen, wartet Skeid kurz auf einen freien Slot:

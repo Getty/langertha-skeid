@@ -196,13 +196,16 @@ sub stop {
 Builds the probe a node's C<capacity> block asks for, or nothing when it asks for none.
 
   capacity:
-    probe: prometheus              # or: inflight, custom
+    probe: prometheus              # or: inflight, custom, registry
     url: http://gpu-1:8000/metrics
     interval_ms: 2000
 
 C<inflight> (and an absent block) means no probe object at all — that is the default admission
 path, not a probe that reports the same thing. C<ratelimit> is likewise not built here: it is
 passive, read off responses the proxy already has, and needs nothing running.
+
+C<registry> is for a node that is itself a Skeid: it pulls that Skeid's signed registry
+snapshot (L<Langertha::Skeid::CapacityProbe::Registry>, ADR 0017).
 
 C<custom> takes either a C<code> callback (given the probe, reports through the same methods)
 or a C<class> to load, because Skeid is generic and the built-ins only cover the engines we
@@ -229,6 +232,11 @@ sub for_node {
   if ($kind eq 'prometheus') {
     require Langertha::Skeid::CapacityProbe::Prometheus;
     return Langertha::Skeid::CapacityProbe::Prometheus->new(%args);
+  }
+
+  if ($kind eq 'registry') {
+    require Langertha::Skeid::CapacityProbe::Registry;
+    return Langertha::Skeid::CapacityProbe::Registry->new(%args);
   }
 
   if ($kind eq 'custom') {

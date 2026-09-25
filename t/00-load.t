@@ -16,6 +16,8 @@ my @modules = qw(
   Langertha::Skeid::CapacityProbe
   Langertha::Skeid::CapacityProbe::Prometheus
   Langertha::Skeid::CapacityProbe::Custom
+  Langertha::Skeid::CapacityProbe::Registry
+  Langertha::Skeid::Registry
 );
 
 for my $mod (@modules) {

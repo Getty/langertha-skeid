@@ -9,6 +9,7 @@ use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
+use Langertha::Skeid::Registry;
 use Langertha::Skeid::Proxy::RelayContent;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
@@ -212,6 +213,28 @@ sub build_app {
   $admin->get('/metrics/nodes' => sub {
     my ($c) = @_;
     $c->render(json => { metrics => $c->skeid->node_metrics });
+  });
+
+  # Skeid-to-Skeid registry (skeid #18, ADR 0017): a fronting tier's CapacityProbe::Registry
+  # pulls this. Behind the admin key like every /skeid route, 404 unless registry.enabled, and
+  # never unsigned. No store may keep it: a cached snapshot is a stale one.
+  $admin->get('/registry/snapshot' => sub {
+    my ($c) = @_;
+    my $skeid = $c->skeid;
+    $c->res->headers->header('Cache-Control' => 'no-store');
+    unless ($skeid->registry_enabled) {
+      $c->render(status => 404,
+        json => { error => { message => 'No registry snapshot is published here', type => 'not_found' } });
+      return;
+    }
+    my ($body, $signature) = eval { Langertha::Skeid::Registry->signed_snapshot($skeid) };
+    unless (defined $body) {
+      $c->render(status => 503,
+        json => { error => { message => 'Registry secret is not set', type => 'unavailable' } });
+      return;
+    }
+    $c->res->headers->header(Langertha::Skeid::Registry->SIGNATURE_HEADER => $signature);
+    $c->render(data => $body, format => 'json');
   });
 
   $admin->get('/usage' => sub {

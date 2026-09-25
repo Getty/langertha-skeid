@@ -2,6 +2,19 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Optional Skeid-to-Skeid registry. A downstream with registry.enabled
+      publishes a signed snapshot of its nodes (inflight, max_conns,
+      health, recent errors, current capacity reading; never URLs, key
+      references, customer key ids or usage) on the admin route
+      GET /skeid/registry/snapshot, HMAC-SHA256 with the secret named by
+      registry.secret_env. A fronting Skeid reads it with capacity probe
+      registry (admin_key_env, secret_env, optional url, tags,
+      interval_ms, max_skew_s) and forgets the reading on a bad
+      signature, a stale, future or replayed snapshot, or a missing
+      secret. Off by default; the route answers 404 until enabled
+    - When two capacity probes report on one node, the tighter reading
+      wins until it expires; a probe only replaces its own reading or a
+      looser one
     - Errors on the Ollama routes (/api/chat, /api/generate, /api/tags,
       /api/ps) are answered in Ollama's shape, {"error": "<message>"} with
       the failure's HTTP status, instead of the OpenAI error object an

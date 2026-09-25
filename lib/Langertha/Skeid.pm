@@ -548,6 +548,40 @@ has frontend_count => (
   },
 );
 
+=attr registry_enabled
+
+Whether this Skeid publishes its registry snapshot on C<GET /skeid/registry/snapshot> (default
+off; ADR 0017). Set by the config's C<registry> block:
+
+  registry:
+    enabled: true
+    secret_env: SKEID_REGISTRY_SECRET   # required when enabled; the HMAC key
+    ttl_s: 10                           # how long a snapshot may be believed
+    instance_id: skeid-b                # default: the hostname
+    error_window_s: 60                  # how far back errors_in_window counts
+
+The fronting tier reads the snapshot with L<Langertha::Skeid::CapacityProbe::Registry>. The
+secret is taken from the environment only and kept in memory (ADR 0003); an enabled registry
+whose variable is empty does not load, because a snapshot is never published unsigned.
+C<registry_secret>, C<registry_ttl_s>, C<registry_instance_id> and C<registry_error_window_s>
+hold the other fields.
+
+=cut
+
+has registry_enabled        => (is => 'rw', default => sub { 0 });
+has registry_secret         => (is => 'rw', default => sub { '' });
+has registry_ttl_s          => (is => 'rw', default => sub { 10 });
+has registry_instance_id    => (is => 'rw', default => sub { undef });
+has registry_error_window_s => (is => 'rw', default => sub { 60 });
+
+# node_id => { last_at => epoch, buckets => { epoch_second => count } }. Failed requests, for
+# the registry snapshot's errors_in_window and last_failure_at. Reported, never consulted by
+# admission: health is operator state (ADR 0009, ADR 0017).
+has _failures => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
 has _stats => (
   is      => 'rw',
   default => sub { {} },
@@ -607,6 +641,14 @@ sub add_node {
   my ($self, %node) = @_;
   my $id  = $node{id}  // croak 'node id required';
   my $url = $node{url} // croak 'node url required';
+
+  # A registry probe with no secret would forget on every poll and look like a silent
+  # downstream; say so where the operator wrote it (ADR 0017).
+  if (ref($node{capacity}) eq 'HASH'
+      && lc($node{capacity}{probe} // $node{capacity}{type} // '') eq 'registry') {
+    require Langertha::Skeid::CapacityProbe::Registry;
+    Langertha::Skeid::CapacityProbe::Registry->validate_config($node{capacity}, $id);
+  }
 
   $self->remove_node($id);
   push @{$self->nodes}, {
@@ -779,6 +821,7 @@ my @CONFIG_STATE = qw(
   model_aliases policies default_policy key_policies key_names nodes
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count admin_api_key
   manifest_enabled manifest_available key_manifests
+  registry_enabled registry_secret registry_ttl_s registry_instance_id registry_error_window_s
 );
 
 sub reload_config {
@@ -1036,6 +1079,8 @@ sub _apply_config {
     $self->admin_api_key('');
   }
 
+  $self->_load_registry($cfg);
+
   # Last: a key's manifest is checked against its routing policy and the aliases.
   $self->_load_manifest($cfg);
 
@@ -1137,6 +1182,61 @@ my $manifest_unavailable_warned;
 sub _is_true {
   my ($value) = @_;
   return (defined($value) && "$value" =~ /^(1|true|yes|on)$/i) ? 1 : 0;
+}
+
+my %REGISTRY_KEYS = map { $_ => 1 } qw(enabled secret_env ttl_s instance_id error_window_s);
+
+# The registry section (ADR 0017). Absent means off, so removing the block disables publishing
+# on the next reload. Enabled without a usable secret is a load error: the route never answers
+# unsigned, and a config that asked for it should not load as if it had not.
+sub _load_registry {
+  my ($self, $cfg) = @_;
+  my $section = $cfg->{registry};
+  my ($enabled, $secret, $ttl, $instance, $window) = (0, '', 10, undef, 60);
+
+  if (defined $section) {
+    croak 'registry must be a hashref' unless ref($section) eq 'HASH';
+    for my $key (sort keys %$section) {
+      croak "registry: unknown key '$key' (known: " . join(' ', sort keys %REGISTRY_KEYS)
+        . '; the secret is named by secret_env, never written into the config)'
+        unless $REGISTRY_KEYS{$key};
+    }
+    $enabled = _is_true($section->{enabled});
+
+    if (defined $section->{ttl_s}) {
+      croak 'registry.ttl_s must be a positive number of seconds'
+        unless looks_like_number($section->{ttl_s}) && $section->{ttl_s} > 0;
+      $ttl = 0 + $section->{ttl_s};
+    }
+    if (defined $section->{error_window_s}) {
+      croak 'registry.error_window_s must be a positive number of seconds'
+        unless looks_like_number($section->{error_window_s}) && $section->{error_window_s} > 0;
+      $window = 0 + $section->{error_window_s};
+    }
+    if (defined $section->{instance_id}) {
+      croak 'registry.instance_id must be a non-empty string'
+        if ref($section->{instance_id}) || !length($section->{instance_id});
+      $instance = "$section->{instance_id}";
+    }
+
+    if ($enabled) {
+      my $env = $section->{secret_env};
+      croak 'registry.secret_env is required when the registry is enabled: snapshots are '
+        . 'signed, never published unsigned'
+        unless defined($env) && !ref($env) && length($env);
+      $secret = $ENV{$env} // '';
+      croak "registry.secret_env names '$env', which is not set: snapshots are signed, never "
+        . 'published unsigned'
+        unless length $secret;
+    }
+  }
+
+  $self->registry_enabled($enabled);
+  $self->registry_secret($secret);
+  $self->registry_ttl_s($ttl);
+  $self->registry_instance_id($instance);
+  $self->registry_error_window_s($window);
+  return 1;
 }
 
 # Resolves the manifest section and every key's manifest: grant once, at config load (ADR
@@ -2268,11 +2368,22 @@ something it cannot turn into a ceiling, so it does not constrain admission.
 
 =item * C<source> — which probe, for reports. Never consulted by admission.
 
+=item * C<at> — when the reading was taken (default now), and C<expires_at> — an absolute
+moment after which it is dropped even inside L</capacity_max_age_ms>. The registry probe uses
+both: a snapshot is as old as its C<generated_at>, and never outlives its own C<ttl>.
+
 =back
 
 A reading only ever narrows what C<max_conns> already allows, and expires after
 L</capacity_max_age_ms>. Probing is a background activity: calling this from a request handler
 is a bug unless the reading was a by-product of a response already in hand.
+
+B<The tighter reading wins across sources> (ADR 0017). A reading from a different source than
+the current one replaces it only when it is at least as tight -- a pending backoff is tightest,
+then C<used/limit>, then a reading without a limit. A source always replaces its own last
+reading. So a registry snapshot saying "empty" cannot lift a C<429> backoff a response just
+recorded, and the looser of two disagreeing probes never decides. Returns the reading in force
+afterwards.
 
 =cut
 
@@ -2289,6 +2400,7 @@ sub set_capacity_reading {
     # Which of a provider's several quotas this reading is about, when it had more than one.
     # For reports only -- admission just sees used and limit.
     (defined $reading{quota} ? (quota => "$reading{quota}") : ()),
+    (defined $reading{expires_at} ? (expires_at => 0 + $reading{expires_at}) : ()),
   };
 
   if (defined $reading{retry_after_ms} && $reading{retry_after_ms} > 0) {
@@ -2297,8 +2409,26 @@ sub set_capacity_reading {
     $entry->{retry_after} = 0 + $reading{retry_after};
   }
 
+  # Two sources disagreeing about one node: the tighter one decides until it expires. Taking
+  # the latest instead would let whichever probe polls last lift what the other just said.
+  my $current = $self->capacity_reading($node_id);
+  if ($current && $current->{source} ne $entry->{source}
+      && _reading_tightness($current) > _reading_tightness($entry)) {
+    return $current;
+  }
+
   $self->_capacity->{$node_id} = $entry;
   return $entry;
+}
+
+# How much a reading holds admission back: a pending backoff above everything, then the used
+# fraction, then nothing for a reading without a limit.
+sub _reading_tightness {
+  my ($reading) = @_;
+  return 9**9**9 if $reading->{retry_after} && time < $reading->{retry_after};
+  my $limit = 0 + ($reading->{limit} // 0);
+  return 0 if $limit <= 0;
+  return (0 + ($reading->{used} // 0)) / $limit;
 }
 
 =method capacity_reading
@@ -2322,21 +2452,34 @@ sub capacity_reading {
     delete $self->_capacity->{$node_id};
     return;
   }
+  # A reading that said how long it may be believed is not believed longer (ADR 0017).
+  if (!$backoff_pending && defined($entry->{expires_at}) && Time::HiRes::time() > $entry->{expires_at}) {
+    delete $self->_capacity->{$node_id};
+    return;
+  }
   return $entry;
 }
 
 =method forget_capacity
 
   $skeid->forget_capacity('gpu-1');   # or all of them with no argument
+  $skeid->forget_capacity('gpu-1', source => 'registry');   # only if that source holds it
 
 Drops probe readings, so C<inflight> decides again. What a node removal calls, and what a probe
 calls when it can no longer reach its source — reporting nothing beats reporting last hour.
 
+With C<source>, the reading is dropped only when that source wrote it. A probe forgetting what
+I<it> said must not wipe a backoff another source recorded (ADR 0017).
+
 =cut
 
 sub forget_capacity {
-  my ($self, $node_id) = @_;
+  my ($self, $node_id, %args) = @_;
   if (defined($node_id) && length($node_id)) {
+    if (defined $args{source}) {
+      my $entry = $self->_capacity->{$node_id};
+      return 0 unless $entry && ($entry->{source} // '') eq $args{source};
+    }
     delete $self->_capacity->{$node_id};
     return 1;
   }
@@ -2494,6 +2637,7 @@ sub finish_request {
     $self->_stats->{$node_id}{ok} = 1 + ($self->_stats->{$node_id}{ok} // 0);
   } else {
     $self->_stats->{$node_id}{error} = 1 + ($self->_stats->{$node_id}{error} // 0);
+    $self->_record_failure($node_id);
   }
 
   if (defined $args{duration_ms}) {
@@ -2502,6 +2646,86 @@ sub finish_request {
   }
 
   return 1;
+}
+
+# One bucket per second, pruned to the window on every write, so a node that fails a lot costs
+# at most error_window_s buckets.
+sub _record_failure {
+  my ($self, $node_id) = @_;
+  my $now = Time::HiRes::time();
+  my $f = $self->_failures->{$node_id} //= { buckets => {} };
+  $f->{last_at} = $now;
+  $f->{buckets}{int $now}++;
+  my $oldest = int($now - (0 + ($self->registry_error_window_s || 60)));
+  for my $second (keys %{$f->{buckets}}) {
+    delete $f->{buckets}{$second} if $second < $oldest;
+  }
+  return;
+}
+
+sub _errors_in_window {
+  my ($self, $node_id) = @_;
+  my $f = $self->_failures->{$node_id} or return 0;
+  my $oldest = int(Time::HiRes::time() - (0 + ($self->registry_error_window_s || 60)));
+  my $count = 0;
+  for my $second (keys %{$f->{buckets}}) {
+    $count += $f->{buckets}{$second} if $second >= $oldest;
+  }
+  return $count;
+}
+
+=method registry_snapshot
+
+  my $snapshot = $skeid->registry_snapshot;
+
+What this Skeid publishes to a fronting tier (ADR 0017): schema C<version> 1, C<instance>,
+C<generated_at>, C<ttl>, C<workers>, and per node C<id>, C<tags>, C<healthy>, C<inflight>,
+C<max_conns> (this process's share), C<errors_in_window>, C<last_failure_at> and, when a
+current reading exists, C<capacity> (C<used>, C<limit>, C<source>, C<retry_after>).
+
+Built from a whitelist, so it cannot carry what it must not: no node URL, no key reference, no
+metadata, no customer key id, no policy, no usage. L<Langertha::Skeid::Registry> signs it.
+
+=cut
+
+sub registry_snapshot {
+  my ($self) = @_;
+  my $instance = $self->registry_instance_id;
+  unless (defined($instance) && length($instance)) {
+    require Sys::Hostname;
+    $instance = Sys::Hostname::hostname();
+  }
+
+  my @nodes;
+  for my $node (sort { ($a->{id} // '') cmp ($b->{id} // '') } @{$self->nodes || []}) {
+    my $id = $node->{id} // next;
+    my $reading = $self->capacity_reading($id);
+    my $failure = $self->_failures->{$id};
+    push @nodes, {
+      id               => "$id",
+      tags             => [ @{$node->{tags} || []} ],
+      healthy          => ($node->{healthy} ? 1 : 0),
+      inflight         => 0 + ($self->_inflight->{$id} // 0),
+      max_conns        => 0 + $self->worker_max_conns($node),
+      errors_in_window => 0 + $self->_errors_in_window($id),
+      last_failure_at  => ($failure && defined $failure->{last_at} ? 0 + $failure->{last_at} : undef),
+      ($reading ? (capacity => {
+        used   => (defined $reading->{used}  ? 0 + $reading->{used}  : undef),
+        limit  => (defined $reading->{limit} ? 0 + $reading->{limit} : undef),
+        source => "$reading->{source}",
+        ($reading->{retry_after} ? (retry_after => 0 + $reading->{retry_after}) : ()),
+      }) : ()),
+    };
+  }
+
+  return {
+    version      => 1,
+    instance     => "$instance",
+    generated_at => Time::HiRes::time(),
+    ttl          => 0 + ($self->registry_ttl_s || 10),
+    workers      => 0 + ($self->worker_count // 1),
+    nodes        => \@nodes,
+  };
 }
 
 sub node_metrics {
