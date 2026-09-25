@@ -461,6 +461,12 @@ has _route_cache => (
   default => sub { { generation => -1, entries => {} } },
 );
 
+# The probe key (see _probe_inventory_key) as of one inventory generation.
+has _probe_key_cache => (
+  is      => 'rw',
+  default => sub { { generation => -1, key => undef } },
+);
+
 has _inflight => (
   is      => 'rw',
   default => sub { {} },
@@ -638,6 +644,31 @@ sub remove_node {
   return $removed ? 1 : 0;
 }
 
+# What the running capacity probes were built from: the worker count (it sets the poll interval,
+# ADR 0010) and, per node with a capacity block, its id, URL and that block. The inventory
+# generation is the wrong key for them -- it also moves on a health flip, which has to drop the
+# route cache but changes nothing a probe polls, and restarting the probes forgets every reading
+# (skeid #40). The URL is in because a Prometheus probe may derive its endpoint from it, and a
+# reading about the machine a node id used to point at is not one about the new one.
+# Recomputed only when the generation has moved, so the per-request check stays an integer
+# compare.
+sub _probe_inventory_key {
+  my ($self) = @_;
+  my $generation = $self->_inventory_generation;
+  my $cache = $self->_probe_key_cache;
+  return $cache->{key} if ($cache->{generation} // -1) == $generation;
+
+  my $key = _config_digest([
+    0 + ($self->worker_count // 1),
+    map  { [ $_->{id}, $_->{url}, $_->{capacity} ] }
+    sort { ($a->{id} // '') cmp ($b->{id} // '') }
+    grep { ref($_->{capacity}) eq 'HASH' }
+    @{$self->nodes || []},
+  ]);
+  $self->_probe_key_cache({ generation => $generation, key => $key });
+  return $key;
+}
+
 sub _bump_inventory {
   my ($self) = @_;
   # Defensive //0: the nodes trigger can fire during construction, before this attribute's own
@@ -691,7 +722,8 @@ sub set_node_health {
     last;
   }
   # Health is part of eligibility, so flipping it has to drop the derived lists -- otherwise a
-  # node taken out of rotation keeps receiving traffic until something else changes.
+  # node taken out of rotation keeps receiving traffic until something else changes. It is not
+  # part of the probe key, so the capacity probes and their readings stay (skeid #40).
   $self->_bump_inventory if $found;
   return $found;
 }
@@ -753,7 +785,8 @@ sub reload_config {
 
   my %before = map { $_ => $self->$_ } @CONFIG_STATE;
   my %pricing = %{$self->model_pricing || {}};
-  my ($generation, $route_cache) = ($self->_inventory_generation, $self->_route_cache);
+  my ($generation, $route_cache, $probe_key_cache)
+    = ($self->_inventory_generation, $self->_route_cache, $self->_probe_key_cache);
 
   my $nodes_print;
   if (eval { $nodes_print = $self->_apply_config($cfg); 1 }) {
@@ -770,14 +803,15 @@ sub reload_config {
     $self->$attr($before{$attr});
   }
   $self->model_pricing(\%pricing);
-  # Setting nodes bumps the inventory generation, which restarts the capacity probes. The old
-  # list comes back unchanged (the failed load only built a new array), so its generation and
-  # the route cache derived from it come back with it: an inventory that did not change must
-  # not look changed.
+  # Setting nodes bumps the inventory generation. The old list comes back unchanged (the failed
+  # load only built a new array), so its generation and the caches keyed on it come back with
+  # it: an inventory that did not change must not look changed, and a cache left keyed on a
+  # generation number that is about to be reused would answer for a different list.
   if ($self->nodes != $before{nodes}) {
     $self->nodes($before{nodes});
     $self->_inventory_generation($generation);
     $self->_route_cache($route_cache);
+    $self->_probe_key_cache($probe_key_cache);
   }
   die $err;
 }

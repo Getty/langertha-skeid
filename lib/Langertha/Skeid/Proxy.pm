@@ -54,7 +54,7 @@ sub build_app {
   # Capacity probes (ADR 0009). Held by the app, because a probe that goes out of scope stops
   # polling. Nodes with no capacity block get none, which is plain inflight admission.
   my $probes = Langertha::Skeid::CapacityProbe->start_for_skeid($skeid);
-  my $probe_generation = $skeid->_inventory_generation;
+  my $probe_key = $skeid->_probe_inventory_key;
 
   my $app = Mojolicious->new;
   $app->secrets(['skeid-proxy']);
@@ -72,12 +72,14 @@ sub build_app {
   $app->helper(skeid => sub { $skeid });
 
   # A config reload replaces the whole inventory, so probes have to follow it or they keep
-  # polling for nodes that are gone and never start for new ones. An integer compare per
-  # request is cheap enough not to need its own timer, and the rebuild itself is rare.
+  # polling for nodes that are gone and never start for new ones. They follow the probe key,
+  # not the inventory generation: a health flip moves the generation but not what a probe
+  # polls, and a restart forgets every reading (skeid #40). The key is recomputed only when the
+  # generation has moved, so an unchanged inventory costs an integer compare per request.
   $app->hook(before_dispatch => sub {
-    my $generation = $skeid->_inventory_generation;
-    return if $generation == $probe_generation;
-    $probe_generation = $generation;
+    my $key = $skeid->_probe_inventory_key;
+    return if $key eq $probe_key;
+    $probe_key = $key;
     $_->stop for values %$probes;
     $probes = Langertha::Skeid::CapacityProbe->start_for_skeid($skeid);
   });

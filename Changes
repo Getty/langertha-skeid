@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Taking a node in or out of rotation through the admin API no longer
+      restarts every capacity probe and drops their readings. Probes restart
+      only when a probed node is added, removed, moved to another URL or
+      given a different capacity block, or the worker count changes; a probe
+      that is stopped ignores the answer to a poll still in flight
     - Customer key ids (skeid keyid) are the key's full SHA-1 digest, k_ plus
       40 hex digits, instead of its first 12 hex digits, which are a prefix of
       the new id. A config that still names a customer by the short id in

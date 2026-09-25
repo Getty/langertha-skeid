@@ -100,6 +100,9 @@ sub poll {
   $self->_ua->get($url => sub {
     my (undef, $tx) = @_;
     $self->_inflight_poll(0);
+    # Stopped while the request was out -- a restart or a removed node. Whatever it says now
+    # belongs to no running probe, and writing it would overwrite or resurrect a reading.
+    return if $self->is_stopped;
 
     my $status = $tx->res->code // 0;
     unless ($status >= 200 && $status < 300) {

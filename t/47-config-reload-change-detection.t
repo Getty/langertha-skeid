@@ -156,9 +156,7 @@ sub nodes_cfg {
 
   $t->post_ok('/skeid/nodes/p1/health' => { Authorization => 'Bearer adm' } => json => { healthy => 0 })
     ->status_is(200);
-  # A health flip itself moves the generation (route caches depend on it), so the next request
-  # restarts the probes once. That is not a reload; count from after it.
-  $t->get_ok('/skeid/nodes' => { Authorization => 'Bearer adm' })->status_is(200);
+  # Counted from the flip itself: health drops the route cache, not the probes (skeid #40).
   my $starts_after_admin = $polls;
 
   for (1 .. 25) {

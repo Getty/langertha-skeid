@@ -85,6 +85,19 @@ has _timer => (
   clearer => '_clear_timer',
 );
 
+=attr is_stopped
+
+True once L</stop> has run. A poll whose answer arrives after that (an HTTP request still in
+flight at a restart) must not report: the node may be gone, or a new probe may already describe
+it. A subclass that reports asynchronously checks this before it writes.
+
+=cut
+
+has is_stopped => (
+  is      => 'rwp',
+  default => sub { 0 },
+);
+
 =method poll
 
   $probe->poll;
@@ -132,6 +145,7 @@ sub start {
   my ($self) = @_;
   return $self->_timer if $self->_timer;
   require Mojo::IOLoop;
+  $self->_set_is_stopped(0);
 
   my $every = $self->poll_interval_seconds;
 
@@ -165,6 +179,7 @@ acting on whatever this probe last said.
 
 sub stop {
   my ($self) = @_;
+  $self->_set_is_stopped(1);
   if (my $id = $self->_timer) {
     require Mojo::IOLoop;
     eval { Mojo::IOLoop->remove($id) };

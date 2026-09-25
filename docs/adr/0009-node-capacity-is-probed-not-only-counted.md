@@ -109,8 +109,11 @@ Details that turned out to matter:
   runs out first — a node with requests to spare and no tokens left answers `429` all the same.
   Both quotas are read and the one closest to exhausted decides, compared as a fraction since
   the units differ.
-- Probes follow a config reload: the inventory generation is compared per request and probes
-  are rebuilt when it moves, or they poll for nodes that no longer exist.
+- Probes follow a config reload: a probe key -- the worker count plus id, URL and `capacity`
+  block of every probed node -- is compared per request and probes are rebuilt when it moves,
+  or they poll for nodes that no longer exist. It is not the inventory generation, which also
+  moves on a health flip; restarting on that forgot every reading (skeid #40). A probe that is
+  stopped drops the answer to a poll still in flight.
 
 Still open, unchanged: the poll interval (2s is a starting point, not a finding) and whether a
 reading should influence weighting as well as admission.
