@@ -1,0 +1,20 @@
+---
+claimed_at: 2026-09-25T18:18:19Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T18:18:19Z
+created: 2026-09-25T18:02:17Z
+id: 46
+priority: low
+started: 2026-09-25T18:18:19Z
+status: done
+tags:
+- protocol
+- ollama
+title: Ollama format (structured output) is dropped on /api/chat and /api/generate
+updated: 2026-09-25T18:18:19Z
+---
+
+Found in k43: Ollama format ("json" or a JSON schema) is not forwarded on either Ollama route (request_to_openai reads only model/messages/options.temperature/num_predict/tools/tool_choice), so the manifest claims no response_format_* on the ollama face (ADR 0015). Mapping: "json" -> response_format json_object, schema -> json_schema. Doing it in request_to_openai covers both routes; then the ollama manifest_endpoint may list response_format_json_{object,schema}.
+
+2026-09-25 18:16 Fixed in 7d2fe3f on branch k44-46; t/55 + t/46 updated. No strict sent.
