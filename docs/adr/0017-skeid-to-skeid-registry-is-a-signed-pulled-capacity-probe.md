@@ -41,7 +41,10 @@ registry:
 
 `GET /skeid/registry/snapshot` sits behind the admin API key like every `/skeid/*` route. It
 answers `404` when the registry is not enabled. It never answers unsigned: `secret_env` is
-required when `enabled` is true, and an empty variable at config load is a load error.
+required when `enabled` is true, and an empty variable at config load is a load error, as is a
+secret shorter than 32 bytes (the HMAC-SHA256 output size) and an enabled registry without an
+admin API key, which no fronting tier could read. A snapshot that fails to build for any other
+reason is logged and answered with a generic `500`; the answer says nothing about the cause.
 
 The body is canonical JSON (sorted keys). The signature goes in a header:
 
@@ -111,7 +114,8 @@ A snapshot is accepted only if all of these hold. Otherwise the probe forgets it
 4. It is not a replay: `generated_at` is not older than the last snapshot this probe accepted.
    A replayed older snapshot inside its TTL is rejected, and so is a reordered one.
 
-A missing secret or admin key variable on the fronting side also forgets.
+A missing secret or admin key variable on the fronting side also forgets, and so does a secret
+shorter than 32 bytes.
 
 **Mapping to a reading.** Over the downstream nodes that are healthy and carry every tag in
 `capacity.tags`:
@@ -143,15 +147,29 @@ Rules the mapping follows:
   `generated_at + ttl`. Whichever comes first ends it: that expiry or `capacity_max_age_ms`.
   A registry that goes silent degrades to `inflight`. It does not keep saying what it said
   30 s ago.
-- The probe forgets **only its own reading** (`forget_capacity($id, source => 'registry')`).
-  A rejected snapshot must not wipe a `429` backoff that the passive rate-limit probe recorded
-  from a response.
-- **The tighter reading wins across sources.** This amends ADR 0009 "As implemented" for every
-  probe, not only this one. A reading from a different source than the current one replaces it
-  only if it is at least as tight. Tightness is 1 for a pending backoff, else `used / limit`,
-  else 0. A reading from the same source always replaces its own last reading. Expiry still
-  applies, so a tighter reading from another source holds for at most its own age limit. A
-  registry that says "empty" while a response just said `429` loses.
+- Every probe forgets **only its own reading** (`forget_capacity($id, source => $probe->source)`),
+  on a rejected snapshot, an unreachable endpoint, a poll that dies and a stop. A probe going
+  blind must not wipe a `429` backoff that the passive rate-limit probe recorded from a
+  response. A `custom` callback has no fixed source and still forgets whatever is there.
+- **The tighter reading wins across sources, while it is current.** This amends ADR 0009 "As
+  implemented" for every probe, not only this one. A reading from the same source always
+  replaces its own last reading. A reading from a different source is held off by the current
+  one only when the current one is tighter (a pending backoff above everything, else
+  `used / limit`, else 0) **and** either
+  - it carries a pending backoff, or
+  - it is younger than the incoming source's poll interval (`interval_ms` × workers, passed
+    with the reading). The incoming probe has not had a full poll since the tighter reading
+    was taken, so the two readings describe the same moment and the tighter one is the safer
+    one.
+
+  Otherwise the incoming reading replaces it. A registry that says "empty" while a response
+  just said `429` loses. Two probes on timers that disagree leave the tighter one deciding,
+  because each refreshes within the other's interval. But a passive reading that nobody
+  refreshes -- `remaining: 0` from the last response before traffic stopped, no reset header --
+  holds a probe off for at most one of its polls. "Tighter" alone let it block the node until
+  `capacity_max_age_ms`, and forever with `capacity_max_age_ms: 0`; that was a review finding
+  on the first implementation. A passive reading passes no interval, so it replaces a tighter
+  probe reading that has no backoff: a response is itself a fresh observation.
 - A state change of the probe is logged once, not every poll. The states are: accepted, bad
   signature, stale, replayed, unreachable, missing secret.
 
@@ -171,13 +189,37 @@ Rules the mapping follows:
 
 ## Consequences
 
-- The fronting tier holds the downstream's admin API key. That key can also write (add nodes,
-  flip health). A read-only registry credential would be narrower, and it is left open until a
-  deployment needs it.
-- With `--workers N` on the downstream, the snapshot describes the worker that answered: its
-  own `inflight` and its own share of `max_conns`. The fronting tier then sees about 1/N of the
-  downstream's capacity and under-admits. ADR 0010 accepts under-admitting over
-  over-admitting. The snapshot carries `workers` so that a report can say so.
+- **The fronting tier holds the downstream's full admin API key.** That key is not read-only:
+  it can flip health and add nodes with an arbitrary `url` plus `api_key_env` / `api_key_ref`.
+  Whoever holds it can register a node pointing at a host they control, under a key reference
+  the downstream resolves, and the downstream then sends that provider secret there. A
+  compromised fronting tier therefore exfiltrates the downstream's provider keys, not only its
+  telemetry. The snapshot route must be served over TLS, and the fronting tier's copy of the
+  key needs the same care as the downstream's own. A read-only registry credential is the fix
+  and is tracked as skeid #49.
+- With `--workers N` on the downstream, the snapshot samples one worker: the one that answered,
+  with its own `inflight` and its own share of `max_conns`. It is representative only when the
+  workers are evenly loaded. When the answering worker is emptier than the others, the fronting
+  tier reads free room that is not there and can **over-admit** until the next poll, because a
+  reading below its limit admits up to the fronting tier's own `max_conns`. The guardrail is
+  the downstream's per-worker share (ADR 0010): each worker still admits only its share, and
+  the excess waits there and gets `429`. The snapshot carries `workers` so that a report can
+  say so. An aggregated snapshot across workers would need shared state, which ADR 0009
+  declined.
+- **Replay protection does not survive a restart.** The last accepted `generated_at` lives in
+  the probe, so a fronting-tier restart, or a probe rebuilt after a reload changed the node,
+  starts with none. An attacker who recorded a signed snapshot can have it accepted once more
+  in that moment, and only while it is still inside its own `ttl` (default 10 s); after that it
+  is stale. The window is ttl-bounded and the reading can only narrow `max_conns`, so it was
+  left unfixed rather than persisted.
+- **Secret rotation has no overlap window.** One secret per pair, read from the environment at
+  start. Rotating means restarting both sides; in between the fronting probe sees
+  `bad_signature`, forgets and falls back to `inflight`. A second, accepted-while-rotating
+  secret is left until a deployment needs zero-gap rotation.
+- The poll interval has to stay below `capacity_max_age_ms` and the downstream's `ttl`, or the
+  reading expires between polls and `inflight` decides in the gaps. Every probe warns at start
+  when its effective interval is not below `capacity_max_age_ms`; the downstream `ttl` is only
+  known from the first snapshot and is documented, not checked.
 - The TTL, the skew allowance and the poll interval are starting points, not measurements.
 - `last_failure_at` and the error window cost one timestamp and one per-second bucket map per
   node. They are written on every failed request whether or not the registry is enabled.

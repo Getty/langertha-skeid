@@ -229,8 +229,18 @@ sub build_app {
     }
     my ($body, $signature) = eval { Langertha::Skeid::Registry->signed_snapshot($skeid) };
     unless (defined $body) {
-      $c->render(status => 503,
-        json => { error => { message => 'Registry secret is not set', type => 'unavailable' } });
+      my $err = $@ || 'unknown error';
+      unless (length($skeid->registry_secret // '')) {
+        $c->render(status => 503,
+          json => { error => { message => 'Registry secret is not set', type => 'unavailable' } });
+        return;
+      }
+      # Anything else is a bug in building the snapshot. The operator gets the cause in the
+      # log; the caller gets nothing that could describe this process's internals.
+      $err =~ s/\s+\z//;
+      $c->app->log->error("registry snapshot failed: $err");
+      $c->render(status => 500,
+        json => { error => { message => 'Registry snapshot could not be built', type => 'server_error' } });
       return;
     }
     $c->res->headers->header(Langertha::Skeid::Registry->SIGNATURE_HEADER => $signature);

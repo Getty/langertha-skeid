@@ -6,6 +6,10 @@ use Mojolicious;
 use Mojo::IOLoop;
 use Mojo::Server::Daemon;
 use Langertha::Skeid;
+
+# These probes use a ten-minute interval so the timer never fires during the test; the warning
+# about an interval longer than capacity_max_age_ms (ADR 0017) is expected here and only noise.
+$SIG{__WARN__} = sub { warn @_ unless $_[0] =~ /not below capacity_max_age_ms/ };
 use Langertha::Skeid::Proxy;
 use Langertha::Skeid::CapacityProbe;
 

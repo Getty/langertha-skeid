@@ -117,3 +117,11 @@ Details that turned out to matter:
 
 Still open, unchanged: the poll interval (2s is a starting point, not a finding) and whether a
 reading should influence weighting as well as admission.
+
+## Update (skeid #18, 2026-09-25): readings from several sources
+
+ADR 0017 amends "As implemented" above for every probe. When two sources report on one node,
+the latest reading no longer simply wins: the tighter one decides while it is current, meaning
+while it carries a pending backoff or is younger than the other source's poll interval. A
+probe that fails or stops forgets only its own reading, so a `429` backoff recorded from a
+response outlives it. See ADR 0017, "Staleness and combining with other readings".

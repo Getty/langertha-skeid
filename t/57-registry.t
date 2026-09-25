@@ -24,7 +24,7 @@ use Langertha::Skeid::CapacityProbe::Registry;
 
 my $SECRET_ENV = 'SKEID_T57_REGISTRY_SECRET';
 my $ADMIN_ENV  = 'SKEID_T57_DOWNSTREAM_ADMIN';
-$ENV{$SECRET_ENV} = 'registry-shared-secret-57';
+$ENV{$SECRET_ENV} = 'registry-shared-secret-57-0123456789abcdef';
 $ENV{$ADMIN_ENV}  = 'adm';
 my $ADMIN = { Authorization => 'Bearer adm' };
 
@@ -88,6 +88,17 @@ sub downstream_config {
     qr/unknown key 'secret'/, 'a secret written into the config is refused, not ignored';
   like $load->(downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV, ttl_s => 0 })),
     qr/ttl_s must be a positive/, 'a zero ttl does not load';
+  {
+    local $ENV{SKEID_T57_SHORT} = 'x' x 31;
+    like $load->(downstream_config(registry => { enabled => 1, secret_env => 'SKEID_T57_SHORT' })),
+      qr/fewer than 32 bytes/, 'a secret shorter than 32 bytes does not load';
+  }
+  {
+    my $cfg = downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV });
+    delete $cfg->{admin};
+    like $load->($cfg), qr/needs an admin API key/,
+      'enabled without an admin key does not load: nobody could read the snapshot';
+  }
 
   my $probe_node = sub {
     my (%cap) = @_;
@@ -214,11 +225,17 @@ sub downstream_config {
   ok $skeid->capacity_reading('peer'), 'the backoff stands';
 
   $skeid->forget_capacity('peer');
-  $skeid->set_capacity_reading('peer', source => 'registry', used => 2, limit => 8);
+  $skeid->set_capacity_reading('peer', source => 'registry', used => 2, limit => 8, interval_ms => 2000);
   $skeid->set_capacity_reading('peer', source => 'custom', used => 7, limit => 8);
   is $skeid->capacity_reading('peer')->{used}, 7, 'a tighter reading from another source replaces it';
-  $skeid->set_capacity_reading('peer', source => 'registry', used => 1, limit => 8);
-  is $skeid->capacity_reading('peer')->{used}, 7, 'and a looser one does not';
+  $skeid->set_capacity_reading('peer', source => 'registry', used => 1, limit => 8, interval_ms => 2000);
+  is $skeid->capacity_reading('peer')->{used}, 7,
+    'and a looser one does not, while the tighter one is younger than its poll interval';
+  $skeid->_capacity->{peer}{at} = Time::HiRes::time() - 3;
+  $skeid->set_capacity_reading('peer', source => 'registry', used => 1, limit => 8, interval_ms => 2000);
+  is_deeply [@{$skeid->capacity_reading('peer')}{qw(source used)}], ['registry', 1],
+    'once the tighter one is older than a poll of the incoming source, the fresh reading replaces it';
+  $skeid->set_capacity_reading('peer', source => 'custom', used => 7, limit => 8);
   $skeid->set_capacity_reading('peer', source => 'custom', used => 1, limit => 8);
   is $skeid->capacity_reading('peer')->{used}, 1, 'a source always replaces its own last reading';
 
@@ -226,6 +243,115 @@ sub downstream_config {
   $skeid->set_capacity_reading('peer', source => 'registry', used => 1, limit => 8,
     at => Time::HiRes::time(), expires_at => Time::HiRes::time() - 0.01);
   ok !$skeid->capacity_reading('peer'), 'a reading past its expires_at is gone inside capacity_max_age_ms';
+}
+
+# --- a snapshot that fails to build says nothing about why (review M4) ---
+{
+  my $skeid = Langertha::Skeid->new(config_loader => sub {
+    downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV }) });
+  my $app = Langertha::Skeid::Proxy->build_app(skeid => $skeid);
+  $app->log->level('error');
+  my @logged;
+  $app->log->unsubscribe('message');
+  $app->log->on(message => sub { my (undef, $level, @lines) = @_; push @logged, "$level: @lines" });
+  no warnings 'redefine';
+  local *Langertha::Skeid::Registry::encode = sub { die "internal detail t57-marker\n" };
+  my $t = Test::Mojo->new($app);
+  $t->get_ok('/skeid/registry/snapshot' => $ADMIN)->status_is(500)
+    ->json_is('/error/type', 'server_error');
+  unlike $t->tx->res->body, qr/t57-marker|secret/i, 'the answer carries neither the cause nor a false "secret not set"';
+  ok scalar(grep { /registry snapshot failed: internal detail t57-marker/ } @logged), 'the cause is logged';
+}
+
+# --- a passive reading nobody refreshes cannot block a fresh probe (review I1) ---
+# The last response before traffic stopped said remaining: 0. Without traffic no response ever
+# updates it, and with capacity_max_age_ms 0 it never ages out. Tighter-wins alone kept every
+# probe that later said "empty" out for good, and the node was never admitted again.
+{
+  my $skeid = Langertha::Skeid->new(capacity_max_age_ms => 0);
+  $skeid->add_node(id => 'n', url => 'http://n/v1', model => 'm', max_conns => 10);
+  $skeid->observe_response_headers('n',
+    { 'x-ratelimit-remaining-requests' => 0, 'x-ratelimit-limit-requests' => 10 });
+  ok !$skeid->_capacity_allows('n'), 'a used-up ratelimit reading stops admission';
+  $skeid->set_capacity_reading('n', source => 'prometheus', used => 0, limit => 10);
+  is $skeid->capacity_reading('n')->{source}, 'prometheus',
+    'a fresh probe reading replaces a stale passive one with no backoff pending';
+  ok $skeid->_capacity_allows('n'), 'and the node is admissible again';
+
+  # A backoff is different: it is a statement about the future, and it still holds.
+  $skeid->observe_response_headers('n', { 'retry-after' => 30 }, status => 429);
+  $skeid->set_capacity_reading('n', source => 'prometheus', used => 0, limit => 10, interval_ms => 2000);
+  is $skeid->capacity_reading('n')->{source}, 'ratelimit', 'a pending backoff is not lifted by a probe';
+}
+
+# --- a probe forgets only its own reading (review I3) ---
+{
+  require Langertha::Skeid::CapacityProbe::Prometheus;
+  my $skeid = Langertha::Skeid->new(capacity_max_age_ms => 60_000);
+  $skeid->add_node(id => 'n', url => 'http://127.0.0.1:1/v1', model => 'm', max_conns => 4);
+  for my $class (qw(Langertha::Skeid::CapacityProbe::Prometheus Langertha::Skeid::CapacityProbe::Registry)) {
+    my $probe = $class->new(skeid => $skeid, node_id => 'n',
+      config => { secret_env => $SECRET_ENV, admin_key_env => $ADMIN_ENV });
+    $skeid->forget_capacity('n');
+    $skeid->observe_response_headers('n', { 'retry-after' => 30 }, status => 429);
+    $probe->stop;
+    is $skeid->capacity_reading('n')->{source}, 'ratelimit',
+      "$class stopping keeps a 429 backoff another source recorded";
+    $skeid->forget_capacity('n');
+    $skeid->set_capacity_reading('n', source => $probe->source, used => 1, limit => 4);
+    $probe->stop;
+    ok !$skeid->capacity_reading('n'), "$class stopping forgets its own reading";
+  }
+
+  # A metrics endpoint that answers 500: the poll forgets, but only the Prometheus reading.
+  my $app = Mojolicious->new;
+  $app->log->level('fatal');
+  $app->routes->get('/metrics' => sub { $_[0]->render(text => 'down', status => 500) });
+  my $daemon = Mojo::Server::Daemon->new(app => $app, listen => ['http://127.0.0.1'], silent => 1);
+  $daemon->start;
+  my $probe = Langertha::Skeid::CapacityProbe::Prometheus->new(skeid => $skeid, node_id => 'n',
+    config => { url => 'http://127.0.0.1:' . $daemon->ports->[0] . '/metrics' });
+  $skeid->forget_capacity('n');
+  $skeid->observe_response_headers('n', { 'retry-after' => 30 }, status => 429);
+  $probe->poll;
+  spin(0.3);
+  is $skeid->capacity_reading('n')->{source}, 'ratelimit',
+    'an unreachable metrics endpoint does not wipe the backoff';
+}
+
+# --- a probe that polls no more often than readings live is reported (review M8) ---
+{
+  my $skeid = Langertha::Skeid->new(capacity_max_age_ms => 1000);
+  $skeid->add_node(id => 'n', url => 'http://127.0.0.1:1/v1', model => 'm', max_conns => 4);
+  my @warnings;
+  local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+  my $slow = Langertha::Skeid::CapacityProbe::Registry->new(skeid => $skeid, node_id => 'n',
+    interval_ms => 2000, config => {});
+  $slow->start;
+  $slow->stop;
+  is scalar(grep { /not below capacity_max_age_ms/ } @warnings), 1,
+    'an interval at or above capacity_max_age_ms warns at start';
+  @warnings = ();
+  my $fast = Langertha::Skeid::CapacityProbe::Registry->new(skeid => $skeid, node_id => 'n',
+    interval_ms => 500, config => {});
+  $fast->start;
+  $fast->stop;
+  is scalar(grep { /capacity_max_age_ms/ } @warnings), 0, 'a shorter interval does not';
+}
+
+# --- removing a node drops its error history with its reading (review M5) ---
+{
+  my $skeid = Langertha::Skeid->new;
+  $skeid->add_node(id => 'n', url => 'http://n/v1', model => 'm', max_conns => 4);
+  $skeid->start_request('n');
+  $skeid->finish_request('n', ok => 0);
+  ok $skeid->_failures->{n}, 'a failed request is recorded';
+  $skeid->remove_node('n');
+  ok !exists $skeid->_failures->{n}, 'removal forgets it';
+  $skeid->add_node(id => 'n', url => 'http://other/v1', model => 'm', max_conns => 4);
+  my ($node) = @{$skeid->registry_snapshot->{nodes}};
+  is_deeply [@{$node}{qw(errors_in_window last_failure_at)}], [0, undef],
+    'a node re-added under the same id starts without the old machine\'s errors';
 }
 
 # --- the probe against a snapshot endpoint: every rejection forgets ---

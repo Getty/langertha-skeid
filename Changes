@@ -11,10 +11,18 @@ Revision history for Langertha-Skeid
       registry (admin_key_env, secret_env, optional url, tags,
       interval_ms, max_skew_s) and forgets the reading on a bad
       signature, a stale, future or replayed snapshot, or a missing
-      secret. Off by default; the route answers 404 until enabled
-    - When two capacity probes report on one node, the tighter reading
-      wins until it expires; a probe only replaces its own reading or a
-      looser one
+      secret. Off by default; the route answers 404 until enabled.
+      Enabling it needs an admin API key and a secret of at least 32
+      bytes. The fronting tier holds the downstream's full admin key,
+      which can add nodes: serve the route over TLS only
+    - When two sources report capacity for one node, the tighter reading
+      wins while it is current: while it carries a pending backoff, or
+      is younger than the other probe's poll interval. A stale
+      rate-limit reading from the last response no longer keeps a probe
+      that reports the node empty out. A probe that fails or stops
+      forgets only its own reading, so a 429 backoff survives it
+    - A capacity probe whose interval_ms (times the worker count) is not
+      below capacity_max_age_ms warns at start
     - Errors on the Ollama routes (/api/chat, /api/generate, /api/tags,
       /api/ps) are answered in Ollama's shape, {"error": "<message>"} with
       the failure's HTTP status, instead of the OpenAI error object an

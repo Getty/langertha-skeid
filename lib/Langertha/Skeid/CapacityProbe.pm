@@ -98,6 +98,24 @@ has is_stopped => (
   default => sub { 0 },
 );
 
+=method source
+
+The C<source> this probe writes its readings under (C<prometheus>, C<registry>), or undef when
+it does not have a fixed one -- a C<custom> callback picks its own. When the probe fails or
+stops it forgets only a reading under this source, so a C<429> backoff the passive rate-limit
+probe recorded outlives a probe that went blind (ADR 0017). Undef forgets whatever is there.
+
+=cut
+
+sub source { return }
+
+# Forget what this probe reported, and nothing another source said.
+sub _forget_own {
+  my ($self) = @_;
+  my $source = $self->source;
+  return $self->skeid->forget_capacity($self->node_id, (defined $source ? (source => $source) : ()));
+}
+
 =method poll
 
   $probe->poll;
@@ -149,6 +167,15 @@ sub start {
 
   my $every = $self->poll_interval_seconds;
 
+  # A reading older than capacity_max_age_ms is dropped. A probe that polls less often than
+  # that leaves gaps in which inflight decides, and the operator should hear about it once.
+  my $max_age_ms = 0 + ($self->skeid->capacity_max_age_ms // 0);
+  if ($max_age_ms > 0 && $every * 1000 >= $max_age_ms) {
+    warn "capacity probe for '" . $self->node_id . "' polls every " . ($every * 1000)
+      . "ms (interval_ms x workers), not below capacity_max_age_ms ($max_age_ms): its reading "
+      . "expires between polls and inflight decides in the gaps\n";
+  }
+
   # Weak, or the timer's closure keeps the probe (and the whole control plane) alive forever.
   my $weak = $self;
   weaken($weak);
@@ -161,12 +188,12 @@ sub start {
       my $err = $@ || 'unknown error';
       $err =~ s/\s+\z//;
       warn "capacity probe for '" . $probe->node_id . "' failed: $err";
-      $probe->skeid->forget_capacity($probe->node_id);
+      $probe->_forget_own;
     };
   });
   $self->_timer($id);
 
-  eval { $self->poll; 1 } or do { $self->skeid->forget_capacity($self->node_id) };
+  eval { $self->poll; 1 } or do { $self->_forget_own };
   return $id;
 }
 
@@ -185,7 +212,7 @@ sub stop {
     eval { Mojo::IOLoop->remove($id) };
     $self->_clear_timer;
   }
-  $self->skeid->forget_capacity($self->node_id);
+  $self->_forget_own;
   return 1;
 }
 

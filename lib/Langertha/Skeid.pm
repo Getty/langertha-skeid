@@ -562,7 +562,9 @@ off; ADR 0017). Set by the config's C<registry> block:
 
 The fronting tier reads the snapshot with L<Langertha::Skeid::CapacityProbe::Registry>. The
 secret is taken from the environment only and kept in memory (ADR 0003); an enabled registry
-whose variable is empty does not load, because a snapshot is never published unsigned.
+whose variable is empty or shorter than 32 bytes does not load, because a snapshot is never
+published unsigned or weakly signed. Neither does one without an admin API key: the snapshot is
+served on an admin route.
 C<registry_secret>, C<registry_ttl_s>, C<registry_instance_id> and C<registry_error_window_s>
 hold the other fields.
 
@@ -681,8 +683,12 @@ sub remove_node {
   my @keep = grep { ($_->{id} // '') ne $id } @{$self->nodes};
   my $removed = @{$self->nodes} - @keep;
   $self->nodes(\@keep);
-  # Or a node re-added under the same id inherits a reading about a different machine.
-  $self->forget_capacity($id) if $removed;
+  # Or a node re-added under the same id inherits a reading -- or an error history -- about a
+  # different machine.
+  if ($removed) {
+    $self->forget_capacity($id);
+    delete $self->_failures->{$id};
+  }
   return $removed ? 1 : 0;
 }
 
@@ -1187,8 +1193,9 @@ sub _is_true {
 my %REGISTRY_KEYS = map { $_ => 1 } qw(enabled secret_env ttl_s instance_id error_window_s);
 
 # The registry section (ADR 0017). Absent means off, so removing the block disables publishing
-# on the next reload. Enabled without a usable secret is a load error: the route never answers
-# unsigned, and a config that asked for it should not load as if it had not.
+# on the next reload. Enabled without a usable secret (set, at least MIN_SECRET_BYTES) or
+# without an admin key is a load error: the route never answers unsigned, is unreadable without
+# the admin key, and a config that asked for it should not load as if it had not.
 sub _load_registry {
   my ($self, $cfg) = @_;
   my $section = $cfg->{registry};
@@ -1228,6 +1235,17 @@ sub _load_registry {
       croak "registry.secret_env names '$env', which is not set: snapshots are signed, never "
         . 'published unsigned'
         unless length $secret;
+      require Langertha::Skeid::Registry;
+      my $min = Langertha::Skeid::Registry->MIN_SECRET_BYTES;
+      croak "registry.secret_env names '$env', which holds fewer than $min bytes: use a random "
+        . "secret of at least $min bytes (e.g. openssl rand -hex 32)"
+        if length($secret) < $min;
+      # The fronting tier reads the snapshot with this Skeid's admin key. Without one every
+      # /skeid route is closed, and a registry nobody can read is a config mistake, not a
+      # choice -- say so at load instead of answering 403 forever.
+      croak 'registry.enabled needs an admin API key (admin.api_key or admin.api_key_env): '
+        . 'the snapshot is served on an admin route'
+        unless length($self->admin_api_key // '');
     }
   }
 
@@ -2372,18 +2390,35 @@ something it cannot turn into a ceiling, so it does not constrain admission.
 moment after which it is dropped even inside L</capacity_max_age_ms>. The registry probe uses
 both: a snapshot is as old as its C<generated_at>, and never outlives its own C<ttl>.
 
+=item * C<interval_ms> — how often this source reports, for a probe on a timer. It sets how long
+a tighter reading from another source can hold this one off (below). A passive observation
+(a response's rate-limit headers) passes none.
+
 =back
 
 A reading only ever narrows what C<max_conns> already allows, and expires after
 L</capacity_max_age_ms>. Probing is a background activity: calling this from a request handler
 is a bug unless the reading was a by-product of a response already in hand.
 
-B<The tighter reading wins across sources> (ADR 0017). A reading from a different source than
-the current one replaces it only when it is at least as tight -- a pending backoff is tightest,
-then C<used/limit>, then a reading without a limit. A source always replaces its own last
-reading. So a registry snapshot saying "empty" cannot lift a C<429> backoff a response just
-recorded, and the looser of two disagreeing probes never decides. Returns the reading in force
-afterwards.
+B<The tighter reading wins across sources, while it is current> (ADR 0017). A source always
+replaces its own last reading. A reading from a different source is held off by the current one
+only when the current one is tighter (a pending backoff is tightest, then C<used/limit>, then a
+reading without a limit) B<and> either
+
+=over 4
+
+=item * it carries a pending backoff, or
+
+=item * it is younger than the incoming source's C<interval_ms> -- the incoming probe has not
+had a full poll since the tighter reading was taken.
+
+=back
+
+Otherwise the incoming reading replaces it. So a registry snapshot saying "empty" cannot lift a
+C<429> backoff a response just recorded, two disagreeing probes on a timer leave the tighter
+one deciding, and a passive reading that is never refreshed (C<remaining: 0> with no reset,
+from the last response before traffic stopped) cannot keep a fresh probe out: it holds for at
+most one poll of the probe. Returns the reading in force afterwards.
 
 =cut
 
@@ -2409,12 +2444,20 @@ sub set_capacity_reading {
     $entry->{retry_after} = 0 + $reading{retry_after};
   }
 
-  # Two sources disagreeing about one node: the tighter one decides until it expires. Taking
-  # the latest instead would let whichever probe polls last lift what the other just said.
+  # Two sources disagreeing about one node: the tighter one decides while it is current.
+  # Taking the latest instead would let whichever probe polls last lift what the other just
+  # said. But "tighter" alone lets a reading nobody refreshes -- a passive rate-limit reading
+  # from the last response before traffic stopped -- block a probe that says the node is empty,
+  # for as long as capacity_max_age_ms allows (forever with 0). So only a pending backoff, or a
+  # reading younger than the incoming source's own poll interval, holds the incoming one off.
   my $current = $self->capacity_reading($node_id);
   if ($current && $current->{source} ne $entry->{source}
       && _reading_tightness($current) > _reading_tightness($entry)) {
-    return $current;
+    my $backoff_pending = ($current->{retry_after} && time < $current->{retry_after}) ? 1 : 0;
+    my $hold_s = (defined($reading{interval_ms}) && $reading{interval_ms} > 0)
+      ? $reading{interval_ms} / 1000 : 0;
+    my $age = Time::HiRes::time() - ($current->{at} // 0);
+    return $current if $backoff_pending || $age < $hold_s;
   }
 
   $self->_capacity->{$node_id} = $entry;

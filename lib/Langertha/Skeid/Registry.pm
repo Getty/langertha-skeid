@@ -43,6 +43,16 @@ The snapshot schema this code writes and accepts: 1.
 
 sub SCHEMA_VERSION { 1 }
 
+=method MIN_SECRET_BYTES
+
+The shortest signing secret either side accepts: 32 bytes, the HMAC-SHA256 output size. A
+downstream with a shorter one fails its config load; a fronting probe with one reports
+C<missing_secret>.
+
+=cut
+
+sub MIN_SECRET_BYTES { 32 }
+
 my $JSON = JSON::MaybeXS->new(canonical => 1, utf8 => 1);
 
 =method encode

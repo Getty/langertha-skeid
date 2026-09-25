@@ -53,15 +53,16 @@ body with the secret from C<secret_env>;
 
 =back
 
-A missing C<admin_key_env> or C<secret_env> value forgets too. The probe forgets only its own
+A missing C<admin_key_env> or C<secret_env> value forgets too, and so does a secret shorter
+than 32 bytes (the downstream would refuse to publish with it). The probe forgets only its own
 reading, so a C<429> backoff recorded from a response survives a rejected snapshot. The
 reading is stamped with the snapshot's C<generated_at> and expires at C<generated_at + ttl>.
 
 How the snapshot becomes C<used> and C<limit> is
 L<Langertha::Skeid::Registry/reading_from_snapshot>. It is never added to this process's own
 C<inflight>; the node's C<max_conns> stays the guardrail and the reading can only narrow it
-(ADR 0009). Where another probe reads the same node, the tighter reading wins
-(L<Langertha::Skeid/set_capacity_reading>).
+(ADR 0009). Where another probe reads the same node, the tighter reading wins while it is
+current (L<Langertha::Skeid/set_capacity_reading>).
 
 Every change of state -- accepted, unreachable, bad signature, malformed, stale, from the
 future, replayed, missing secret -- is warned once, not on every poll.
@@ -177,6 +178,8 @@ sub _tags {
   return [ ref($tags) eq 'ARRAY' ? @$tags : split(/[,\s]+/, "$tags") ];
 }
 
+sub source { 'registry' }
+
 sub poll {
   my ($self) = @_;
   return if $self->_inflight_poll;
@@ -186,6 +189,11 @@ sub poll {
   my $admin  = defined($cfg->{admin_key_env}) ? ($ENV{$cfg->{admin_key_env}} // '') : '';
   unless (length($secret) && length($admin)) {
     return $self->_reject(missing_secret => 'admin_key_env or secret_env is not set');
+  }
+  # The downstream refuses to publish with a shorter secret, so no snapshot could verify.
+  if (length($secret) < Langertha::Skeid::Registry->MIN_SECRET_BYTES) {
+    return $self->_reject(missing_secret => 'secret_env is shorter than '
+      . Langertha::Skeid::Registry->MIN_SECRET_BYTES . ' bytes');
   }
 
   $self->_inflight_poll(1);
@@ -232,11 +240,12 @@ sub _consume {
   my $reading = Langertha::Skeid::Registry->reading_from_snapshot($snapshot, tags => $self->_tags);
   $self->skeid->set_capacity_reading(
     $self->node_id,
-    source     => 'registry',
-    used       => $reading->{used},
-    limit      => $reading->{limit},
-    at         => 0 + $generated_at,
-    expires_at => $generated_at + $ttl,
+    source      => $self->source,
+    used        => $reading->{used},
+    limit       => $reading->{limit},
+    at          => 0 + $generated_at,
+    expires_at  => $generated_at + $ttl,
+    interval_ms => $self->poll_interval_seconds * 1000,
   );
   $self->_enter('accepted');
   return;
@@ -246,7 +255,7 @@ sub _consume {
 # source recorded is still true whatever this snapshot was.
 sub _reject {
   my ($self, $state, $detail) = @_;
-  $self->skeid->forget_capacity($self->node_id, source => 'registry');
+  $self->_forget_own;
   $self->_enter($state, $detail);
   return;
 }

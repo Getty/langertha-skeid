@@ -756,11 +756,35 @@ Operator contract:
   `max_conns - inflight`, taking a node's own tighter probe reading into account. A pending
   backoff counts as no free slots. An unlimited node makes the downstream unbounded. No healthy
   node reads as full.
-- The snapshot is never added to the fronting tier's own `inflight`. When a `429` backoff and
-  a snapshot disagree, the tighter reading wins.
+- The snapshot is never added to the fronting tier's own `inflight`. When two sources disagree
+  about one node, the tighter reading wins while it is current: a pending `429` backoff always
+  holds, any other tighter reading only while it is younger than the other probe's poll
+  interval. A stale `remaining: 0` from the last response cannot keep a snapshot saying
+  "empty" out.
 - Errors in the snapshot are informational. They never change admission or health.
-- With `--workers N` on the downstream, a snapshot describes the worker that answered. The
-  fronting tier then under-admits rather than over-admits.
+- With `--workers N` on the downstream, a snapshot describes only the worker that answered:
+  its own `inflight` and its own share of `max_conns`. If that worker is emptier than the
+  others, the fronting tier sees room that is not there and can over-admit until the next
+  poll. The guardrail is on the downstream: each worker still admits only its own share, and
+  requests past it wait there and get `429` (ADR 0010).
+- Keep `interval_ms` (times the fronting tier's worker count) below `capacity_max_age_ms`
+  (default 5000) and below the downstream's `ttl_s`. Otherwise the reading expires between
+  polls and `inflight` decides in the gaps; the probe warns about the first at start.
+
+Security:
+
+- **Serve the snapshot route over TLS only** (a TLS-terminating proxy in front of the
+  downstream is fine). The fronting tier sends the downstream's admin API key on every poll.
+- That admin key is the whole admin API, not a read-only credential: whoever holds it can add
+  nodes with an arbitrary `url` and `api_key_env` / `api_key_ref`, and so make the downstream
+  send its provider keys to a host of their choosing. Treat the fronting tier's copy with the
+  same care as the downstream's own. A read-only registry credential is tracked as skeid #49.
+- `registry.enabled` needs an admin key (`admin.api_key` / `admin.api_key_env`) and a secret of
+  at least 32 bytes (`openssl rand -hex 32`); otherwise the config does not load.
+- **Rotating the secret**: there is one secret per pair, no overlap window. Both sides read it
+  from the environment at start, so rotate by restarting the downstream and the fronting tier
+  with the new value. Between the two restarts the fronting probe reports `bad_signature`,
+  forgets its reading and admission falls back to `inflight`, which is the safe direction.
 
 ## Saturation Behavior
 

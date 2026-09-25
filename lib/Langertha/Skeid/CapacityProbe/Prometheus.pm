@@ -88,6 +88,8 @@ sub url {
   return $base . $path;
 }
 
+sub source { 'prometheus' }
+
 sub poll {
   my ($self) = @_;
 
@@ -108,7 +110,7 @@ sub poll {
     unless ($status >= 200 && $status < 300) {
       # Unreachable means unknown, and unknown means inflight decides. Never keep the last
       # reading: it describes a node we can no longer see.
-      $self->skeid->forget_capacity($self->node_id);
+      $self->_forget_own;
       return;
     }
 
@@ -119,15 +121,16 @@ sub poll {
     if (!defined $running && !defined $waiting) {
       # The endpoint answered but said nothing we understand -- most likely the wrong metric
       # names for this engine. Same rule: report nothing.
-      $self->skeid->forget_capacity($self->node_id);
+      $self->_forget_own;
       return;
     }
 
     $self->skeid->set_capacity_reading(
       $self->node_id,
-      source => 'prometheus',
-      used   => (($running // 0) + ($waiting // 0)),
-      limit  => $self->_limit,
+      source      => $self->source,
+      used        => (($running // 0) + ($waiting // 0)),
+      limit       => $self->_limit,
+      interval_ms => $self->poll_interval_seconds * 1000,
     );
   });
   return;

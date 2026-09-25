@@ -4,6 +4,10 @@ use Test::More;
 use Test::Mojo;
 use File::Temp qw(tempfile);
 use Langertha::Skeid;
+
+# These probes use a ten-minute interval so the timer never fires during the test; the warning
+# about an interval longer than capacity_max_age_ms (ADR 0017) is expected here and only noise.
+$SIG{__WARN__} = sub { warn @_ unless $_[0] =~ /not below capacity_max_age_ms/ };
 use Langertha::Skeid::Proxy;
 
 # A config_loader is re-read from call_function, which every request passes through several
