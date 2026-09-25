@@ -105,7 +105,7 @@ What a probe reported — `used`, `limit`, an optional `retry_after`, when it wa
 which probe took it. Expires after `capacity_max_age_ms`, because a stale reading is worse than
 none. May only ever *narrow* what `max_conns` allows. When two sources report on one node, the
 tighter reading wins while it is current: while it carries a pending **Backoff**, or is younger
-than the other source's poll interval (ADR 0017).
+than the longer of the two sources' poll intervals (ADR 0017).
 _Avoid_: metrics (that word means the usage/ops counters), load average.
 
 **Backoff** (`retry_after`):

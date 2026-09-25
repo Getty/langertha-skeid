@@ -17,10 +17,11 @@ Revision history for Langertha-Skeid
       which can add nodes: serve the route over TLS only
     - When two sources report capacity for one node, the tighter reading
       wins while it is current: while it carries a pending backoff, or
-      is younger than the other probe's poll interval. A stale
+      is younger than the longer of the two sources' poll intervals. A stale
       rate-limit reading from the last response no longer keeps a probe
       that reports the node empty out. A probe that fails or stops
-      forgets only its own reading, so a 429 backoff survives it
+      forgets only its own reading, so a 429 backoff survives it. A
+      config reload that drops a node drops its reading too
     - A capacity probe whose interval_ms (times the worker count) is not
       below capacity_max_age_ms warns at start
     - Errors on the Ollama routes (/api/chat, /api/generate, /api/tags,

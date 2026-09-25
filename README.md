@@ -758,8 +758,8 @@ Operator contract:
   node reads as full.
 - The snapshot is never added to the fronting tier's own `inflight`. When two sources disagree
   about one node, the tighter reading wins while it is current: a pending `429` backoff always
-  holds, any other tighter reading only while it is younger than the other probe's poll
-  interval. A stale `remaining: 0` from the last response cannot keep a snapshot saying
+  holds, any other tighter reading only while it is younger than the longer of the two
+  sources' poll intervals (a passive rate-limit reading has none). A stale `remaining: 0` from the last response cannot keep a snapshot saying
   "empty" out.
 - Errors in the snapshot are informational. They never change admission or health.
 - With `--workers N` on the downstream, a snapshot describes only the worker that answered:

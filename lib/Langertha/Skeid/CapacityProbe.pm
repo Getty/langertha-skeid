@@ -172,8 +172,8 @@ sub start {
   my $max_age_ms = 0 + ($self->skeid->capacity_max_age_ms // 0);
   if ($max_age_ms > 0 && $every * 1000 >= $max_age_ms) {
     warn "capacity probe for '" . $self->node_id . "' polls every " . ($every * 1000)
-      . "ms (interval_ms x workers), not below capacity_max_age_ms ($max_age_ms): its reading "
-      . "expires between polls and inflight decides in the gaps\n";
+      . "ms (interval_ms x workers); it must be below capacity_max_age_ms ($max_age_ms), or its "
+      . "reading expires between polls and inflight decides in the gaps\n";
   }
 
   # Weak, or the timer's closure keeps the probe (and the whole control plane) alive forever.

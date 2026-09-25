@@ -157,19 +157,21 @@ Rules the mapping follows:
   one only when the current one is tighter (a pending backoff above everything, else
   `used / limit`, else 0) **and** either
   - it carries a pending backoff, or
-  - it is younger than the incoming source's poll interval (`interval_ms` × workers, passed
-    with the reading). The incoming probe has not had a full poll since the tighter reading
-    was taken, so the two readings describe the same moment and the tighter one is the safer
-    one.
+  - it is younger than the longer of the two sources' poll intervals (`interval_ms` × workers,
+    passed with each reading and stored with it; a passive reading has none, 0). Within that
+    window neither source has had a full poll since the tighter reading was taken, so the two
+    describe the same moment and the tighter one is the safer view.
 
   Otherwise the incoming reading replaces it. A registry that says "empty" while a response
-  just said `429` loses. Two probes on timers that disagree leave the tighter one deciding,
-  because each refreshes within the other's interval. But a passive reading that nobody
-  refreshes -- `remaining: 0` from the last response before traffic stopped, no reset header --
-  holds a probe off for at most one of its polls. "Tighter" alone let it block the node until
+  just said `429` loses. A fresh, tight probe reading is not lifted by a roomy response that
+  arrives right after it, nor by a faster, looser probe before the slow one has polled again:
+  the window is the longer interval, not the incoming one's. Two probes on timers that
+  disagree leave the tighter one deciding, because each refreshes within the longer interval.
+  But a passive reading that nobody refreshes -- `remaining: 0` from the last response before
+  traffic stopped, no reset header -- holds a probe off for at most one of that probe's polls. "Tighter" alone let it block the node until
   `capacity_max_age_ms`, and forever with `capacity_max_age_ms: 0`; that was a review finding
-  on the first implementation. A passive reading passes no interval, so it replaces a tighter
-  probe reading that has no backoff: a response is itself a fresh observation.
+  on the first implementation. Two passive readings never hold each
+  other off: with no interval on either side the window is 0.
 - A state change of the probe is logged once, not every poll. The states are: accepted, bad
   signature, stale, replayed, unreachable, missing secret.
 

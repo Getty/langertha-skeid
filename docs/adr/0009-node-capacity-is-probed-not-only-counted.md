@@ -122,6 +122,7 @@ reading should influence weighting as well as admission.
 
 ADR 0017 amends "As implemented" above for every probe. When two sources report on one node,
 the latest reading no longer simply wins: the tighter one decides while it is current, meaning
-while it carries a pending backoff or is younger than the other source's poll interval. A
+while it carries a pending backoff or is younger than the longer of the two sources' poll
+intervals. A
 probe that fails or stops forgets only its own reading, so a `429` backoff recorded from a
 response outlives it. See ADR 0017, "Staleness and combining with other readings".

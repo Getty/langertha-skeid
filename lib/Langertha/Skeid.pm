@@ -864,6 +864,7 @@ sub reload_config {
 
   my $nodes_print;
   if (eval { $nodes_print = $self->_apply_config($cfg); 1 }) {
+    $self->_forget_departed_nodes;
     $self->_config_fingerprint($fingerprint);
     $self->_nodes_fingerprint($nodes_print);
     $self->_clear_reload_failure;
@@ -888,6 +889,19 @@ sub reload_config {
     $self->_probe_key_cache($probe_key_cache);
   }
   die $err;
+}
+
+# A reload that drops a node drops what was known about it too, as remove_node does: its
+# capacity reading and its failure history. Otherwise a node re-added later under the same id
+# inherits a reading -- or errors -- about whatever machine the id used to point at. Run only
+# after a reload succeeded, so a failed one that restores the old list loses nothing.
+sub _forget_departed_nodes {
+  my ($self) = @_;
+  my %present = map { (($_->{id} // '') => 1) } @{$self->nodes};
+  for my $store ($self->_capacity, $self->_failures) {
+    delete $store->{$_} for grep { !$present{$_} } keys %$store;
+  }
+  return;
 }
 
 sub _record_reload_failure {
@@ -2390,9 +2404,9 @@ something it cannot turn into a ceiling, so it does not constrain admission.
 moment after which it is dropped even inside L</capacity_max_age_ms>. The registry probe uses
 both: a snapshot is as old as its C<generated_at>, and never outlives its own C<ttl>.
 
-=item * C<interval_ms> — how often this source reports, for a probe on a timer. It sets how long
-a tighter reading from another source can hold this one off (below). A passive observation
-(a response's rate-limit headers) passes none.
+=item * C<interval_ms> — how often this source reports, for a probe on a timer. Stored with the
+reading; it sets how long a tighter reading can hold a looser one from another source off
+(below). A passive observation (a response's rate-limit headers) passes none.
 
 =back
 
@@ -2409,16 +2423,17 @@ reading without a limit) B<and> either
 
 =item * it carries a pending backoff, or
 
-=item * it is younger than the incoming source's C<interval_ms> -- the incoming probe has not
-had a full poll since the tighter reading was taken.
+=item * it is younger than the longer of the two sources' C<interval_ms> -- neither has had a
+full poll since the tighter reading was taken.
 
 =back
 
 Otherwise the incoming reading replaces it. So a registry snapshot saying "empty" cannot lift a
-C<429> backoff a response just recorded, two disagreeing probes on a timer leave the tighter
-one deciding, and a passive reading that is never refreshed (C<remaining: 0> with no reset,
-from the last response before traffic stopped) cannot keep a fresh probe out: it holds for at
-most one poll of the probe. Returns the reading in force afterwards.
+C<429> backoff a response just recorded; a fresh, tight probe reading is not lifted by a roomy
+response or by a faster, looser probe before its own next poll; and a passive reading that is
+never refreshed (C<remaining: 0> with no reset, from the last response before traffic stopped)
+cannot keep a fresh probe out for longer than one of that probe's polls. Returns the reading in
+force afterwards.
 
 =cut
 
@@ -2436,6 +2451,9 @@ sub set_capacity_reading {
     # For reports only -- admission just sees used and limit.
     (defined $reading{quota} ? (quota => "$reading{quota}") : ()),
     (defined $reading{expires_at} ? (expires_at => 0 + $reading{expires_at}) : ()),
+    # How often this source reports; it sets how long this reading holds a looser one off.
+    ((defined($reading{interval_ms}) && $reading{interval_ms} > 0)
+      ? (interval_ms => 0 + $reading{interval_ms}) : ()),
   };
 
   if (defined $reading{retry_after_ms} && $reading{retry_after_ms} > 0) {
@@ -2449,13 +2467,15 @@ sub set_capacity_reading {
   # said. But "tighter" alone lets a reading nobody refreshes -- a passive rate-limit reading
   # from the last response before traffic stopped -- block a probe that says the node is empty,
   # for as long as capacity_max_age_ms allows (forever with 0). So only a pending backoff, or a
-  # reading younger than the incoming source's own poll interval, holds the incoming one off.
+  # reading younger than the longer of the two sources' poll intervals, holds the incoming one
+  # off: within that window neither source has had a full poll since, and the tighter one is
+  # the safer view of the same moment. Two passive readings (no interval) never hold.
   my $current = $self->capacity_reading($node_id);
   if ($current && $current->{source} ne $entry->{source}
       && _reading_tightness($current) > _reading_tightness($entry)) {
     my $backoff_pending = ($current->{retry_after} && time < $current->{retry_after}) ? 1 : 0;
-    my $hold_s = (defined($reading{interval_ms}) && $reading{interval_ms} > 0)
-      ? $reading{interval_ms} / 1000 : 0;
+    my ($cur_ms, $new_ms) = (($current->{interval_ms} // 0), ($entry->{interval_ms} // 0));
+    my $hold_s = ($cur_ms > $new_ms ? $cur_ms : $new_ms) / 1000;
     my $age = Time::HiRes::time() - ($current->{at} // 0);
     return $current if $backoff_pending || $age < $hold_s;
   }

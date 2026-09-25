@@ -278,6 +278,25 @@ sub downstream_config {
     'a fresh probe reading replaces a stale passive one with no backoff pending';
   ok $skeid->_capacity_allows('n'), 'and the node is admissible again';
 
+  # The hold window is the longer of the two sources' intervals, not only the incoming one's.
+  # A roomy response right after a fresh, tight probe reading does not lift it...
+  $skeid->forget_capacity('n');
+  $skeid->set_capacity_reading('n', source => 'registry', used => 10, limit => 10, interval_ms => 5000);
+  $skeid->observe_response_headers('n',
+    { 'x-ratelimit-remaining-requests' => 90, 'x-ratelimit-limit-requests' => 100 });
+  is_deeply [@{$skeid->capacity_reading('n')}{qw(source used)}], ['registry', 10],
+    'a passive reading does not replace a fresh, tighter probe reading inside that probe\'s interval';
+  # ...and neither does a faster, looser probe before the slow one has polled again.
+  $skeid->set_capacity_reading('n', source => 'prometheus', used => 0, limit => 10, interval_ms => 500);
+  $skeid->_capacity->{n}{at} = Time::HiRes::time() - 0.6;
+  $skeid->set_capacity_reading('n', source => 'prometheus', used => 0, limit => 10, interval_ms => 500);
+  is $skeid->capacity_reading('n')->{source}, 'registry',
+    'a fast, looser probe does not replace a slow, tighter one after only its own interval';
+  $skeid->_capacity->{n}{at} = Time::HiRes::time() - 6;
+  $skeid->set_capacity_reading('n', source => 'prometheus', used => 0, limit => 10, interval_ms => 500);
+  is $skeid->capacity_reading('n')->{source}, 'prometheus',
+    'once the slow probe\'s own interval has passed, the fresh looser reading replaces it';
+
   # A backoff is different: it is a statement about the future, and it still holds.
   $skeid->observe_response_headers('n', { 'retry-after' => 30 }, status => 429);
   $skeid->set_capacity_reading('n', source => 'prometheus', used => 0, limit => 10, interval_ms => 2000);
@@ -329,7 +348,7 @@ sub downstream_config {
     interval_ms => 2000, config => {});
   $slow->start;
   $slow->stop;
-  is scalar(grep { /not below capacity_max_age_ms/ } @warnings), 1,
+  is scalar(grep { /must be below capacity_max_age_ms/ } @warnings), 1,
     'an interval at or above capacity_max_age_ms warns at start';
   @warnings = ();
   my $fast = Langertha::Skeid::CapacityProbe::Registry->new(skeid => $skeid, node_id => 'n',
@@ -337,6 +356,25 @@ sub downstream_config {
   $fast->start;
   $fast->stop;
   is scalar(grep { /capacity_max_age_ms/ } @warnings), 0, 'a shorter interval does not';
+}
+
+# --- a reload that drops a node drops its reading and error history (re-review) ---
+{
+  my $cfg = { nodes => [
+    { id => 'keep', url => 'http://keep/v1', model => 'm', max_conns => 4 },
+    { id => 'gone', url => 'http://gone/v1', model => 'm', max_conns => 4 },
+  ] };
+  my $skeid = Langertha::Skeid->new(config_loader => sub { $cfg });
+  for my $id (qw(keep gone)) {
+    $skeid->set_capacity_reading($id, source => 'custom', used => 1, limit => 4);
+    $skeid->start_request($id);
+    $skeid->finish_request($id, ok => 0);
+  }
+  $cfg = { nodes => [ { id => 'keep', url => 'http://keep/v1', model => 'm', max_conns => 4 } ] };
+  $skeid->reload_config;
+  ok !exists $skeid->_capacity->{gone}, 'the dropped node\'s reading is gone';
+  ok !exists $skeid->_failures->{gone}, 'and so is its failure history';
+  ok $skeid->capacity_reading('keep') && $skeid->_failures->{keep}, 'a node that stays keeps both';
 }
 
 # --- removing a node drops its error history with its reading (review M5) ---

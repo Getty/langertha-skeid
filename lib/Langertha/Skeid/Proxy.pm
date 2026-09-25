@@ -75,7 +75,8 @@ sub build_app {
   # A config reload replaces the whole inventory, so probes have to follow it or they keep
   # polling for nodes that are gone and never start for new ones. They follow the probe key,
   # not the inventory generation: a health flip moves the generation but not what a probe
-  # polls, and a restart forgets every reading (skeid #40). The key is recomputed only when the
+  # polls, and a restart makes every probe forget its own reading (skeid #40) -- readings from
+  # other sources, such as a rate-limit backoff, survive it. The key is recomputed only when the
   # generation has moved, so an unchanged inventory costs an integer compare per request.
   $app->hook(before_dispatch => sub {
     my $key = $skeid->_probe_inventory_key;
