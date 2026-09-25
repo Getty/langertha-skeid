@@ -2,6 +2,9 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Non-ASCII text in tool_use input and structured tool_result content
+      reaches the upstream intact on /v1/messages instead of double-encoded into
+      mojibake
     - A streamed text block now opens with data type content_block_start,
       as Anthropic specifies, so Anthropic SDKs that dispatch on the data
       type see the text block begin

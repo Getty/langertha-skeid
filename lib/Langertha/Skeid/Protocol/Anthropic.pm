@@ -92,7 +92,7 @@ sub request_to_openai {
         if ($type eq 'tool_use') {
           my $id = $block->{id} // ('toolu_' . int(rand(1_000_000)));
           my $name = $block->{name} // 'tool';
-          my $args = Langertha::Skeid::Protocol::encode_json_safe($block->{input} || {});
+          my $args = Langertha::Skeid::Protocol::encode_json_text_safe($block->{input} || {});
           push @tool_calls, {
             id => $id,
             type => 'function',
@@ -107,7 +107,7 @@ sub request_to_openai {
         if ($type eq 'tool_result') {
           my $tcid = $block->{tool_use_id} // $block->{id} // '';
           my $val = $block->{content};
-          my $txt = ref($val) ? Langertha::Skeid::Protocol::encode_json_safe($val) : (defined($val) ? "$val" : '');
+          my $txt = ref($val) ? Langertha::Skeid::Protocol::encode_json_text_safe($val) : (defined($val) ? "$val" : '');
           push @messages, {
             role => 'tool',
             tool_call_id => $tcid,
