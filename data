@@ -1,0 +1,22 @@
+---
+claimed_at: 2026-09-25T07:24:05Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T07:24:05Z
+created: 2026-09-25T07:19:12Z
+id: 31
+priority: medium
+started: 2026-09-25T07:24:05Z
+status: done
+tags:
+- protocol
+- anthropic
+- streaming
+title: Anthropic face maps upstream finish_reason stop to end_turn even when the reply
+  carries tool calls (gpt-oss quirk)
+updated: 2026-09-25T07:24:05Z
+---
+
+From core k248: some OpenAI-compatible servers (AKI gpt-oss-120b non-streaming, likely vLLM gpt-oss) return finish_reason 'stop' next to tool_calls. skeid reads raw upstream JSON (Protocol/Anthropic.pm:204, Anthropic/Stream.pm:146), so core's k248 normalization doesn't reach it: the Anthropic face sends stop_reason end_turn with tool_use blocks. Apply the same rule: tool calls present wins -> stop_reason tool_use. Fixture: core t/data/akiopenai_gptoss_tool_call_response.json.
+
+2026-09-25 07:23 Fixed on branch k31-stop-reason, commit 5c75c14: tool calls present + finish stop (or missing) -> tool_use, JSON and stream paths; length/tool_calls/other unchanged. t/40 replays core captures.
