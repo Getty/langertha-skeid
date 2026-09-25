@@ -95,4 +95,34 @@ sub decode_json_safe {
   return $@ ? undef : $decoded;
 }
 
+=method openai_manifest_endpoint
+
+  my $spec = Langertha::Skeid::Protocol->openai_manifest_endpoint;
+  # { dialect => 'openai-chat', path => '/v1', capabilities => [ ... ] }
+
+How the OpenAI face (C</v1/chat/completions>) appears in the provider manifest (skeid #29).
+That face is the upstream call shape itself: its body goes to the node untranslated, apart from
+the model name, so it carries every OpenAI-chat request field a model entry may claim.
+C<capabilities> is the list of those flags; a model is published on this face with the
+capabilities declared for it, cut down to this list. The translated faces carry their own
+spec (L<Langertha::Skeid::Protocol::Anthropic/manifest_endpoint>,
+L<Langertha::Skeid::Protocol::Ollama/manifest_endpoint>).
+
+=cut
+
+sub openai_manifest_endpoint {
+  return {
+    dialect      => 'openai-chat',
+    path         => '/v1',
+    capabilities => [qw(
+      chat streaming system_prompt
+      tools_native tools_hermes
+      tool_choice_auto tool_choice_any tool_choice_none tool_choice_named
+      parallel_tool_use
+      response_format_json_object response_format_json_schema
+      reasoning_effort temperature seed response_size prompt_cache_key
+    )],
+  };
+}
+
 1;

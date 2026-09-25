@@ -10,6 +10,9 @@ use Digest::SHA qw(sha1_hex);
 use YAML::PP;
 use Langertha ();
 use Langertha::Skeid::UsageStore;
+use Langertha::Skeid::Protocol;
+use Langertha::Skeid::Protocol::Anthropic;
+use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Usage;
 use Langertha::Cost;
 use Langertha::Pricing;
@@ -177,6 +180,9 @@ config turns it on, and a key without a C<manifest:> entry gets C<403>, never th
     faces: [openai, anthropic, ollama]    # default: all three
     capabilities:                         # optional claims per model; default chat + streaming
       house-model: { tools_native: true, tool_choice_auto: true }
+  names:                                  # ids from `skeid keyid <key>` -- never the key
+    alice: k_5f0e1a2b3c4d
+    bob:   k_9c8b7a6f5e4d
   keys:
     alice:
       policy: burstable
@@ -189,15 +195,21 @@ C<Authorization: Bearer> / C<x-api-key> scheme every face already takes): C<open
 (C<openai-chat>, C<public_url/v1>), C<anthropic> (C<anthropic-compat> at C<public_url> --
 Skeid translates C</v1/messages> to the OpenAI upstream call and does not carry
 C<output_config.format>, so structured output takes the synthetic-tool path) and C<ollama>
-(C<public_url>). Every listed model appears on every published face with the same
-capabilities, which default to C<chat> and C<streaming> and may only name flags from
-L<Langertha::Manifest::Builder/model_capabilities>.
+(C<public_url>). Every listed model appears on every published face. Its capabilities default
+to C<chat> and C<streaming>, take the claims declared for it (only flags from
+L<Langertha::Manifest::Builder/model_capabilities>), and are then cut per face to what that
+face's translator carries upstream -- a claim holds at that endpoint or is not made there. The
+lists are L<Langertha::Skeid::Protocol/openai_manifest_endpoint>,
+L<Langertha::Skeid::Protocol::Anthropic/manifest_endpoint> and
+L<Langertha::Skeid::Protocol::Ollama/manifest_endpoint>.
 
 Resolved at config load, like the routing policy: each key's manifest is built and validated
 once and stored under the key id, so a request costs one hash lookup and one key's manifest
 cannot be served for another. The load croaks on a model the key's routing policy does not
-let it reach (not granted, or served only by nodes it is denied), on an unknown capability
-or face, and on an enabled manifest without C<public_url>.
+let it reach (not granted, or served only by nodes it is denied), on an unknown capability,
+one no face carries, an unknown face, and an enabled manifest without C<public_url>. A config
+that fails to load keeps the previous one in force, manifests included. The route never
+reloads the config itself; the request paths that already do pick up a change.
 Without a key the route answers C<401>. Needs a Langertha with L<Langertha::Manifest>; on an
 older one the route answers C<404>. See ADR 0015 in the distribution repository.
 
@@ -619,7 +631,46 @@ sub pricing_for_model {
     || { input_per_million => 0, output_per_million => 0 };
 }
 
+# The config state a reload replaces. A reload is all or nothing (skeid #29 review): a
+# config that fails anywhere -- a bad policy, alias or manifest grant -- must not leave the
+# sections before it applied and the ones after it not, which served every customer a 403
+# from an emptied manifest map while routing already ran on the new policies.
+my @CONFIG_STATE = qw(
+  model_aliases policies default_policy key_policies key_names nodes
+  route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count admin_api_key
+  manifest_enabled manifest_available key_manifests
+);
+
 sub reload_config {
+  my ($self) = @_;
+  my %before = map { $_ => $self->$_ } @CONFIG_STATE;
+  my %pricing = %{$self->model_pricing || {}};
+  my ($generation, $route_cache) = ($self->_inventory_generation, $self->_route_cache);
+
+  my $cfg = eval { $self->_apply_config };
+  return $cfg if $cfg;
+
+  my $err = $@ || 'config reload failed';
+  for my $attr (@CONFIG_STATE) {
+    next if $attr eq 'nodes';
+    $self->$attr($before{$attr});
+  }
+  $self->model_pricing(\%pricing);
+  # Setting nodes bumps the inventory generation, which restarts the capacity probes. The old
+  # list comes back unchanged (the failed load only built a new array), so its generation and
+  # the route cache derived from it come back with it: an inventory that did not change must
+  # not look changed.
+  if ($self->nodes != $before{nodes}) {
+    $self->nodes($before{nodes});
+    $self->_inventory_generation($generation);
+    $self->_route_cache($route_cache);
+  }
+  die $err;
+}
+
+# Applies a config to $self, section by section; reload_config undoes it on a croak. The usage
+# store goes last and swaps only once the new store is prepared, so nothing after it can fail.
+sub _apply_config {
   my ($self) = @_;
   my $cfg = {};
 
@@ -748,14 +799,13 @@ sub maybe_reload_config {
   return 0;
 }
 
-# The client-facing faces Skeid serves, as manifest endpoints: dialect and the path under
-# public_url a client adapter of that dialect takes as its base URL. The Anthropic face is
-# anthropic-compat, not anthropic: it is translated to the OpenAI upstream call and does not
-# carry output_config.format, which is exactly the /anthropic-shim contract of core ADR 0029.
+# The client-facing faces Skeid serves, as manifest endpoints. Each face's spec -- dialect,
+# path under public_url, and the capability flags its translator actually carries upstream --
+# lives with that face's translator (ADR 0001: format-specific facts stay in the translator).
 my %MANIFEST_FACES = (
-  openai    => { dialect => 'openai-chat',      path => '/v1' },
-  anthropic => { dialect => 'anthropic-compat', path => '' },
-  ollama    => { dialect => 'ollama',           path => '' },
+  openai    => sub { Langertha::Skeid::Protocol->openai_manifest_endpoint },
+  anthropic => sub { Langertha::Skeid::Protocol::Anthropic->manifest_endpoint },
+  ollama    => sub { Langertha::Skeid::Protocol::Ollama->manifest_endpoint },
 );
 my @MANIFEST_FACE_ORDER = qw(openai anthropic ollama);
 my $manifest_unavailable_warned;
@@ -768,11 +818,17 @@ sub _is_true {
 # Resolves the manifest section and every key's manifest: grant once, at config load (ADR
 # 0015). Nothing is published that a keys: entry does not list, and what is listed has to be
 # something that key's routing policy lets it reach -- a contradiction is a load error, not a
-# manifest that promises a model the request path then refuses with 403.
+# manifest that promises a model the request path then refuses with 403. Everything is built
+# into lexicals and set together at the end; reload_config restores the old state on a croak.
 sub _load_manifest {
   my ($self, $cfg) = @_;
-  $self->manifest_enabled(0);
-  $self->key_manifests({});
+  my ($enabled, $available, %manifests) = (0, 0);
+  my $commit = sub {
+    $self->manifest_enabled($enabled);
+    $self->manifest_available($available);
+    $self->key_manifests({%manifests});
+    return 1;
+  };
 
   my %grants;
   if (ref($cfg->{keys}) eq 'HASH') {
@@ -794,9 +850,9 @@ sub _load_manifest {
   }
 
   my $section = $cfg->{manifest};
-  return 1 unless defined $section;
+  return $commit->() unless defined $section;
   croak 'manifest must be a hashref' unless ref($section) eq 'HASH';
-  return 1 unless _is_true($section->{enabled});
+  return $commit->() unless _is_true($section->{enabled});
 
   my $public_url = $section->{public_url};
   croak 'manifest.public_url is required when the manifest is enabled: the URL clients reach '
@@ -820,34 +876,36 @@ sub _load_manifest {
     @faces = grep { $want{$_} } @MANIFEST_FACE_ORDER;
     croak 'manifest.faces must name at least one face' unless @faces;
   }
+  my %spec = map { $_ => $MANIFEST_FACES{$_}->() } @MANIFEST_FACE_ORDER;
 
   my $declared = $section->{capabilities} // {};
   croak 'manifest.capabilities must map model names to capability hashes'
     unless ref($declared) eq 'HASH' && !grep { ref($_) ne 'HASH' } values %$declared;
 
-  $self->manifest_enabled(1);
+  $enabled = 1;
 
   # Core's manifest (Langertha::Manifest, ADR 0029) is newer than the released Langertha this
   # dist requires. Without it the route answers 404; the config is still loaded.
   unless (eval { require Langertha::Manifest::Builder; 1 }) {
-    $self->manifest_available(0);
     warn "skeid: manifest is enabled, but this Langertha has no Langertha::Manifest; "
       . "/.well-known/langertha.json answers 404\n"
       unless $manifest_unavailable_warned++;
-    return 1;
+    return $commit->();
   }
-  $self->manifest_available(1);
 
+  # A claim no face of Skeid carries could never be published; saying so beats dropping it.
   my %allowed = map { $_ => 1 } Langertha::Manifest::Builder->model_capabilities;
+  my %carried = map { $_ => 1 } map { @{$spec{$_}{capabilities}} } @MANIFEST_FACE_ORDER;
   for my $model (sort keys %$declared) {
     for my $flag (sort keys %{$declared->{$model}}) {
       croak "manifest.capabilities.$model: '$flag' is not a model capability a manifest may "
         . 'claim (see Langertha::Manifest::Builder->model_capabilities)'
         unless $allowed{$flag};
+      croak "manifest.capabilities.$model: '$flag' is not carried by any face Skeid serves"
+        unless $carried{$flag};
     }
   }
 
-  my %manifests;
   for my $id (sort keys %grants) {
     my $grant = $grants{$id};
     for my $model (@{$grant->{models}}) {
@@ -862,18 +920,23 @@ sub _load_manifest {
       );
       $builder->add_auth(id => 'api', type => 'api_key');
       for my $face (@faces) {
+        my $face_spec = $spec{$face};
+        my %face_carries = map { $_ => 1 } @{$face_spec->{capabilities}};
         $builder->add_endpoint(
           id       => $face,
-          dialect  => $MANIFEST_FACES{$face}{dialect},
-          base_url => $public_url . $MANIFEST_FACES{$face}{path},
+          dialect  => $face_spec->{dialect},
+          base_url => $public_url . $face_spec->{path},
           auth_ref => 'api',
         );
         for my $model (@{$grant->{models}}) {
+          # Declared claims over the chat + streaming default, then cut to what this face's
+          # translator carries: a claim holds "at that endpoint" (core ADR 0029) or not at all.
           my %caps = (chat => 1, streaming => 1);
           my $claims = $declared->{$model} || {};
           for my $flag (keys %$claims) {
             if (_is_true($claims->{$flag})) { $caps{$flag} = 1 } else { delete $caps{$flag} }
           }
+          delete $caps{$_} for grep { !$face_carries{$_} } keys %caps;
           $builder->add_model(id => $model, endpoint_ref => $face, capabilities => \%caps);
         }
       }
@@ -886,8 +949,8 @@ sub _load_manifest {
     $manifests{$id} = $json;
   }
 
-  $self->key_manifests(\%manifests);
-  return 1;
+  $available = 1;
+  return $commit->();
 }
 
 # Whether the key could be routed to the model at all: its policy grants the name, and some
@@ -953,11 +1016,13 @@ sub _configure_usage_store {
   # normalized form and would otherwise leave the store unbuilt.
   my $changed = $same ? 0 : 1;
   if ($changed || !$self->_usage_store_obj) {
+    # Prepare the new store before letting go of the old one: a store that fails to come up
+    # fails the reload with the old store still connected (reload_config is all or nothing).
+    my $store = Langertha::Skeid::UsageStore->for_config($normalized);
+    $store->prepare if $store;
     $self->_disconnect_usage_store;
     $self->usage_store($normalized);
-    $self->_usage_store_obj(Langertha::Skeid::UsageStore->for_config($normalized));
-    my $store = $self->_usage_store_obj;
-    $store->prepare if $store;
+    $self->_usage_store_obj($store);
   }
 
   if ($normalized->{backend} eq 'sqlite') {

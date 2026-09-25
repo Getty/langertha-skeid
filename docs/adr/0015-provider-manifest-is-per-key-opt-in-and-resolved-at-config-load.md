@@ -46,8 +46,14 @@ keys:
   `Langertha::Manifest::Builder` and validated by core's value objects once. It is stored as
   canonical JSON under the key id its key derives to. This map is the cache, and it can only
   answer for the id of the key the caller actually presented. A reload rebuilds it
-  wholesale. The HTTP answers are `Cache-Control: private` and vary on every
-  identity-carrying header, so a shared cache in front of Skeid cannot mix them up either.
+  wholesale, and all or nothing: a config that fails anywhere, the manifest check included,
+  leaves the previous config in force, manifests and node inventory alike.
+- **The route never reloads the config.** Like `/v1/models`, it serves what the last load
+  resolved. A public route must not be a way to run the config loader, which also restarts
+  the node probes, on every anonymous GET.
+- The HTTP answers are `Cache-Control: private, no-store` and vary on every
+  identity-carrying header, so no cache in front of Skeid can mix them up either. 401 and 403
+  answers are included.
 - **Unauthenticated: 401, not a minimal manifest.** ADR 0029 would allow a manifest with
   endpoints and auth but no models. That manifest would still publish Skeid's faces and
   public URL to anyone, and the ticket's rule is "only what is explicitly enabled". A key
@@ -62,17 +68,26 @@ keys:
   - `ollama`: `ollama` at the root.
 
   Capabilities default to `chat` + `streaming`, which every face supports. Other claims are
-  the operator's and are limited to the Builder's model-capability allowlist. Never
-  published: node URLs, node ids, upstream key references, internal hosts, customer keys.
+  the operator's and are limited to the Builder's model-capability allowlist. They are then
+  **cut per face** to what that face's translator carries upstream. A claim holds "at that
+  endpoint" (ADR 0029) or is not made there. Each face's list lives with its translator
+  (`manifest_endpoint`, as in knarr k14), per ADR 0001:
+  - the OpenAI face passes the body through, so it carries every openai-chat flag;
+  - `/v1/messages` drops `output_config`, `thinking`, `cache_control` and
+    `disable_parallel_tool_use`;
+  - `/api/chat` drops `format` and `options.seed`, and its dialect has no `tool_choice`.
+
+  A claim that no face carries fails the load. Never published: node URLs, node ids,
+  upstream key references, internal hosts, customer keys.
 
 ## Consequences
 
 - The manifest stays a claim, not a probe (raider ADR 0007): it lists what a key may ask for,
   not what is healthy right now. Nodes added later through the admin API do not change it
   until the next config load.
-- A declared capability applies to the model on every published face. The faces translate
-  tools and tool choice alike, so this holds today. A face-specific gap would need a per-face
-  claim, which v1 does not have.
+- A translator that starts carrying a field (say `output_config.format` on `/v1/messages`)
+  has to add the flag to its `manifest_endpoint`, or the manifest under-claims it.
+  `t/46-provider-manifest.t` pins each face's published set.
 - Core's manifest is newer than the released Langertha (0.503) the cpanfile pins. The code is
   runtime-gated (`eval require`), and the route answers 404 until core ships it; the cpanfile
   pin moves with that release.

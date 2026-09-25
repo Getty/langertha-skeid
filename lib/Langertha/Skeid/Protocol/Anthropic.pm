@@ -292,4 +292,34 @@ sub error_body {
   };
 }
 
+=method manifest_endpoint
+
+  my $spec = Langertha::Skeid::Protocol::Anthropic->manifest_endpoint;
+
+How this face appears in the provider manifest (skeid #29): C<anthropic-compat> at the public
+root, and the capability flags L</request_to_openai> actually carries to the upstream --
+C<system>, function C<tools>, C<tool_choice> (auto, any, none, a named tool), C<max_tokens>,
+C<temperature> and C<stream>. A model is published here only with the capabilities declared
+for it that are in this list.
+
+It is C<anthropic-compat>, not C<anthropic>: C<output_config.format> is not translated, so a
+client takes the synthetic-tool path for structured output, which is what that dialect tells
+it. Not carried, so never claimed: structured output, C<thinking> (reasoning),
+C<cache_control> (prompt cache), and C<disable_parallel_tool_use>.
+
+=cut
+
+sub manifest_endpoint {
+  return {
+    dialect      => 'anthropic-compat',
+    path         => '',
+    capabilities => [qw(
+      chat streaming system_prompt
+      tools_native tools_hermes
+      tool_choice_auto tool_choice_any tool_choice_none tool_choice_named
+      temperature response_size
+    )],
+  };
+}
+
 1;

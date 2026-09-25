@@ -232,18 +232,19 @@ sub _authorize_admin {
   return 1;
 }
 
-# What a key is shown depends on who presents it, so no shared cache may hand one key's answer
-# to another: every answer -- 404/401/403 included -- is private and varies on each header that
-# can carry the identity. 404 when nothing is published (disabled, or a Langertha without
+# What a key is shown depends on who presents it, so no cache may hand one key's answer to
+# another: every answer -- 404/401/403 included -- is private, not stored, and varies on each
+# header that can carry the identity. It does not reload the config: a public route anybody can
+# hit must not be a way to rerun the loader (and restart the node probes) per anonymous GET;
+# like /v1/models it serves what the last load resolved. 404 when nothing is published (disabled, or a Langertha without
 # Langertha::Manifest), 401 without a key (ADR 0015: no anonymous manifest, not even a minimal
 # one), 403 for a key without a manifest: grant, else the manifest built for that key id.
 sub _handle_manifest {
   my ($c) = @_;
   my $skeid = $c->skeid;
-  $skeid->maybe_reload_config;
 
   my $headers = $c->res->headers;
-  $headers->header('Cache-Control' => 'private, no-cache');
+  $headers->header('Cache-Control' => 'private, no-store');
   $headers->header(Vary => 'Authorization, X-Api-Key, X-Skeid-Key-Id, X-Api-Key-Id');
 
   unless ($skeid->manifest_enabled && $skeid->manifest_available) {

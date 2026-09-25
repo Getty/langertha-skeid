@@ -190,4 +190,32 @@ sub tags_from_nodes {
   return { models => \@models };
 }
 
+=method manifest_endpoint
+
+  my $spec = Langertha::Skeid::Protocol::Ollama->manifest_endpoint;
+
+How this face appears in the provider manifest (skeid #29): C<ollama> at the public root, and
+the capability flags L</request_to_openai> actually carries to the upstream -- messages
+(a C<system> message included), C<tools>, C<options.temperature>, C<options.num_predict>
+(response size) and C<stream>. A model is published here only with the capabilities declared
+for it that are in this list.
+
+Not carried, so never claimed: C<format> (structured output), C<options.seed> and C<think>.
+C<tool_choice> is passed through when a client sends one, but the Ollama dialect has no such
+field, so no C<tool_choice_*> flag is claimed.
+
+=cut
+
+sub manifest_endpoint {
+  return {
+    dialect      => 'ollama',
+    path         => '',
+    capabilities => [qw(
+      chat streaming system_prompt
+      tools_native tools_hermes
+      temperature response_size
+    )],
+  };
+}
+
 1;

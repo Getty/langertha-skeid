@@ -86,10 +86,14 @@ unless ($HAS_MANIFEST) {
 
   $t->get_ok('/.well-known/langertha.json')
     ->status_is(401, 'no key, no manifest -- not even a minimal one')
-    ->header_like('WWW-Authenticate' => qr/Bearer/);
+    ->header_like('WWW-Authenticate' => qr/Bearer/)
+    ->header_is('Cache-Control' => 'private, no-store', 'the 401 is not cacheable either')
+    ->header_like('Vary' => qr/Authorization/i);
 
   $t->get_ok('/.well-known/langertha.json' => { Authorization => 'Bearer sk-somebody-else' })
-    ->status_is(403, 'a key without a manifest: grant is refused, not shown the catalog');
+    ->status_is(403, 'a key without a manifest: grant is refused, not shown the catalog')
+    ->header_is('Cache-Control' => 'private, no-store', 'nor is the 403')
+    ->header_like('Vary' => qr/X-Api-Key/i);
 
   # Alternate the two keys: whatever was built or served for one must not bleed into the other.
   my %body;
@@ -99,9 +103,11 @@ unless ($HAS_MANIFEST) {
       $t->get_ok('/.well-known/langertha.json' => { 'x-api-key' => $key })
         ->status_is(200, "$name gets a manifest (round $round)")
         ->header_like('Content-Type' => qr{application/json})
-        ->header_like('Cache-Control' => qr/private/, 'never cacheable by a shared cache')
+        ->header_is('Cache-Control' => 'private, no-store', 'never stored by any cache')
         ->header_like('Vary' => qr/Authorization/i)
-        ->header_like('Vary' => qr/X-Api-Key/i);
+        ->header_like('Vary' => qr/X-Api-Key\b/i)
+        ->header_like('Vary' => qr/X-Skeid-Key-Id/i, 'varies on the trusted identity headers too')
+        ->header_like('Vary' => qr/X-Api-Key-Id/i);
       $body{$name}[$round] = $t->tx->res->body;
     }
   }
@@ -163,14 +169,92 @@ unless ($HAS_MANIFEST) {
     ->status_is(401, 'untrusted, the header names nobody');
 }
 
-# --- a reload that withdraws a grant withdraws the manifest ---
+# --- a claim holds at that endpoint or is not made there (core ADR 0029) ---
+# Each face publishes only what its translator carries upstream: the OpenAI face passes the
+# body through, /v1/messages drops output_config, thinking and cache_control, /api/chat drops
+# format and options.seed and has no tool_choice field in its dialect.
 {
+  my ($t) = app_for(base_config(%ENABLED, capabilities => { 'house-model' => {
+    map { $_ => 1 } qw(tools_native tool_choice_named parallel_tool_use
+      response_format_json_schema reasoning_effort seed temperature response_size
+      prompt_cache_key system_prompt)
+  } }));
+  $t->get_ok('/.well-known/langertha.json' => { Authorization => "Bearer $BOB_KEY" })->status_is(200);
+  my $manifest = Langertha::Manifest->from_json($t->tx->res->body);
+  my %on = map { $_->endpoint_ref => $_->capabilities } @{$manifest->models};
+
+  is_deeply([sort keys %{$on{openai}}],
+    [sort qw(chat streaming tools_native tool_choice_named parallel_tool_use
+      response_format_json_schema reasoning_effort seed temperature response_size
+      prompt_cache_key system_prompt)],
+    'openai face: every declared claim, the body reaches the node as sent');
+  is_deeply([sort keys %{$on{anthropic}}],
+    [sort qw(chat streaming tools_native tool_choice_named temperature response_size system_prompt)],
+    'anthropic face: no structured output, reasoning, seed, cache key or parallel flag -- '
+    . 'request_to_openai does not carry them');
+  is_deeply([sort keys %{$on{ollama}}],
+    [sort qw(chat streaming tools_native temperature response_size system_prompt)],
+    'ollama face: no tool_choice, structured output, seed or reasoning');
+
+  my $cfg = base_config(%ENABLED, capabilities => { 'house-model' => { prompt_cache => 1 } });
+  ok(!eval { Langertha::Skeid->new(config_loader => sub { $cfg }); 1 },
+    'a claim no face carries is a load error, not a silently dropped flag');
+  like($@, qr/prompt_cache.*not carried/, 'named in the error');
+}
+
+# --- the public route never reloads the config ---
+# With a config_loader every reload reruns the loader and replaces the node list, which
+# restarts the capacity probes. A route anybody can hit must not be a way to do that per GET.
+{
+  my $loads = 0;
   my $cfg = base_config(%ENABLED);
-  my ($t) = app_for($cfg);
+  my $skeid = Langertha::Skeid->new(config_loader => sub { $loads++; $cfg });
+  my $t = Test::Mojo->new(Langertha::Skeid::Proxy->build_app(skeid => $skeid));
+  my ($loads_before, $generation) = ($loads, $skeid->_inventory_generation);
+  $t->get_ok('/.well-known/langertha.json')->status_is(401) for 1 .. 3;
   $t->get_ok('/.well-known/langertha.json' => { Authorization => "Bearer $ALICE_KEY" })->status_is(200);
+  is($loads, $loads_before, 'anonymous and keyed GETs do not run the config loader');
+  is($skeid->_inventory_generation, $generation, 'and do not touch the node inventory');
+
+  # A grant withdrawn by the next load that does happen is withdrawn from the manifest.
   delete $cfg->{keys}{alice}{manifest};
+  $skeid->reload_config;
   $t->get_ok('/.well-known/langertha.json' => { Authorization => "Bearer $ALICE_KEY" })
     ->status_is(403, 'no stale manifest survives the reload that removed the grant');
+}
+
+# --- a failed reload changes nothing ---
+# The broken config changes a policy, an alias and the nodes before the manifest check that
+# fails it. None of that may stick, and the manifests built from the last good config stay.
+{
+  my $cfg = base_config(%ENABLED);
+  my $skeid = Langertha::Skeid->new(config_loader => sub { $cfg });
+  my $t = Test::Mojo->new(Langertha::Skeid::Proxy->build_app(skeid => $skeid));
+  $t->get_ok('/.well-known/langertha.json' => { Authorization => "Bearer $ALICE_KEY" })->status_is(200);
+  my $good_body  = $t->tx->res->body;
+  my $policy     = $skeid->policy_for_key($ALICE_ID);
+  my $nodes      = $skeid->nodes;
+  my $generation = $skeid->_inventory_generation;
+
+  $cfg = base_config(%ENABLED);
+  $cfg->{keys}{alice}{policy} = 'standard';
+  $cfg->{aliases}{'house-model'} = { tiers => [{ tags => ['cloud'], model => 'gpt-cloud' }] };
+  push @{$cfg->{nodes}}, { id => 'gpu02', url => 'http://10.13.37.6:8000/v1', model => 'qwen3-32b', tags => ['local'] };
+  $cfg->{keys}{bob}{manifest}{models} = ['gpt-cloud'];    # bob is denied cloud: load error
+
+  ok(!eval { $skeid->maybe_reload_config; 1 }, 'the broken config fails to load');
+  like($@, qr/manifest lists model .* does not let it reach/, 'for the stated reason');
+
+  is($skeid->policy_for_key($ALICE_ID), $policy, 'the policies are the old ones');
+  is($skeid->model_aliases->{'house-model'}{tiers}[0]{model}, 'qwen3-32b', 'so are the aliases');
+  is($skeid->nodes, $nodes, 'and the node list');
+  is($skeid->_inventory_generation, $generation, 'with the generation it had, so the probes do not restart');
+  ok($skeid->manifest_enabled && $skeid->manifest_available, 'the manifest stays on');
+  $t->get_ok('/.well-known/langertha.json' => { Authorization => "Bearer $ALICE_KEY" })
+    ->status_is(200, 'alice is still served')
+    ->content_is($good_body, 'the manifest from the last good config');
+  $t->get_ok('/.well-known/langertha.json' => { Authorization => "Bearer $BOB_KEY" })
+    ->status_is(200, 'and so is bob, not refused with 403');
 }
 
 # --- faces ---
@@ -200,6 +284,7 @@ unless ($HAS_MANIFEST) {
   $cfg->{keys}{bob}{manifest}{models} = ['no-such-model'];
   ok(!eval { Langertha::Skeid->new(config_loader => sub { $cfg }); 1 },
     'nor a model no node serves');
+  like($@, qr/key 'bob'.*no-such-model/, 'named in the error');
 
   $cfg = base_config(%ENABLED);
   delete $cfg->{manifest}{public_url};
