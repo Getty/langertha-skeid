@@ -119,7 +119,7 @@ _Avoid_: liveness, readiness, up/down.
 
 **API format** (client protocol):
 The dialect the *client* speaks to Skeid: OpenAI (`/v1/chat/completions`, `/v1/embeddings`),
-Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/tags`). A property of the request.
+Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/tags`). A property of the request.
 _Avoid_: engine, provider, frontend API.
 
 **Translation**:

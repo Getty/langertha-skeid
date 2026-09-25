@@ -106,7 +106,7 @@ Supported routes:
 
 - OpenAI: `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models`
 - Anthropic: `POST /v1/messages`
-- Ollama: `POST /api/chat`, `GET /api/tags`, `GET /api/ps`
+- Ollama: `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps`
 
 Admin routes:
 

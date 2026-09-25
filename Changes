@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Ollama POST /api/generate is served, with the same key policy,
+      routing, usage event and pricing as /api/chat. system and prompt,
+      with the request's images, become one chat conversation upstream;
+      the answer comes back in generate's shape (response, done,
+      done_reason, prompt_eval_count, eval_count), streamed as NDJSON
+      unless stream is false. format, think, suffix, template, raw,
+      context and keep_alive are not forwarded, and no context is returned
     - Images reach the model through the Anthropic and Ollama faces. An
       Anthropic image block (base64 or url source) and an Ollama message's
       images become OpenAI image_url parts, text and images in the order

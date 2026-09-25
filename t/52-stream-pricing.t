@@ -135,6 +135,9 @@ my %FACE = (
   openai    => sub { ('/v1/chat/completions', { model => $_[0], messages => [{ role => 'user', content => 'hi' }] }) },
   anthropic => sub { ('/v1/messages', { model => $_[0], max_tokens => 64, messages => [{ role => 'user', content => 'hi' }] }) },
   ollama    => sub { ('/api/chat', { model => $_[0], messages => [{ role => 'user', content => 'hi' }] }) },
+  # /api/generate shares /api/chat's metering (skeid #43); a second Ollama route must not be a
+  # second, unpriced way in.
+  ollama_generate => sub { ('/api/generate', { model => $_[0], prompt => 'hi' }) },
 );
 
 # One request through a fresh proxy over a fresh Skeid with the given pricing; returns the
@@ -175,7 +178,7 @@ push @rules, ['cache rule', \%RULE] if $CORE_PRICES_CACHE;
 
 for my $r (@rules) {
   my ($rule_name, $rule) = @$r;
-  for my $face (qw(openai anthropic ollama)) {
+  for my $face (qw(openai anthropic ollama ollama_generate)) {
     for my $model (qw(openai-model anthropic-model split-model running-model)) {
       my $label = "$rule_name, $face face, $model";
       my ($json_code, $json_ev) = request_through(rule => $rule, face => $face, model => $model);
@@ -219,7 +222,7 @@ SKIP: {
     'anthropic-model' => { input => 200 / 1e6 * 3, read => 800 / 1e6 * 0.30, write => 400 / 1e6 * 3.75 },
   );
   my $output = 50 / 1e6 * 15;
-  for my $face (qw(openai anthropic ollama)) {
+  for my $face (qw(openai anthropic ollama ollama_generate)) {
     for my $model (sort keys %EXPECT) {
       my $want = $EXPECT{$model};
       my ($code, $ev) = request_through(rule => \%RULE, face => $face, model => $model, stream => 1);
@@ -234,7 +237,7 @@ SKIP: {
 }
 
 # --- A cut stream: priced from the usage it carried, and still a failure ------------------------
-for my $face (qw(openai anthropic ollama)) {
+for my $face (qw(openai anthropic ollama ollama_generate)) {
   my ($json_code, $json_ev) = request_through(rule => \%PLAIN_RULE, face => $face, model => 'cut-after-usage');
   my (undef, $ev) = request_through(rule => \%PLAIN_RULE, face => $face, model => 'cut-after-usage', stream => 1);
   is($ev->{ok}, 0, "$face face: a stream cut after its usage frame failed");

@@ -20,12 +20,18 @@ line per delta and a final line that says it is over.
 The trailing line matters more than it looks: an Ollama client reads token counts from it and
 treats the stream as unfinished without it.
 
+C</api/generate> streams the same lines with the text under C<response> instead of
+C<message>; C<< shape => 'generate' >> selects that, the default C<chat> is C</api/chat>.
+
+  my $stream = Langertha::Skeid::Protocol::Ollama::Stream->new(model => 'qwen3', shape => 'generate');
+
 =cut
 
 sub new {
   my ($class, %args) = @_;
   return bless {
     model         => ($args{model} // ''),
+    shape         => (($args{shape} // 'chat') eq 'generate' ? 'generate' : 'chat'),
     started       => 0,
     finished      => 0,
     input_tokens  => 0,
@@ -47,6 +53,13 @@ sub content_type { 'application/x-ndjson' }
 sub _line {
   my ($payload) = @_;
   return Langertha::Skeid::Protocol::encode_json_safe($payload) . "\n";
+}
+
+# The text of one line in this stream's shape: a chat message, or generate's bare response.
+sub _text_field {
+  my ($self, $text) = @_;
+  return (response => $text) if $self->{shape} eq 'generate';
+  return (message => { role => 'assistant', content => $text });
 }
 
 =method start
@@ -91,7 +104,7 @@ sub delta {
   return _line({
     model      => $self->{model},
     created_at => Langertha::Skeid::Protocol::iso8601_now(),
-    message    => { role => 'assistant', content => $text },
+    $self->_text_field($text),
     done       => \0,
   });
 }
@@ -111,7 +124,7 @@ sub finish {
   return _line({
     model       => $self->{model},
     created_at  => Langertha::Skeid::Protocol::iso8601_now(),
-    message     => { role => 'assistant', content => '' },
+    $self->_text_field(''),
     done        => \1,
     done_reason => ($args{done_reason} // $self->{done_reason} // 'stop'),
     prompt_eval_count => 0 + ($args{input_tokens}  // $self->{input_tokens}  // 0),

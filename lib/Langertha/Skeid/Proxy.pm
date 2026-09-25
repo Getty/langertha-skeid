@@ -143,7 +143,12 @@ sub build_app {
   # Ollama format
   $r->post('/api/chat' => sub {
     my ($c) = @_;
-    _handle_ollama_chat($c);
+    _handle_ollama($c, 'chat');
+  });
+
+  $r->post('/api/generate' => sub {
+    my ($c) = @_;
+    _handle_ollama($c, 'generate');
   });
 
   $r->get('/api/tags' => sub {
@@ -444,8 +449,28 @@ sub _handle_anthropic_messages {
   });
 }
 
-sub _handle_ollama_chat {
-  my ($c) = @_;
+# Serves both Ollama completion routes. /api/chat and /api/generate differ only at the edge --
+# generate's prompt/system/images become one chat conversation on the way up, and the answer
+# carries `response` instead of `message` on the way back (skeid #43) -- so they share the
+# route, admission, metering and pricing below and cannot drift apart.
+my %OLLAMA_FACE = (
+  chat => {
+    endpoint => '/api/chat',
+    request  => 'request_to_openai',
+    response => 'response_from_openai',
+    shape    => 'chat',
+  },
+  generate => {
+    endpoint => '/api/generate',
+    request  => 'generate_request_to_openai',
+    response => 'generate_response_from_openai',
+    shape    => 'generate',
+  },
+);
+
+sub _handle_ollama {
+  my ($c, $kind) = @_;
+  my $face = $OLLAMA_FACE{$kind};
   my $body = $c->req->json;
   unless (ref($body) eq 'HASH') {
     $c->render(json => { error => 'Invalid JSON body' }, status => 400);
@@ -456,7 +481,8 @@ sub _handle_ollama_chat {
   # that omits it is asking for a stream and will sit waiting for newline-delimited JSON.
   my $wants_stream = exists $body->{stream} ? ($body->{stream} ? 1 : 0) : 1;
 
-  my $openai_body = Langertha::Skeid::Protocol::Ollama->request_to_openai($body);
+  my $request_method = $face->{request};
+  my $openai_body = Langertha::Skeid::Protocol::Ollama->$request_method($body);
   my $model = $openai_body->{model} // '';
   my $api_key_id = _request_api_key_id($c);
 
@@ -473,7 +499,7 @@ sub _handle_ollama_chat {
     my $url = _endpoint_url_for_node($route->{url}, '/chat/completions');
     my $meta = {
       api_format      => 'ollama',
-      endpoint        => '/api/chat',
+      endpoint        => $face->{endpoint},
       api_key_id      => _request_api_key_id($c),
       provider        => 'skeid',
       engine          => ($route->{engine} // 'openaibase'),
@@ -486,7 +512,7 @@ sub _handle_ollama_chat {
       $openai_body->{stream} = \1;
       $openai_body->{stream_options} = { include_usage => \1 };
       _proxy_openai_stream($c, $url, $openai_body, $node_id, $started, $meta,
-        Langertha::Skeid::Protocol::Ollama::Stream->new(model => $model));
+        Langertha::Skeid::Protocol::Ollama::Stream->new(model => $model, shape => $face->{shape}));
       return;
     }
 
@@ -498,7 +524,8 @@ sub _handle_ollama_chat {
 
       # See the Anthropic path above: the translator needs the decoded upstream body, not the
       # Mojo response object, or every field reads undef and the client gets empty content (karr #26).
-      my $payload = Langertha::Skeid::Protocol::Ollama->response_from_openai($upstream);
+      my $response_method = $face->{response};
+      my $payload = Langertha::Skeid::Protocol::Ollama->$response_method($upstream);
       $c->res->code($status || 200);
       $c->res->headers->header('x-skeid-node' => $node_id);
       $c->render(json => $payload);

@@ -8,7 +8,7 @@ use Langertha::ToolCall;
 
 =head1 DESCRIPTION
 
-Serves C<POST /api/chat> and C<GET /api/tags>. Ollama-specific field names — C<done_reason>,
+Serves C<POST /api/chat>, C<POST /api/generate> and C<GET /api/tags>. Ollama-specific field names — C<done_reason>,
 C<prompt_eval_count>, C<eval_count> — live here and nowhere else in Skeid.
 
 Ollama's messages are already OpenAI-shaped, so the request translation is small — but it is
@@ -184,6 +184,71 @@ sub response_from_openai {
   };
 }
 
+=method generate_request_to_openai
+
+  my $openai_body = Langertha::Skeid::Protocol::Ollama->generate_request_to_openai($body);
+
+Turns an Ollama C</api/generate> request into the same OpenAI chat-completions body
+L</request_to_openai> builds for C</api/chat>, by way of a chat conversation: C<system>, when
+given, becomes a system message, and C<prompt> with its C<images> becomes one user message --
+so the images become C<image_url> parts exactly as a chat message's do. C<model> and
+C<options> are read as on C</api/chat>.
+
+Everything else a generate request can carry is not forwarded: C<format>, C<think> and
+C<options.seed> (not carried on C</api/chat> either), and the fields that only mean something
+to an Ollama server's own prompt handling -- C<suffix>, C<template>, C<raw>, C<context>,
+C<keep_alive>.
+
+=cut
+
+sub generate_request_to_openai {
+  my ($class, $body) = @_;
+  my $prompt = $body->{prompt};
+  my @messages;
+  push @messages, { role => 'system', content => "$body->{system}" }
+    if defined($body->{system}) && !ref($body->{system}) && length($body->{system});
+  push @messages, {
+    role    => 'user',
+    content => ((defined($prompt) && !ref($prompt)) ? "$prompt" : ''),
+    (ref($body->{images}) eq 'ARRAY' ? (images => $body->{images}) : ()),
+  };
+
+  return $class->request_to_openai({
+    (exists $body->{model}   ? (model   => $body->{model})   : ()),
+    (exists $body->{options} ? (options => $body->{options}) : ()),
+    messages => \@messages,
+  });
+}
+
+=method generate_response_from_openai
+
+  my $ollama = Langertha::Skeid::Protocol::Ollama->generate_response_from_openai($res);
+
+Turns the upstream OpenAI response into an Ollama generate response: the answer text as
+C<response>, C<done> true, C<done_reason> and the token counts under the same names as
+L</response_from_openai>. The text is passed as the model wrote it -- generate has no tool
+calls, so nothing is lifted out of it. Ollama's C<context> (its token ids for the next call)
+and its timing durations are not reported; Skeid has neither.
+
+=cut
+
+sub generate_response_from_openai {
+  my ($class, $res) = @_;
+  my $choice = (ref($res->{choices}) eq 'ARRAY' ? $res->{choices}[0] : {}) || {};
+  my $msg = $choice->{message} || {};
+  my $usage = $res->{usage} || {};
+
+  return {
+    model       => ($res->{model} // ''),
+    created_at  => Langertha::Skeid::Protocol::iso8601_now(),
+    response    => ($msg->{content} // ''),
+    done        => \1,
+    done_reason => ($choice->{finish_reason} // 'stop'),
+    prompt_eval_count => 0 + ($usage->{prompt_tokens} // 0),
+    eval_count        => 0 + ($usage->{completion_tokens} // 0),
+  };
+}
+
 =method tags_from_nodes
 
   my $tags = Langertha::Skeid::Protocol::Ollama->tags_from_nodes($skeid->list_nodes);
@@ -224,6 +289,9 @@ the capability flags L</request_to_openai> actually carries to the upstream -- m
 (a C<system> message included), C<tools>, C<options.temperature>, C<options.num_predict>
 (response size), C<stream> and a message's C<images> (C<image_input>). A model is published here only with the capabilities declared
 for it that are in this list.
+
+C</api/generate> needs no entry of its own: the C<ollama> dialect names the whole Ollama API at
+this root, and the manifest's capabilities describe a chat call, which C</api/chat> is.
 
 Not carried, so never claimed: C<format> (structured output), C<options.seed> and C<think>.
 C<tool_choice> is passed through when a client sends one, but the Ollama dialect has no such
