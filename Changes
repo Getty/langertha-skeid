@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Ollama format reaches the model on /api/chat and /api/generate:
+      "json" is sent upstream as response_format json_object, a JSON schema
+      as response_format json_schema (named ollama_format, no strict). The
+      Ollama face of the provider manifest publishes
+      response_format_json_object and response_format_json_schema
     - A non-streamed Ollama /api/chat answer sends done as the JSON
       boolean true, as Ollama does, instead of the number 1 that typed
       clients (Go, Rust serde, pydantic) reject
@@ -10,8 +15,8 @@ Revision history for Langertha-Skeid
       with the request's images, become one chat conversation upstream;
       the answer comes back in generate's shape (response, done,
       done_reason, prompt_eval_count, eval_count), streamed as NDJSON
-      unless stream is false. format, think, suffix, template, raw,
-      context and keep_alive are not forwarded, and no context is returned
+      unless stream is false. think, suffix, template, raw, context and
+      keep_alive are not forwarded, and no context is returned
     - Images inside an Anthropic tool_result reach the model. An OpenAI
       tool message cannot carry them, so the tool message keeps the
       result's other blocks and one user message after the tool messages

@@ -31,6 +31,12 @@ Turns an Ollama chat request into the OpenAI chat-completions body Skeid forward
 C<options.temperature> and C<options.num_predict> are lifted out of the nested hash to
 C<temperature> and C<max_tokens>; C<tools> and C<tool_choice> pass through unchanged.
 
+C<format>, Ollama's structured output, becomes C<response_format>: C<"json"> is
+C<< {type => 'json_object'} >>, a JSON schema object is
+C<< {type => 'json_schema', json_schema => {name => 'ollama_format', schema => ...}} >> with the
+schema as sent. No C<strict> is set -- Ollama's format has no such switch. An empty string,
+C<null> or any other value is no format, and no C<response_format> is sent.
+
 A user message's C<images>, raw base64 strings, become an OpenAI content array: the message
 text as a C<text> part, then one C<image_url> part per image, each a C<data:> URL whose media
 type is read from the image's magic bytes (PNG, JPEG, GIF, WebP; PNG otherwise, see
@@ -50,7 +56,21 @@ sub request_to_openai {
     (defined($options->{num_predict}) ? (max_tokens  => 0 + $options->{num_predict}) : ()),
     (defined($body->{tools}) ? (tools => $body->{tools}) : ()),
     (defined($body->{tool_choice}) ? (tool_choice => $body->{tool_choice}) : ()),
+    _response_format($body->{format}),
   };
+}
+
+# Ollama's format -> OpenAI's response_format: "json" is any JSON object, a schema object is
+# json_schema. Nothing else is a format (Ollama itself treats "" and null as none).
+sub _response_format {
+  my ($format) = @_;
+  return (response_format => { type => 'json_object' })
+    if defined($format) && !ref($format) && $format eq 'json';
+  return (response_format => {
+    type        => 'json_schema',
+    json_schema => { name => 'ollama_format', schema => $format },
+  }) if ref($format) eq 'HASH';
+  return ();
 }
 
 # Assistant tool_calls: arguments object -> character JSON string, ids synthesized; tool
@@ -191,10 +211,10 @@ sub response_from_openai {
 Turns an Ollama C</api/generate> request into the same OpenAI chat-completions body
 L</request_to_openai> builds for C</api/chat>, by way of a chat conversation: C<system>, when
 given, becomes a system message, and C<prompt> with its C<images> becomes one user message --
-so the images become C<image_url> parts exactly as a chat message's do. C<model> and
-C<options> are read as on C</api/chat>.
+so the images become C<image_url> parts exactly as a chat message's do. C<model>,
+C<options> and C<format> are read as on C</api/chat>.
 
-Everything else a generate request can carry is not forwarded: C<format>, C<think> and
+Everything else a generate request can carry is not forwarded: C<think> and
 C<options.seed> (not carried on C</api/chat> either), and the fields that only mean something
 to an Ollama server's own prompt handling -- C<suffix>, C<template>, C<raw>, C<context>,
 C<keep_alive>.
@@ -216,6 +236,7 @@ sub generate_request_to_openai {
   return $class->request_to_openai({
     (exists $body->{model}   ? (model   => $body->{model})   : ()),
     (exists $body->{options} ? (options => $body->{options}) : ()),
+    (exists $body->{format}  ? (format  => $body->{format})  : ()),
     messages => \@messages,
   });
 }
@@ -287,13 +308,14 @@ sub tags_from_nodes {
 How this face appears in the provider manifest (skeid #29): C<ollama> at the public root, and
 the capability flags L</request_to_openai> actually carries to the upstream -- messages
 (a C<system> message included), C<tools>, C<options.temperature>, C<options.num_predict>
-(response size), C<stream> and a message's C<images> (C<image_input>). A model is published here only with the capabilities declared
-for it that are in this list.
+(response size), C<stream>, a message's C<images> (C<image_input>) and C<format> as
+C<"json"> or a schema (C<response_format_json_object>, C<response_format_json_schema>). A
+model is published here only with the capabilities declared for it that are in this list.
 
 C</api/generate> needs no entry of its own: the C<ollama> dialect names the whole Ollama API at
 this root, and the manifest's capabilities describe a chat call, which C</api/chat> is.
 
-Not carried, so never claimed: C<format> (structured output), C<options.seed> and C<think>.
+Not carried, so never claimed: C<options.seed> and C<think>.
 C<tool_choice> is passed through when a client sends one, but the Ollama dialect has no such
 field, so no C<tool_choice_*> flag is claimed.
 
@@ -308,6 +330,7 @@ sub manifest_endpoint {
       tools_native tools_hermes
       temperature response_size
       image_input
+      response_format_json_object response_format_json_schema
     )],
   };
 }

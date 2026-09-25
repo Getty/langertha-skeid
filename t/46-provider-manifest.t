@@ -172,7 +172,8 @@ unless ($HAS_MANIFEST) {
 # --- a claim holds at that endpoint or is not made there (core ADR 0029) ---
 # Each face publishes only what its translator carries upstream: the OpenAI face passes the
 # body through, /v1/messages drops output_config, thinking and cache_control, /api/chat drops
-# format and options.seed and has no tool_choice field in its dialect.
+# options.seed and has no tool_choice field in its dialect; its format is carried as
+# response_format (skeid #46).
 {
   my ($t) = app_for(base_config(%ENABLED, capabilities => { 'house-model' => {
     map { $_ => 1 } qw(tools_native tool_choice_named parallel_tool_use
@@ -193,8 +194,9 @@ unless ($HAS_MANIFEST) {
     'anthropic face: no structured output, reasoning, seed, cache key or parallel flag -- '
     . 'request_to_openai does not carry them');
   is_deeply([sort keys %{$on{ollama}}],
-    [sort qw(chat streaming tools_native temperature response_size system_prompt)],
-    'ollama face: no tool_choice, structured output, seed or reasoning');
+    [sort qw(chat streaming tools_native temperature response_size system_prompt
+      response_format_json_schema)],
+    'ollama face: structured output via format, but no tool_choice, seed or reasoning');
 
   my $cfg = base_config(%ENABLED, capabilities => { 'house-model' => { prompt_cache => 1 } });
   ok(!eval { Langertha::Skeid->new(config_loader => sub { $cfg }); 1 },
