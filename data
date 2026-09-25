@@ -1,0 +1,18 @@
+---
+claimed_at: 2026-09-25T18:20:42Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T18:20:42Z
+created: 2026-09-25T18:10:20Z
+id: 48
+priority: low
+started: 2026-09-25T18:20:42Z
+status: done
+tags:
+- docs
+- drift
+title: CONTEXT.md SSE relay entry says Anthropic/Ollama streams are refused with 501
+updated: 2026-09-25T18:20:42Z
+---
+
+CONTEXT.md "SSE relay" (around line 135) still says only the OpenAI API format streams and Anthropic/Ollama stream:true is refused with 501. Both faces translate streams now (Protocol::Anthropic::Stream, Protocol::Ollama::Stream, t/31). Found during skeid #46; not fixed there.
