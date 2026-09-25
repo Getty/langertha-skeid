@@ -136,8 +136,9 @@ Typical setup:
 1. Register many upstream nodes (for example OpenAI-compatible cloud endpoints and local vLLM/SGLang).
 2. Define model pricing in `pricing` to normalize cost per request. A model's rule may also
    set `cached_input_per_million` and `cache_write_per_million` (USD per million prompt-cache
-   reads / writes); a non-streamed request's usage event then carries `cost_cache_read_usd` and
-   `cost_cache_write_usd`, both part of `cost_total_usd`. Without them cached tokens bill at
+   reads / writes); a request's usage event, streamed or not, then carries `cost_cache_read_usd`
+   and `cost_cache_write_usd`, both part of `cost_total_usd`, next to the `cached_tokens` and
+   `cache_write_tokens` counts. Without them cached tokens bill at
    `input_per_million`. Pricing the cache needs a Langertha newer than 0.503; an older one
    ignores the two keys with a warning at config load.
 3. Have tenants send their API key as usual — the tenant id follows from it. Run

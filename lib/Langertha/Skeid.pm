@@ -1444,6 +1444,11 @@ sub record_usage {
     || _num($usage->{cached_tokens})
     || _num(ref($usage->{prompt_tokens_details}) eq 'HASH' ? $usage->{prompt_tokens_details}{cached_tokens} : undef)
     || _num($metrics->{cached_tokens});
+  # Prompt-cache write count (skeid #41), the count cost_cache_write_usd was priced from: the
+  # normalized name, then the flat metrics value metrics.normalize or the proxy put there.
+  my $cache_write_tokens = _num($usage->{cache_write})
+    || _num($usage->{cache_write_tokens})
+    || _num($metrics->{cache_write_tokens});
   my $cost_input    = _num($metrics->{cost_input_usd}) || _num($metrics->{input_cost_usd});
   my $cost_output   = _num($metrics->{cost_output_usd}) || _num($metrics->{output_cost_usd});
   my $cost_total    = _num($metrics->{cost_total_usd}) || _num($metrics->{total_cost_usd});
@@ -1471,6 +1476,7 @@ sub record_usage {
     output_tokens => $output_tokens,
     total_tokens  => $total_tokens,
     cached_tokens => $cached_tokens,
+    cache_write_tokens => $cache_write_tokens,
     tool_calls    => _num($tool_calls),
     cost_input_usd  => $cost_input,
     cost_output_usd => $cost_output,
@@ -1583,6 +1589,10 @@ sub normalize_metrics {
   # Langertha 0.503's Usage has no such count; there the caller reads it off the raw payload.
   if ($usage->can('cached_tokens') && defined(my $cached = $usage->cached_tokens)) {
     $normalized->{cached_tokens} = $cached;
+  }
+  # Likewise the cache write count, the one cost_cache_write_usd was priced from (skeid #41).
+  if ($usage->can('cache_write_tokens') && defined(my $written = $usage->cache_write_tokens)) {
+    $normalized->{cache_write_tokens} = $written;
   }
   return $normalized;
 }

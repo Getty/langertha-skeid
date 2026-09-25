@@ -110,6 +110,8 @@ my @ADDED_COLUMNS = (
   # row reads NULL ("was not priced apart"). DOUBLE PRECISION is REAL affinity in SQLite.
   ['cost_cache_read_usd', 'DOUBLE PRECISION'],
   ['cost_cache_write_usd', 'DOUBLE PRECISION'],
+  # Prompt-cache write count (skeid #41), beside cached_tokens. Nullable: an old row reads NULL.
+  ['cache_write_tokens', 'BIGINT'],
 );
 
 sub _add_missing_columns {
@@ -241,8 +243,8 @@ sub store {
       created_at, request_id, api_format, endpoint, api_key_id, provider, engine, model, node_id, route_url,
       status_code, ok, duration_ms, input_tokens, output_tokens, total_tokens, cached_tokens, tool_calls,
       cost_input_usd, cost_output_usd, cost_total_usd, error_type, error_message, requested_model,
-      content_bytes, cost_cache_read_usd, cost_cache_write_usd
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      content_bytes, cost_cache_read_usd, cost_cache_write_usd, cache_write_tokens
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   });
   $sth->execute(
     $event->{created_at},
@@ -275,6 +277,8 @@ sub store {
     # Nullable: an event from a caller that does not price the cache apart writes NULL.
     $event->{cost_cache_read_usd},
     $event->{cost_cache_write_usd},
+    # Nullable: an event that carried no cache write count writes NULL.
+    $event->{cache_write_tokens},
   );
 
   my %out = (ok => 1);
@@ -332,6 +336,7 @@ sub report {
        COALESCE(SUM(output_tokens), 0) AS output_tokens,
        COALESCE(SUM(total_tokens), 0) AS total_tokens,
        COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
        COALESCE(SUM(tool_calls), 0) AS tool_calls,
        COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
      FROM usage_events $where_sql",
@@ -370,7 +375,7 @@ sub report {
   my $recent = $dbh->selectall_arrayref(
     "SELECT
        id, created_at, api_format, endpoint, api_key_id, model, requested_model, node_id, status_code, ok,
-       input_tokens, output_tokens, total_tokens, cached_tokens, tool_calls, cost_total_usd
+       input_tokens, output_tokens, total_tokens, cached_tokens, cache_write_tokens, tool_calls, cost_total_usd
      FROM usage_events
      $where_sql
      ORDER BY id DESC
@@ -392,6 +397,7 @@ sub report {
       output_tokens  => $num->($totals->{output_tokens}),
       total_tokens   => $num->($totals->{total_tokens}),
       cached_tokens  => $num->($totals->{cached_tokens}),
+      cache_write_tokens => $num->($totals->{cache_write_tokens}),
       tool_calls     => $num->($totals->{tool_calls}),
       total_cost_usd => $num->($totals->{total_cost_usd}),
     },
@@ -427,6 +433,7 @@ sub report {
         output_tokens => $num->($_->{output_tokens}),
         total_tokens  => $num->($_->{total_tokens}),
         cached_tokens => $num->($_->{cached_tokens}),
+        cache_write_tokens => $num->($_->{cache_write_tokens}),
         tool_calls    => $num->($_->{tool_calls}),
         cost_total_usd => $num->($_->{cost_total_usd}),
       }

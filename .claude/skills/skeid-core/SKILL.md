@@ -265,7 +265,10 @@ One usage event per forwarded request, written after `request.finish`, including
 (`ok = 0`). `record_usage` normalizes metrics, prices them from `model_pricing` at record
 time, and hands the event to the configured store. Cache rates price the provider-verbatim
 usage block through `Langertha::Usage`/`Pricing` into `cost_cache_read_usd` /
-`cost_cache_write_usd` (part of `cost_total_usd`; ADR 0013 update).
+`cost_cache_write_usd` (part of `cost_total_usd`; ADR 0013 update). A stream keeps the
+upstream's usage block verbatim (frames merged key by key, later wins — counts are running
+totals, never summed) and prices it through the same `metrics.normalize` call as a
+non-streamed answer, on every face (skeid #41).
 
 Backend selection in `_configure_usage_store` is inference-first: explicit `backend` wins,
 otherwise `sqlite_path`/`path`/`db_path` → sqlite, `dbi:Pg:` dsn → postgresql, `log_path` →

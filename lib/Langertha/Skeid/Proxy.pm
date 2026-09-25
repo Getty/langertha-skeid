@@ -669,25 +669,7 @@ sub _proxy_openai_json_async {
     my $metrics = {};
     if (ref($payload) eq 'HASH') {
       my $tool_calls = eval { [ map { $_->to_hash } Langertha::ToolCall->extract('openai', $payload) ] } || [];
-      $metrics = eval {
-        $c->skeid->call_function('metrics.normalize', {
-          provider    => ($meta->{provider} || 'skeid'),
-          engine      => ($meta->{engine} || 'openaibase'),
-          model       => ($meta->{model} || ($body->{model} // '')),
-          route       => ($meta->{endpoint} || ''),
-          duration_ms => $duration_ms,
-          response    => $payload,
-          tool_calls  => $tool_calls,
-        });
-      } || {};
-      # metrics.normalize reports the prompt-cache read count off Langertha::Usage, from every
-      # wire spelling it knows (skeid #28). Langertha 0.503's Usage has no such count, so there
-      # it is pulled straight off the raw upstream usage and carried flat, the way input/output
-      # survive as metrics->{*_tokens} (k27).
-      if (ref($metrics) eq 'HASH' && !defined $metrics->{cached_tokens}) {
-        my $cached = _cached_tokens($payload->{usage});
-        $metrics->{cached_tokens} = $cached if $cached;
-      }
+      $metrics = _priced_metrics($c, $meta, $body, $duration_ms, $payload, $tool_calls);
     }
 
     _record_usage_event($c, {
@@ -696,7 +678,7 @@ sub _proxy_openai_json_async {
       status_code  => $status,
       ok           => ($status < 500) ? 1 : 0,
       duration_ms  => $duration_ms,
-      metrics      => (ref($metrics) eq 'HASH' ? $metrics : {}),
+      metrics      => $metrics,
     });
 
     $cb->($res, 0, $status, (ref($payload) eq 'HASH' ? $payload : {}));
@@ -735,7 +717,9 @@ sub _proxy_openai_stream {
   my $upstream_failed = 0;
   my $upstream_error_body = '';
   my $status = 200;
-  my $accumulated_usage = { input => 0, output => 0, total => 0, cached => 0 };
+  # The upstream's own usage block, verbatim, so a stream is priced by the same metrics.normalize
+  # call as a non-streamed answer (skeid #41). undef until a frame carries one.
+  my $upstream_usage;
   my $accumulated_content_bytes = 0;
   # UTF-8 bytes of the content this stream relayed or translated, for the usage event (skeid #36).
   # A relayed stream counts off the OpenAI deltas it read along; a translated one takes its
@@ -823,12 +807,8 @@ sub _proxy_openai_stream {
         }
       }
 
-      if (my $usage = $json->{usage}) {
-        $accumulated_usage->{input}   += ($usage->{prompt_tokens} // $usage->{input_tokens} // 0);
-        $accumulated_usage->{output} += ($usage->{completion_tokens} // $usage->{output_tokens} // 0);
-        $accumulated_usage->{total}  += ($usage->{total_tokens} // 0);
-        # Prompt-cache read count, nested under prompt_tokens_details on an OpenAI usage payload (k27).
-        $accumulated_usage->{cached} += _cached_tokens($usage);
+      if (ref($json->{usage}) eq 'HASH') {
+        $upstream_usage = _merge_usage($upstream_usage, $json->{usage});
       }
 
       my $out = $stream ? $stream->delta($json) : '';
@@ -870,7 +850,7 @@ sub _proxy_openai_stream {
           error_type    => 'upstream_error',
           error_message => ($err->{message} // 'unknown'),
           content_bytes => $content_bytes->(),
-          metrics       => $accumulated_usage->{total} > 0 ? { usage => $accumulated_usage } : {},
+          metrics       => _stream_metrics($c, $meta, $body, _duration_ms($started), $upstream_usage),
         });
         _render_error($c, $err_status,
           'Upstream error: ' . _upstream_error_message($err, $upstream_error_body), 'upstream_error');
@@ -917,12 +897,8 @@ sub _proxy_openai_stream {
       duration_ms => $duration_ms,
     });
 
-    # For streaming: use accumulated usage from chunks; if none, try to get from final response
-    my $metrics = {};
-    if ($accumulated_usage->{total} > 0) {
-      $metrics = { usage => $accumulated_usage };
-    }
-
+    # Priced from whatever usage the stream carried, also when it was cut: a cut stream still
+    # spent what its frames reported, and one that reported nothing records zero (ADR 0004).
     _record_usage_event($c, {
       %$meta,
       node_id      => $node_id,
@@ -930,7 +906,7 @@ sub _proxy_openai_stream {
       ok           => ($had_error || $status >= 500) ? 0 : 1,
       duration_ms  => $duration_ms,
       content_bytes => $content_bytes->(),
-      metrics      => $metrics,
+      metrics      => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
     });
 
     # A translated stream has to be closed in its own format: both target protocols end with
@@ -1155,8 +1131,8 @@ sub _record_usage_event {
       output => 0 + ($usage->{output} // $usage->{completion_tokens} // 0),
       total  => 0 + ($usage->{total} // 0),
       # This reshaping drops prompt_tokens_details, so the cache count has to be carried across
-      # it explicitly or record_usage never sees it. Streaming leaves it on usage->{cached};
-      # the non-streaming path injects a flat metrics->{cached_tokens} from the raw payload (k27).
+      # it explicitly or record_usage never sees it. Both paths carry it as a flat
+      # metrics->{cached_tokens}, from metrics.normalize or the raw payload (k27, skeid #41).
       cached => (_cached_tokens($usage) || 0 + ($metrics->{cached_tokens} // 0)),
     },
   };
@@ -1196,12 +1172,11 @@ sub _record_usage_event {
 
 # The prompt-cache read count off a raw OpenAI-shaped upstream usage hash (k27). OpenAI nests it
 # under prompt_tokens_details.cached_tokens; some OpenAI-compatible servers expose a flat
-# cached_tokens, and Skeid's own streaming accumulator carries it as `cached`. Missing -> 0, the
+# cached_tokens, an Anthropic-spelled block cache_read_input_tokens, and a caller of usage.record may pass it as `cached`. Missing -> 0, the
 # same fault-tolerance the other token reads here have. This reads a count off a response Skeid
 # already holds -- every upstream answers in the OpenAI dialect (ADR 0001) -- it does not
-# translate a client format. The non-streaming path prefers the count metrics.normalize reads
-# through Langertha::Usage and prices (skeid #28); this is its fallback on Langertha 0.503 and
-# the streaming accumulator's reader.
+# translate a client format. Both paths prefer the count metrics.normalize reads through
+# Langertha::Usage and prices (skeid #28, #41); this is the fallback on Langertha 0.503.
 sub _cached_tokens {
   my ($usage) = @_;
   return 0 unless ref($usage) eq 'HASH';
@@ -1209,6 +1184,81 @@ sub _cached_tokens {
   return 0 + ($usage->{cached}
     // $usage->{cached_tokens}
     // (ref($details) eq 'HASH' ? $details->{cached_tokens} : undef)
+    // $usage->{cache_read_input_tokens}
+    // 0);
+}
+
+# Prices an upstream answer: its usage block goes through metrics.normalize (Langertha::Usage +
+# Langertha::Pricing), the one pricing path for every face, streamed or not (skeid #28, #41).
+# $payload is the decoded upstream body, or for a stream a body holding only the usage block
+# the stream carried -- the same usage, so the same cost.
+sub _priced_metrics {
+  my ($c, $meta, $body, $duration_ms, $payload, $tool_calls) = @_;
+  my $metrics = eval {
+    $c->skeid->call_function('metrics.normalize', {
+      provider    => ($meta->{provider} || 'skeid'),
+      engine      => ($meta->{engine} || 'openaibase'),
+      model       => ($meta->{model} || ($body->{model} // '')),
+      route       => ($meta->{endpoint} || ''),
+      duration_ms => $duration_ms,
+      response    => $payload,
+      tool_calls  => ($tool_calls || []),
+    });
+  };
+  $metrics = {} unless ref($metrics) eq 'HASH';
+  # metrics.normalize reports the prompt-cache counts off Langertha::Usage, from every wire
+  # spelling it knows (skeid #28). Langertha 0.503's Usage has no such counts, so there they are
+  # pulled straight off the raw upstream usage and carried flat, the way input/output survive
+  # as metrics->{*_tokens} (k27).
+  if (!defined $metrics->{cached_tokens}) {
+    my $cached = _cached_tokens($payload->{usage});
+    $metrics->{cached_tokens} = $cached if $cached;
+  }
+  if (!defined $metrics->{cache_write_tokens}) {
+    my $written = _cache_write_tokens($payload->{usage});
+    $metrics->{cache_write_tokens} = $written if $written;
+  }
+  return $metrics;
+}
+
+# A stream's metrics: its verbatim usage priced exactly as a non-streamed body carrying it would
+# be. A stream that carried no usage has nothing to price -- no token count or cost is invented.
+sub _stream_metrics {
+  my ($c, $meta, $body, $duration_ms, $usage) = @_;
+  return {} unless ref($usage) eq 'HASH';
+  return _priced_metrics($c, $meta, $body, $duration_ms, { usage => $usage });
+}
+
+# Folds one stream frame's usage block into what the stream reported so far, key by key, a later
+# frame's value replacing an earlier one (nested blocks such as prompt_tokens_details likewise).
+# Usage counts on a stream are running totals, never increments: OpenAI's final frame carries
+# the whole request, a server that reports on every chunk repeats the growing total, and a wire
+# that splits the block (input on the first frame, output on the last) is completed rather
+# than lost. Summing frames would bill the same tokens twice.
+sub _merge_usage {
+  my ($into, $frame) = @_;
+  my %merged = ref($into) eq 'HASH' ? %$into : ();
+  for my $key (keys %$frame) {
+    my $value = $frame->{$key};
+    next unless defined $value;
+    $merged{$key} = (ref($value) eq 'HASH' && ref($merged{$key}) eq 'HASH')
+      ? _merge_usage($merged{$key}, $value)
+      : $value;
+  }
+  return \%merged;
+}
+
+# The prompt-cache write count off a raw upstream usage hash, for a Langertha that cannot read it
+# itself (0.503): OpenAI Chat nests it under prompt_tokens_details.cache_write_tokens, an
+# Anthropic-shaped block carries cache_creation_input_tokens. Missing -> 0. A count, never priced
+# here -- pricing is Langertha::Pricing's (skeid #41).
+sub _cache_write_tokens {
+  my ($usage) = @_;
+  return 0 unless ref($usage) eq 'HASH';
+  my $details = $usage->{prompt_tokens_details};
+  return 0 + ((ref($details) eq 'HASH' ? $details->{cache_write_tokens} : undef)
+    // $usage->{cache_write_tokens}
+    // $usage->{cache_creation_input_tokens}
     // 0);
 }
 

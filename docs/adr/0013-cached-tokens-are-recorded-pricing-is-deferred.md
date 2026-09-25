@@ -106,3 +106,16 @@ Still open: a streamed request's usage event is not priced at all (its cost fiel
 streaming accumulator never runs `metrics.normalize`), so neither its input nor its cache tokens
 are billed. That predates this change and is its own ticket (skeid #41); the fix is to price the
 accumulated provider-verbatim usage the same way.
+
+## Update (skeid #41, 2026-09-25): streamed requests are priced the same way
+
+A stream keeps the upstream's usage block verbatim instead of summing token counts off it, and
+prices it through the same `metrics.normalize` call as a non-streamed answer, so the same usage
+stores the same cost — cache amounts included — on every face (OpenAI relay, Anthropic and
+Ollama translations; all read an OpenAI-dialect upstream, ADR 0001). Usage frames are merged
+key by key, a later frame winning: stream usage counts are running totals, so a block split over
+frames is completed and a total repeated on every chunk is not billed twice. A stream cut after a
+usage frame is priced from it and stays `ok = 0`; one cut before any has nothing to price and
+records `0`. The event also carries a `cache_write_tokens` count beside `cached_tokens`, the
+count `cost_cache_write_usd` was priced from (on 0.503, read off the raw usage); `UsageStore::DBI`
+adds it as a nullable column the way this ADR fixed, and both stores total it in the report.
