@@ -242,8 +242,14 @@ unless ($HAS_MANIFEST) {
   push @{$cfg->{nodes}}, { id => 'gpu02', url => 'http://10.13.37.6:8000/v1', model => 'qwen3-32b', tags => ['local'] };
   $cfg->{keys}{bob}{manifest}{models} = ['gpt-cloud'];    # bob is denied cloud: load error
 
-  ok(!eval { $skeid->maybe_reload_config; 1 }, 'the broken config fails to load');
-  like($@, qr/manifest lists model .* does not let it reach/, 'for the stated reason');
+  {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, @_ };
+    is($skeid->maybe_reload_config, 0, 'the broken config is not applied');
+    like($skeid->last_reload_error, qr/manifest lists model .* does not let it reach/,
+      'for the stated reason');
+    ok(!eval { $skeid->reload_config; 1 }, 'an explicit reload of it still fails');
+  }
 
   is($skeid->policy_for_key($ALICE_ID), $policy, 'the policies are the old ones');
   is($skeid->model_aliases->{'house-model'}{tiers}[0]{model}, 'qwen3-32b', 'so are the aliases');

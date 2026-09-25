@@ -221,7 +221,7 @@ nodes.add nodes.remove nodes.list nodes.select nodes.set_health nodes.metrics
 alias.set route.plan route.next route.state request.start request.finish
 usage.record usage.report usage.configure
 pricing.set metrics.estimate_cost metrics.normalize
-engines.list config.reload
+engines.list config.reload config.status
 ```
 
 Unknown name croaks. Add a function here rather than reaching into the object from the app.
@@ -231,7 +231,10 @@ Unknown name croaks. Add a function here rather than reaching into the object fr
 YAML, re-read when mtime changed (`maybe_reload_config`), or a `config_loader` coderef re-run
 from dispatch at most once per `config_reload_interval` (default 1s). A load whose fingerprint
 (the loader's optional second return value, else a canonical digest of the structure) matches
-the last applied one is a no-op (skeid #38).
+the last applied one is a no-op (skeid #38). A reload triggered from dispatch never dies
+(skeid #39): the failure is logged and kept in `reload_status`, the request runs under the kept
+config, a failing loader backs off (interval doubling from >=1s, capped at 60s) and the same
+broken result is not applied twice. Construction and explicit `config.reload` still die.
 
 ```yaml
 nodes:      [ … ]                # replaces the whole inventory on reload
@@ -274,7 +277,9 @@ never blocks the event loop on a database.
 
 `/skeid/*` under bearer auth against `admin_api_key`:
 `GET /skeid/nodes`, `POST /skeid/nodes`, `POST /skeid/nodes/:id/health`,
-`GET /skeid/metrics/nodes`, `GET /skeid/usage`.
+`GET /skeid/metrics/nodes`, `GET /skeid/usage`, `GET /skeid/config` (`reload_status`: last
+reload error, `failed_at`, `failures`). Public `GET /health` carries `config_reload` without the
+message and stays `status: ok` while a reload fails.
 
 ## Traps
 

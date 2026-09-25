@@ -113,6 +113,10 @@ Admin routes:
 - `POST /skeid/nodes/:id/health`
 - `GET /skeid/metrics/nodes`
 - `GET /skeid/usage`
+- `GET /skeid/config` — whether the last config reload failed, why, and when
+
+A config reload that fails keeps the previous config serving; `GET /health` shows
+`config_reload.ok` / `failed_at` (never the message) and the failure is logged.
 
 Admin route protection:
 

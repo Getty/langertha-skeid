@@ -84,9 +84,14 @@ sub build_app {
 
   my $r = $app->routes;
 
+  # Still 'ok' while a config reload is failing: the proxy serves under the config it kept, so
+  # it is not unhealthy, and a probe that restarted it would lose that config. The reload
+  # state is shown without its message, which can name customers; that is on /skeid/config.
   $r->get('/health' => sub {
     my ($c) = @_;
-    $c->render(json => { status => 'ok', proxy => 'skeid' });
+    my $reload = $c->skeid->reload_status;
+    delete $reload->{error};
+    $c->render(json => { status => 'ok', proxy => 'skeid', config_reload => $reload });
   });
 
   # Provider manifest (skeid #29, ADR 0015): per customer key, never the whole catalog.
@@ -182,6 +187,11 @@ sub build_app {
       healthy => ($body->{healthy} ? 1 : 0),
     })->{ok};
     $c->render(json => { ok => $ok ? 1 : 0 });
+  });
+
+  $admin->get('/config' => sub {
+    my ($c) = @_;
+    $c->render(json => { reload => $c->skeid->call_function('config.status', {}) });
   });
 
   $admin->get('/metrics/nodes' => sub {

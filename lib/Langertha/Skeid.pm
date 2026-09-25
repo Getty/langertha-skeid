@@ -419,6 +419,25 @@ has _config_fingerprint => (
   default => sub { undef },
 );
 
+=attr last_reload_error
+
+Why the last config reload failed, or undef when the last one succeeded. A failed reload keeps
+the previous config in force; see L</maybe_reload_config>. C<last_reload_error_at> is when (epoch
+seconds), C<reload_failures> how many reloads in a row have failed.
+
+=cut
+
+has last_reload_error    => (is => 'rw', default => sub { undef });
+has last_reload_error_at => (is => 'rw', default => sub { undef });
+has reload_failures      => (is => 'rw', default => sub { 0 });
+
+# The fingerprint of the config that last failed to apply. Reading the same one again is not
+# retried: the answer would be the same error (skeid #39).
+has _failed_fingerprint => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
 # Digest of the nodes section the node list was last built from. An unchanged section keeps
 # the node list -- and with it the inventory generation, the running probes and any health an
 # admin set -- even when another section of the config changed.
@@ -707,13 +726,30 @@ my @CONFIG_STATE = qw(
 
 sub reload_config {
   my ($self) = @_;
-  my ($cfg, $fingerprint) = $self->_read_config;
+  my ($cfg, $fingerprint);
+  unless (eval { ($cfg, $fingerprint) = $self->_read_config; 1 }) {
+    my $err = $@ || 'config loader failed';
+    $self->_record_reload_failure($err, undef);
+    die $err;
+  }
 
   # Same config as last applied: nothing to do. Rebuilding would replace the node list, which
   # bumps the inventory generation, restarts every capacity probe and forgets health an admin
   # set -- for a config that did not change (skeid #38).
   my $last = $self->_config_fingerprint;
-  return $cfg if defined($last) && $last eq $fingerprint;
+  if (defined($last) && $last eq $fingerprint) {
+    $self->_clear_reload_failure;
+    return $cfg;
+  }
+
+  # The config that just failed, read again: it would fail the same way, so it is not applied
+  # again -- but it still counts as a failure, which is what the retry back-off grows on.
+  my $failed = $self->_failed_fingerprint;
+  if (defined($failed) && $failed eq $fingerprint && defined $self->last_reload_error) {
+    my $err = $self->last_reload_error;
+    $self->_record_reload_failure($err, $fingerprint);
+    die $err;
+  }
 
   my %before = map { $_ => $self->$_ } @CONFIG_STATE;
   my %pricing = %{$self->model_pricing || {}};
@@ -723,10 +759,12 @@ sub reload_config {
   if (eval { $nodes_print = $self->_apply_config($cfg); 1 }) {
     $self->_config_fingerprint($fingerprint);
     $self->_nodes_fingerprint($nodes_print);
+    $self->_clear_reload_failure;
     return $cfg;
   }
 
   my $err = $@ || 'config reload failed';
+  $self->_record_reload_failure($err, $fingerprint);
   for my $attr (@CONFIG_STATE) {
     next if $attr eq 'nodes';
     $self->$attr($before{$attr});
@@ -742,6 +780,48 @@ sub reload_config {
     $self->_route_cache($route_cache);
   }
   die $err;
+}
+
+sub _record_reload_failure {
+  my ($self, $err, $fingerprint) = @_;
+  $self->last_reload_error("$err");
+  $self->last_reload_error_at(time);
+  $self->reload_failures(($self->reload_failures // 0) + 1);
+  $self->_failed_fingerprint($fingerprint);
+  return;
+}
+
+sub _clear_reload_failure {
+  my ($self) = @_;
+  $self->last_reload_error(undef);
+  $self->last_reload_error_at(undef);
+  $self->reload_failures(0);
+  $self->_failed_fingerprint(undef);
+  return;
+}
+
+=method reload_status
+
+  my $status = $skeid->reload_status;
+  # { ok => 0, error => '...', failed_at => '2026-09-25T16:08:30Z', failures => 3 }
+
+Whether the last config reload succeeded, and if not, why, when, and how many times in a row.
+Served by the admin route C<GET /skeid/config>; the public C</health> carries only C<ok>,
+C<failed_at> and C<failures>, never the message, which can name customers and models.
+
+=cut
+
+sub reload_status {
+  my ($self) = @_;
+  my $err = $self->last_reload_error;
+  return { ok => 1 } unless defined $err;
+  (my $message = $err) =~ s/\s+\z//;
+  return {
+    ok        => 0,
+    error     => $message,
+    failed_at => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime($self->last_reload_error_at // time)),
+    failures  => 0 + ($self->reload_failures // 0),
+  };
 }
 
 # Reads the config source: the loader's answer or the parsed file, plus its fingerprint. A
@@ -913,6 +993,24 @@ sub _apply_config {
   return $nodes_print;
 }
 
+=method maybe_reload_config
+
+  my $applied = $skeid->maybe_reload_config;
+
+Reloads the config if its source may have changed: the file's mtime moved, or a
+C<config_loader> is due (L</config_reload_interval>). Returns true when a changed config was
+applied. C<call_function> runs it on every dispatch, so it never dies: a reload that fails is
+logged, recorded in L</reload_status>, and the request goes on under the config that was in
+force before (the reload is all or nothing). A failing loader is then retried with a back-off
+-- the interval doubling per failure, from at least a second up to a minute -- and a loader
+that keeps returning the same broken config is not applied again; a config file is retried
+when it changes. Only construction and an explicit C<config.reload> still die on a bad config.
+
+=cut
+
+# Longest wait between two retries of a failing config_loader, in seconds.
+my $RELOAD_BACKOFF_MAX = 60;
+
 sub maybe_reload_config {
   my ($self) = @_;
 
@@ -922,9 +1020,7 @@ sub maybe_reload_config {
     my $now  = $self->_now;
     my $next = $self->_config_next_check_at;
     return 0 if defined($next) && $now < $next;
-    my $before = $self->_config_fingerprint // '';
-    $self->reload_config;
-    return (($self->_config_fingerprint // '') ne $before) ? 1 : 0;
+    return $self->_reload_on_request;
   }
 
   return 0 unless $self->has_config_file;
@@ -934,9 +1030,34 @@ sub maybe_reload_config {
   my $mtime = (stat($file))[9] || 0;
   my $last  = $self->_config_mtime;
   if (!defined($last) || $mtime > $last) {
-    my $before = $self->_config_fingerprint // '';
-    $self->reload_config;
-    return (($self->_config_fingerprint // '') ne $before) ? 1 : 0;
+    return $self->_reload_on_request;
+  }
+  return 0;
+}
+
+# A reload triggered by a request (skeid #39). Its failure is not the request's: the previous
+# config is still fully in force, so the request is served under it. Failing it with a 500
+# would take every request down until the config is fixed -- with a loader, every one.
+sub _reload_on_request {
+  my ($self) = @_;
+  my $before     = $self->_config_fingerprint // '';
+  my $error_before = $self->last_reload_error;
+  return (($self->_config_fingerprint // '') ne $before) ? 1 : 0
+    if eval { $self->reload_config; 1 };
+
+  my $err = $@ || 'config reload failed';
+  my $failures = $self->reload_failures // 0;
+  if ($self->has_config_loader && $failures > 0) {
+    my $base  = 0 + ($self->config_reload_interval // 0);
+    $base = 1 if $base < 1;
+    my $delay = $base * 2 ** ($failures - 1);
+    $delay = $RELOAD_BACKOFF_MAX if $delay > $RELOAD_BACKOFF_MAX;
+    $self->_config_next_check_at($self->_now + $delay);
+  }
+  # Logged when the reason is new; the same failure again, retry after retry, is not.
+  if (!defined($error_before) || $error_before ne $err) {
+    (my $msg = $err) =~ s/\s+\z//;
+    warn "skeid: config reload failed, keeping the previous config: $msg\n";
   }
   return 0;
 }
@@ -2281,7 +2402,8 @@ sub call_function {
   croak 'function name required' unless defined $name && length $name;
   croak 'function args must be hashref' unless ref($args) eq 'HASH';
 
-  # Dynamic config refresh on each task/function dispatch.
+  # Dynamic config refresh on each task/function dispatch. Never dies: a failed reload keeps
+  # the previous config and is reported by reload_status (skeid #39).
   $self->maybe_reload_config;
 
   if ($name eq 'metrics.estimate_cost') {
@@ -2378,6 +2500,9 @@ sub call_function {
   }
   if ($name eq 'config.reload') {
     return { config => $self->reload_config };
+  }
+  if ($name eq 'config.status') {
+    return $self->reload_status;
   }
   if ($name eq 'usage.record') {
     return $self->record_usage(%$args);

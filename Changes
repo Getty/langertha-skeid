@@ -17,7 +17,12 @@ Revision history for Langertha-Skeid
       manifest.enabled; 401 without a key, 403 for a key without a grant, 404
       when disabled or on a Langertha without Langertha::Manifest
     - A config reload that fails leaves the previous config fully in force
-      instead of half-applied
+      instead of half-applied, and no longer fails the request that
+      triggered it: the request is served under the kept config, the failure
+      is logged, and a failing config_loader is retried with a back-off (up
+      to a minute) without reapplying the same broken result. GET /health
+      shows config_reload ok and failed_at; the admin route GET /skeid/config
+      (and the config.status function) also gives the error
     - A streamed request's usage event carries content_bytes, the UTF-8
       byte count of the content relayed or translated (non-ASCII included),
       on every face; it is optional (absent on non-streamed events), never
