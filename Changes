@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Relay a streaming upstream that answers with exactly
+      Content-Type: text/event-stream (no charset) and an unchunked body
+      (Content-Length or close-delimited). Mojolicious parsed such a body
+      itself, so the client got an empty stream and the request was metered
+      as served with no tokens
     - Answer every error on /v1/messages in Anthropic's shape,
       {type: "error", error: { type, message } }, so Anthropic SDKs parse it and
       raise the matching exception: invalid JSON, translation failures, 403,

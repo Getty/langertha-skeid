@@ -72,8 +72,8 @@ my $dead_port = Mojo::IOLoop::Server->generate_port;
 
 # Raw-socket upstreams for Content-Length framing, which a Mojolicious app cannot be made to
 # violate: one sends exactly the bytes it announced, the other announces more than it sends and
-# hangs up. The media type carries a charset so Mojo's own SSE parser stays out of the way
-# (that parser is a separate bug, core karr #229).
+# hangs up. The charset-less media type Mojo's own SSE parser grabs is covered by
+# t/39-upstream-sse-content-type.t (skeid karr #30).
 my $SSE = join '', map { "data: $_\n\n" }
   q({"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}),
   q({"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}),

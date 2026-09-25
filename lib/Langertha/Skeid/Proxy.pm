@@ -9,6 +9,7 @@ use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
+use Langertha::Skeid::Proxy::RelayContent;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Anthropic::Stream;
@@ -662,6 +663,9 @@ sub _proxy_openai_stream {
 
   _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
+  # Mojolicious would parse an unchunked, exactly-text/event-stream body into its own `sse`
+  # events and never emit `read` -- the relay would forward nothing (skeid karr #30).
+  $tx->res->content(Langertha::Skeid::Proxy::RelayContent->new);
 
   my $headers_sent = 0;
   my $had_error = 0;
