@@ -1,0 +1,18 @@
+---
+claimed_at: 2026-09-25T08:09:40Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T08:09:40Z
+created: 2026-09-25T08:01:35Z
+id: 35
+priority: low
+started: 2026-09-25T08:09:40Z
+status: done
+tags:
+- metering
+- streaming
+title: content_bytes in stream usage counts characters, not bytes (non-ASCII undercounted)
+updated: 2026-09-25T08:09:40Z
+---
+
+From skeid #33 audit: both stream translators add length() of character strings into text_bytes (reported as content_bytes). Use bytes::length / length(encode_utf8(...)) or rename the field to content_chars (check consumers: usage events, metering docs). Test with non-ASCII deltas.
