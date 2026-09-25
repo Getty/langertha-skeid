@@ -173,7 +173,8 @@ sub request_to_openai {
 
 Turns the upstream OpenAI response into an Anthropic message. Content becomes a C<text> block,
 tool calls become C<tool_use> blocks, and C<finish_reason> maps C<tool_calls> to C<tool_use>,
-C<length> to C<max_tokens>, everything else to C<end_turn>.
+C<length> to C<max_tokens>, everything else to C<end_turn> -- except that a reply carrying tool
+calls with C<stop> (gpt-oss on vLLM-style servers) reports C<tool_use>.
 
 C<$model> is the model the client asked for, used only when the upstream omits it.
 
@@ -201,8 +202,12 @@ sub response_from_openai {
     push @content, $call->to_anthropic_block( fallback_id => "toolu_skeid_$i" );
   }
 
+  # gpt-oss on vLLM-style servers (seen live on AKI.IO) answers a tool call with finish_reason
+  # 'stop'. The reply carries tool_use blocks, and an Anthropic client only runs them when
+  # stop_reason says tool_use, so tool calls present wins over 'stop' -- the rule core applies
+  # to Response.finish_reason (core k248). 'length' and the rest keep their mapping.
   my $fr = $choice->{finish_reason} // 'stop';
-  my $stop_reason = $fr eq 'tool_calls' ? 'tool_use'
+  my $stop_reason = ($fr eq 'tool_calls' || (@calls && $fr eq 'stop')) ? 'tool_use'
                   : $fr eq 'length'     ? 'max_tokens'
                   : 'end_turn';
 

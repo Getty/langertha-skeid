@@ -38,6 +38,7 @@ sub new {
     output_tokens => 0,
     input_tokens  => 0,
     stop_reason   => undef,
+    finish_reason => undef,
     text_bytes    => 0,
 
     # Content-block state. The OpenAI stream numbers parallel tool calls by their position
@@ -144,6 +145,7 @@ sub delta {
 
   my $choice = (ref($chunk->{choices}) eq 'ARRAY' ? $chunk->{choices}[0] : undef) || {};
   if (defined(my $reason = $choice->{finish_reason})) {
+    $self->{finish_reason} = $reason;
     $self->{stop_reason} = $reason eq 'tool_calls' ? 'tool_use'
                          : $reason eq 'length'     ? 'max_tokens'
                          :                           'end_turn';
@@ -235,7 +237,9 @@ sub delta {
 =method finish
 
 Closes every still-open content block and then the message. The token count goes on
-C<message_delta>, because an Anthropic client reads usage from there.
+C<message_delta>, because an Anthropic client reads usage from there, and so does the
+C<stop_reason>: C<tool_use> whenever tool_use blocks were emitted and the upstream finished with
+C<stop> or not at all, otherwise the mapping of the upstream C<finish_reason>.
 
 Idempotent, and it opens the message first if nothing ever did: a stream that produced no
 text and no tool calls still has to be a well-formed Anthropic message, or the client waits
@@ -259,10 +263,21 @@ sub finish {
   }
   @{$self->{open_blocks}} = ();
 
+  # A stream that emitted tool_use blocks and then finished with 'stop' (gpt-oss on
+  # vLLM-style servers) ends with stop_reason tool_use, the same rule as the non-streaming
+  # translation: tool calls present wins over 'stop' (core k248).
+  my $stop_reason = $args{stop_reason};
+  if (!defined $stop_reason) {
+    my $finish_reason = $self->{finish_reason} // 'stop';
+    $stop_reason = (%{$self->{tool_blocks}} && $finish_reason eq 'stop')
+      ? 'tool_use'
+      : ($self->{stop_reason} // 'end_turn');
+  }
+
   $out .= _event('message_delta', {
     type  => 'message_delta',
     delta => {
-      stop_reason   => ($args{stop_reason} // $self->{stop_reason} // 'end_turn'),
+      stop_reason   => $stop_reason,
       stop_sequence => undef,
     },
     usage => { output_tokens => 0 + ($args{output_tokens} // $self->{output_tokens} // 0) },

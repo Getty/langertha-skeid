@@ -2,6 +2,10 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - The Anthropic face reports stop_reason tool_use when the upstream
+      reply carries tool calls but finishes with stop (gpt-oss on
+      vLLM-style servers, e.g. AKI.IO), on /v1/messages and in the
+      streamed message_delta alike, so Anthropic clients run the tools
     - Relay a streaming upstream that answers with exactly
       Content-Type: text/event-stream (no charset) and an unchunked body
       (Content-Length or close-delimited). Mojolicious parsed such a body
