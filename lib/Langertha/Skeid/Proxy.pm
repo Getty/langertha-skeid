@@ -7,10 +7,10 @@ use Mojolicious;
 use Mojo::IOLoop;
 use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
-use Digest::SHA ();
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::Registry;
+use Langertha::Skeid::Secret;
 use Langertha::Skeid::Proxy::RelayContent;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
@@ -279,7 +279,9 @@ sub _authorize_admin {
 
   my $auth = $c->req->headers->authorization // '';
   my ($scheme, $token) = $auth =~ /\A(\S+)\s+(.+)\z/;
-  if (!defined($scheme) || lc($scheme) ne 'bearer' || !defined($token) || $token ne $admin_api_key) {
+  my $ok = defined($scheme) && lc($scheme) eq 'bearer' && defined($token)
+    && Langertha::Skeid::Secret->equal($token, $admin_api_key);
+  if (!$ok) {
     $c->res->headers->header('WWW-Authenticate' => 'Bearer realm="skeid-admin"');
     $c->render(
       status => 401,
@@ -314,7 +316,7 @@ sub _authorize_registry_read {
   my $ok = 0;
   if (defined($scheme) && lc($scheme) eq 'bearer' && defined($token)) {
     # No short-circuit: both candidates are compared whichever one matches.
-    $ok |= _equal_constant_time($token, $_) for @accepted;
+    $ok |= Langertha::Skeid::Secret->equal($token, $_) for @accepted;
   }
   return 1 if $ok;
 
@@ -329,16 +331,6 @@ sub _authorize_registry_read {
     },
   );
   return undef;
-}
-
-# Compares SHA-256 digests of both strings, so the time depends neither on where they first
-# differ nor on the secret's length.
-sub _equal_constant_time {
-  my ($given, $want) = @_;
-  my ($have, $need) = (Digest::SHA::sha256("$given"), Digest::SHA::sha256("$want"));
-  my $diff = 0;
-  $diff |= ord(substr($have, $_, 1)) ^ ord(substr($need, $_, 1)) for 0 .. length($need) - 1;
-  return $diff == 0 ? 1 : 0;
 }
 
 # What a key is shown depends on who presents it, so no cache may hand one key's answer to

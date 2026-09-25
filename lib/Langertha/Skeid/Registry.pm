@@ -5,6 +5,7 @@ use strict;
 use warnings;
 use Digest::SHA qw(hmac_sha256_hex);
 use JSON::MaybeXS ();
+use Langertha::Skeid::Secret;
 use Time::HiRes ();
 
 =head1 SYNOPSIS
@@ -111,10 +112,7 @@ sub verify {
   return 0 unless defined($body) && defined($header) && defined($secret) && length($secret);
   my $want = $class->sign($body, $secret);
   $header =~ s/\A\s+|\s+\z//g;
-  return 0 unless length($header) == length($want);
-  my $diff = 0;
-  $diff |= ord(substr($header, $_, 1)) ^ ord(substr($want, $_, 1)) for 0 .. length($want) - 1;
-  return $diff == 0 ? 1 : 0;
+  return Langertha::Skeid::Secret->equal($header, $want);
 }
 
 =method reading_from_snapshot

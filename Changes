@@ -2,6 +2,9 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - The admin API key is checked in constant time, like the registry
+      read key and the snapshot signature; all three share one comparison
+      (Langertha::Skeid::Secret)
     - Optional Skeid-to-Skeid registry. A downstream with registry.enabled
       publishes a signed snapshot of its nodes (inflight, max_conns,
       health, recent errors, current capacity reading; never URLs, key

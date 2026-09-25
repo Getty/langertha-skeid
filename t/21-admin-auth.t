@@ -114,4 +114,47 @@ sub _request {
   is($tx3->res->code, 401, 'api_key_env: the variable name is not itself the key');
 }
 
+# skeid #50: the admin key is compared through Langertha::Skeid::Secret->equal, not ne, so its
+# timing gives nothing away. Timing is not asserted here; what must not move is the verdict:
+# only the exact key passes -- a prefix, a longer key, an empty or missing token and another
+# scheme all stay 401.
+{
+  local $ENV{SKEID_ADMIN_API_KEY} = '';
+  my $skeid = Langertha::Skeid->new;
+  my $app = Langertha::Skeid::Proxy->build_app(skeid => $skeid, admin_api_key => 'adminkey');
+
+  is(_request($app, 'GET', '/skeid/nodes', { Authorization => 'Bearer adminkey' })->res->code,
+    200, 'constant-time compare: the exact key passes');
+  is(_request($app, 'GET', '/skeid/nodes', { Authorization => 'bearer adminkey' })->res->code,
+    200, 'constant-time compare: the scheme stays case-insensitive');
+  for my $case (
+    [ 'Bearer adminke'    => 'a prefix of the key' ],
+    [ 'Bearer adminkeyX'  => 'the key plus a character' ],
+    [ 'Bearer x'          => 'a much shorter key' ],
+    [ 'Bearer ' . ('a' x 200) => 'a much longer key' ],
+    [ 'Bearer adminkeY'   => 'same length, last character differs' ],
+    [ 'Bearer '           => 'an empty token' ],
+    [ 'Basic adminkey'    => 'the right key under another scheme' ],
+    [ 'adminkey'          => 'the key without a scheme' ],
+  ) {
+    my ($header, $what) = @$case;
+    my $tx = _request($app, 'GET', '/skeid/nodes', { Authorization => $header });
+    is($tx->res->code, 401, "constant-time compare: $what is rejected");
+    is($tx->res->headers->header('WWW-Authenticate'), 'Bearer realm="skeid-admin"',
+      "constant-time compare: $what gets the bearer challenge");
+  }
+}
+
+# The helper itself: equal only for identical strings, whatever the lengths.
+{
+  require Langertha::Skeid::Secret;
+  my $eq = sub { Langertha::Skeid::Secret->equal(@_) };
+  is($eq->('adminkey', 'adminkey'), 1, 'Secret->equal: identical strings');
+  is($eq->('adminkey', 'adminke'),  0, 'Secret->equal: different length');
+  is($eq->('adminkey', 'adminkeY'), 0, 'Secret->equal: same length, different byte');
+  is($eq->('', 'adminkey'),         0, 'Secret->equal: empty against a key');
+  is($eq->(undef, 'adminkey'),      0, 'Secret->equal: undef against a key');
+  is($eq->('', ''),                 1, 'Secret->equal: empty equals empty (callers reject empty keys first)');
+}
+
 done_testing;
