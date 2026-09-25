@@ -27,15 +27,15 @@ in and out. Consequences that are not negotiable:
 | API format | Routes | Streaming |
 |---|---|---|
 | OpenAI | `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models` | yes, SSE relay |
-| Anthropic | `POST /v1/messages` | **no** — `stream: true` → `501` |
-| Ollama | `POST /api/chat`, `GET /api/tags`, `GET /api/ps` | **no** — `stream: true` → `501` |
+| Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
+| Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
 
 `GET /health` is unauthenticated and cheap; `/skeid/*` is the admin surface (skill
-`skeid-core`).
+`skeid-core`). `GET /.well-known/langertha.json` serves the per-key provider manifest (ADR 0015).
 
-Streaming for the translated formats is unimplemented on purpose, not by omission: SSE deltas
-would have to be re-chunked into Anthropic events / Ollama NDJSON, and the usage accumulator
-would have to survive that. Do not half-add it — that is an ADR-sized decision.
+Streams on every face are metered and priced like non-streamed requests (the verbatim upstream
+usage frame goes through `metrics.normalize`, skeid #41); images are translated to OpenAI
+`image_url` parts on the Anthropic and Ollama faces (skeid #42/#43).
 
 ## Translation
 
