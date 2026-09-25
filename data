@@ -1,0 +1,20 @@
+---
+claimed_at: 2026-09-25T07:26:10Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T07:26:10Z
+created: 2026-09-25T07:23:34Z
+id: 32
+priority: medium
+started: 2026-09-25T07:26:10Z
+status: done
+tags:
+- protocol
+- anthropic
+- streaming
+title: Anthropic stream text content_block_start carries data type 'content_block'
+  instead of 'content_block_start'
+updated: 2026-09-25T07:26:10Z
+---
+
+lib/Langertha/Skeid/Protocol/Anthropic/Stream.pm delta(): the text block's start frame is emitted as event: content_block_start with data {type => 'content_block', ...} (line ~165), while the tool_use start (and every other frame) has matching event name and data type. The file's own comment in start() notes the official SDKs dispatch on the data type, so a text block start is a frame they do not recognise. No test asserts the data type of the text start. Found while working skeid #31, not fixed there (out of scope).
