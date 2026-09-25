@@ -22,7 +22,8 @@ extends 'Langertha::Skeid::CapacityProbe';
       max_conns: 64
       capacity:
         probe: registry                  # or type: registry
-        admin_key_env: SKEID_B_ADMIN_KEY # bearer for the downstream's admin API
+        read_key_env: SKEID_B_READ_KEY   # the downstream's registry read key (preferred)
+        # admin_key_env: SKEID_B_ADMIN_KEY   # or its admin API key, when it has no read key
         secret_env: SKEID_REGISTRY_SECRET
         interval_ms: 2000
         # url: http://skeid-b:8090/skeid/registry/snapshot   (default: derived from the node URL)
@@ -53,7 +54,12 @@ body with the secret from C<secret_env>;
 
 =back
 
-A missing C<admin_key_env> or C<secret_env> value forgets too, and so does a secret shorter
+The bearer token is the downstream's registry read key from C<read_key_env> when that is
+configured -- it opens the snapshot route and nothing else -- and its admin API key from
+C<admin_key_env> only otherwise (skeid #49). With C<read_key_env> set the admin key is never
+sent, not even when the read key variable is empty.
+
+A missing C<secret_env> value or bearer key value forgets too, and so does a secret shorter
 than 32 bytes (the downstream would refuse to publish with it). The probe forgets only its own
 reading, so a C<429> backoff recorded from a response survives a rejected snapshot. The
 reading is stamped with the snapshot's C<generated_at> and expires at C<generated_at + ttl>.
@@ -69,13 +75,14 @@ future, replayed, missing secret -- is warned once, not on every poll.
 
 =cut
 
-my %KNOWN = map { $_ => 1 } qw(probe type url path admin_key_env secret_env interval_ms tags max_skew_s);
+my %KNOWN = map { $_ => 1 } qw(probe type url path read_key_env admin_key_env secret_env interval_ms tags max_skew_s);
 
 =method validate_config
 
   Langertha::Skeid::CapacityProbe::Registry->validate_config($capacity_block, $node_id);
 
-Croaks on a block this probe cannot work with: no C<secret_env> or C<admin_key_env>, an unknown
+Croaks on a block this probe cannot work with: no C<secret_env>, neither C<read_key_env> nor
+C<admin_key_env>, an unknown
 key (a secret written into the config instead of named by variable is the one that matters), a
 non-http(s) C<url>, a non-positive C<interval_ms>. Called when a node is added, so a bad block
 fails the config load or the admin API call instead of forgetting silently on every poll.
@@ -87,15 +94,19 @@ sub validate_config {
   my $where = "node '" . ($node_id // '?') . "' capacity (registry)";
   croak "$where must be a hashref" unless ref($cfg) eq 'HASH';
   for my $key (sort keys %$cfg) {
-    croak "$where: unknown key '$key' (secrets are named by admin_key_env / secret_env, never "
+    croak "$where: unknown key '$key' (secrets are named by read_key_env / admin_key_env / "
+      . 'secret_env, never '
       . 'written into the config)'
       unless $KNOWN{$key};
   }
-  for my $key (qw(secret_env admin_key_env)) {
-    my $value = $cfg->{$key};
-    croak "$where: $key is required"
-      unless defined($value) && !ref($value) && length($value);
+  my $named = sub { my $value = $cfg->{$_[0]}; defined($value) && !ref($value) && length($value) };
+  croak "$where: secret_env is required" unless $named->('secret_env');
+  for my $key (qw(read_key_env admin_key_env)) {
+    croak "$where: $key must name an environment variable"
+      if defined($cfg->{$key}) && !$named->($key);
   }
+  croak "$where: read_key_env (or admin_key_env) is required"
+    unless $named->('read_key_env') || $named->('admin_key_env');
   if (defined $cfg->{url}) {
     croak "$where: url must be an absolute http(s) URL"
       if ref($cfg->{url}) || $cfg->{url} !~ m{\Ahttps?://[^/?#]+}i;
@@ -186,9 +197,12 @@ sub poll {
 
   my $cfg = $self->config;
   my $secret = defined($cfg->{secret_env})    ? ($ENV{$cfg->{secret_env}}    // '') : '';
-  my $admin  = defined($cfg->{admin_key_env}) ? ($ENV{$cfg->{admin_key_env}} // '') : '';
-  unless (length($secret) && length($admin)) {
-    return $self->_reject(missing_secret => 'admin_key_env or secret_env is not set');
+  # The read key when configured, never falling back to the admin key: an operator who named
+  # a read key does not want the admin key on the wire (skeid #49).
+  my $key_env = defined($cfg->{read_key_env}) ? 'read_key_env' : 'admin_key_env';
+  my $bearer  = defined($cfg->{$key_env}) ? ($ENV{$cfg->{$key_env}} // '') : '';
+  unless (length($secret) && length($bearer)) {
+    return $self->_reject(missing_secret => "$key_env or secret_env is not set");
   }
   # The downstream refuses to publish with a shorter secret, so no snapshot could verify.
   if (length($secret) < Langertha::Skeid::Registry->MIN_SECRET_BYTES) {
@@ -197,7 +211,7 @@ sub poll {
   }
 
   $self->_inflight_poll(1);
-  $self->_ua->get($self->url => { Authorization => "Bearer $admin" } => sub {
+  $self->_ua->get($self->url => { Authorization => "Bearer $bearer" } => sub {
     my (undef, $tx) = @_;
     $self->_inflight_poll(0);
     # Stopped while the request was out: this answer belongs to no running probe.

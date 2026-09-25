@@ -221,6 +221,12 @@ The single shared secret gating `/skeid/*` control-plane routes. Never a custome
 never an upstream credential.
 _Avoid_: master key, root token.
 
+**Registry read key**:
+A bearer secret that opens exactly one route, a downstream Skeid's **Registry snapshot**
+(`registry.read_key_env`, skeid #49), so a fronting tier can poll without holding the **Admin
+API key**. Authorizes reading, not believing: the snapshot's signature decides that.
+_Avoid_: read-only admin key, registry token.
+
 **AppRole token lifecycle**:
 Container boots with `role_id`/`secret_id` → logs in → holds the token in memory → renews on a
 timer. Renewal failure kills the process so the container restarts with a fresh login. The
@@ -289,9 +295,9 @@ _Avoid_: hot reload, restart, refresh.
   dialect, and the client's request format. Resolved: **Engine ID** is the upstream dialect
   only; the client edge is **API format**. Config keys keep the name `engine` for the node
   field — that one is correct.
-- **"key"** covers four unrelated things: **Customer key ID** (identity), the upstream
-  provider secret behind a **Key reference**, the **Admin API key** (gate), and the **Route
-  key** (cursor bucket). Never write bare "key" in new code; take the qualified name.
+- **"key"** covers five unrelated things: **Customer key ID** (identity), the upstream
+  provider secret behind a **Key reference**, the **Admin API key** (gate), the **Registry
+  read key** (one-route gate), and the **Route key** (cursor bucket). Never write bare "key" in new code; take the qualified name.
 - **"health"** currently only ever changes by hand. ADR 0009 settles the narrow case: a
   provider's `429` adjusts a capacity probe and a backoff timer, never the health flag — a
   rate-limited node is busy, not broken. Whether repeated *errors* should demote a node is

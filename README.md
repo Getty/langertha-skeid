@@ -123,7 +123,9 @@ A config reload that fails keeps the previous config serving; `GET /health` show
 Admin route protection:
 
 - If no admin key is configured, `/skeid/*` returns `404` (effectively disabled).
-- If configured, all `/skeid/*` routes require `Authorization: Bearer <admin-key>`.
+- If configured, all `/skeid/*` routes require `Authorization: Bearer <admin-key>`. The one
+  exception is `GET /skeid/registry/snapshot`, which also accepts the registry read key (see
+  the registry section); that key opens no other route.
 - Admin key is dynamic config (`admin.api_key`, `admin.api_key_env` or `admin_api_key`) and is reloaded on request dispatch.
 
 ## Cloud Provider Scenario (Multi-API + Billing)
@@ -721,6 +723,7 @@ registry:
   ttl_s: 10                           # optional
   instance_id: skeid-b                # optional, default hostname
   error_window_s: 60                  # optional
+  read_key_env: SKEID_REGISTRY_READ_KEY   # optional; bearer for the snapshot route only
 ```
 
 Fronting tier (one node per downstream):
@@ -733,7 +736,8 @@ nodes:
     max_conns: 64                     # still this process's guardrail; the reading only narrows it
     capacity:
       probe: registry
-      admin_key_env: SKEID_B_ADMIN_KEY          # the downstream's admin API key
+      read_key_env: SKEID_B_READ_KEY            # the downstream's registry read key
+      # admin_key_env: SKEID_B_ADMIN_KEY        # or its admin API key (avoid: write-capable)
       secret_env: SKEID_REGISTRY_SECRET         # the same secret as the downstream
       interval_ms: 2000
       # url: http://skeid-b:8090/skeid/registry/snapshot   (default: derived from the node url)
@@ -743,7 +747,7 @@ nodes:
 
 Operator contract:
 
-- The snapshot is served behind the admin key and signed:
+- The snapshot is served behind the registry read key or the admin key, and signed:
   `X-Skeid-Registry-Signature: sha256=<HMAC-SHA256 of the exact body>`. It carries per node
   `id`, `tags`, `healthy`, `inflight`, `max_conns`, `errors_in_window`, `last_failure_at` and a
   current `capacity` reading if there is one. It never carries node URLs, key references,
@@ -774,13 +778,20 @@ Operator contract:
 Security:
 
 - **Serve the snapshot route over TLS only** (a TLS-terminating proxy in front of the
-  downstream is fine). The fronting tier sends the downstream's admin API key on every poll.
-- That admin key is the whole admin API, not a read-only credential: whoever holds it can add
-  nodes with an arbitrary `url` and `api_key_env` / `api_key_ref`, and so make the downstream
-  send its provider keys to a host of their choosing. Treat the fronting tier's copy with the
-  same care as the downstream's own. A read-only registry credential is tracked as skeid #49.
-- `registry.enabled` needs an admin key (`admin.api_key` / `admin.api_key_env`) and a secret of
-  at least 32 bytes (`openssl rand -hex 32`); otherwise the config does not load.
+  downstream is fine). The fronting tier sends a bearer key on every poll.
+- **Give the fronting tier the registry read key, not the admin key.** Set
+  `registry.read_key_env` on the downstream and `read_key_env` on the probe (a random value,
+  e.g. `openssl rand -hex 32`). The read key opens `GET /skeid/registry/snapshot` and no other
+  route. When `read_key_env` is set the probe sends it and never the admin key; if its variable
+  is empty the probe forgets its reading rather than fall back.
+- The admin key is still accepted on the snapshot route for compatibility, but it is the whole
+  admin API: whoever holds it can add nodes with an arbitrary `url` and `api_key_env` /
+  `api_key_ref`, and so make the downstream send its provider keys to a host of their choosing.
+  A fronting tier configured with `admin_key_env` needs the same care as the downstream itself.
+- `registry.enabled` needs a way to read the snapshot -- `registry.read_key_env` or an admin
+  key (`admin.api_key` / `admin.api_key_env`) -- and a secret of at least 32 bytes
+  (`openssl rand -hex 32`); otherwise the config does not load. A `read_key_env` naming an
+  empty variable does not load either. With only a read key, the downstream has no admin API.
 - **Rotating the secret**: there is one secret per pair, no overlap window. Both sides read it
   from the environment at start, so rotate by restarting the downstream and the fronting tier
   with the new value. Between the two restarts the fronting probe reports `bad_signature`,

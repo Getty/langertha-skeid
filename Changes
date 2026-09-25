@@ -5,16 +5,18 @@ Revision history for Langertha-Skeid
     - Optional Skeid-to-Skeid registry. A downstream with registry.enabled
       publishes a signed snapshot of its nodes (inflight, max_conns,
       health, recent errors, current capacity reading; never URLs, key
-      references, customer key ids or usage) on the admin route
+      references, customer key ids or usage) on the route
       GET /skeid/registry/snapshot, HMAC-SHA256 with the secret named by
-      registry.secret_env. A fronting Skeid reads it with capacity probe
-      registry (admin_key_env, secret_env, optional url, tags,
-      interval_ms, max_skew_s) and forgets the reading on a bad
+      registry.secret_env. The route takes the registry read key named
+      by registry.read_key_env, which opens no other route, or the admin
+      API key. A fronting Skeid reads it with capacity probe registry
+      (read_key_env or admin_key_env, secret_env, optional url, tags,
+      interval_ms, max_skew_s), preferring the read key and never
+      falling back to the admin key, and forgets the reading on a bad
       signature, a stale, future or replayed snapshot, or a missing
       secret. Off by default; the route answers 404 until enabled.
-      Enabling it needs an admin API key and a secret of at least 32
-      bytes. The fronting tier holds the downstream's full admin key,
-      which can add nodes: serve the route over TLS only
+      Enabling it needs a read key or an admin API key and a secret of
+      at least 32 bytes. Serve the route over TLS only
     - When two sources report capacity for one node, the tighter reading
       wins while it is current: while it carries a pending backoff, or
       is younger than the longer of the two sources' poll intervals. A stale

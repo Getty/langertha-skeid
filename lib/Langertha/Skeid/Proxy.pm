@@ -7,6 +7,7 @@ use Mojolicious;
 use Mojo::IOLoop;
 use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
+use Digest::SHA ();
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::Registry;
@@ -171,6 +172,41 @@ sub build_app {
     $c->render(json => { models => [] });
   });
 
+  # Skeid-to-Skeid registry (skeid #18, ADR 0017): a fronting tier's CapacityProbe::Registry
+  # pulls this. 404 unless registry.enabled, and never unsigned. No store may keep it: a cached
+  # snapshot is a stale one. It is registered before the /skeid admin block so it is not behind
+  # _authorize_admin: it also takes the registry read key (skeid #49), which that block must
+  # never accept -- the read key opens this one route and nothing else.
+  $r->get('/skeid/registry/snapshot' => sub {
+    my ($c) = @_;
+    return unless _authorize_registry_read($c);
+    my $skeid = $c->skeid;
+    $c->res->headers->header('Cache-Control' => 'no-store');
+    unless ($skeid->registry_enabled) {
+      $c->render(status => 404,
+        json => { error => { message => 'No registry snapshot is published here', type => 'not_found' } });
+      return;
+    }
+    my ($body, $signature) = eval { Langertha::Skeid::Registry->signed_snapshot($skeid) };
+    unless (defined $body) {
+      my $err = $@ || 'unknown error';
+      unless (length($skeid->registry_secret // '')) {
+        $c->render(status => 503,
+          json => { error => { message => 'Registry secret is not set', type => 'unavailable' } });
+        return;
+      }
+      # Anything else is a bug in building the snapshot. The operator gets the cause in the
+      # log; the caller gets nothing that could describe this process's internals.
+      $err =~ s/\s+\z//;
+      $c->app->log->error("registry snapshot failed: $err");
+      $c->render(status => 500,
+        json => { error => { message => 'Registry snapshot could not be built', type => 'server_error' } });
+      return;
+    }
+    $c->res->headers->header(Langertha::Skeid::Registry->SIGNATURE_HEADER => $signature);
+    $c->render(data => $body, format => 'json');
+  });
+
   # Lightweight admin API for live control-plane updates.
   my $admin = $r->under('/skeid' => sub {
     my ($c) = @_;
@@ -216,38 +252,6 @@ sub build_app {
     $c->render(json => { metrics => $c->skeid->node_metrics });
   });
 
-  # Skeid-to-Skeid registry (skeid #18, ADR 0017): a fronting tier's CapacityProbe::Registry
-  # pulls this. Behind the admin key like every /skeid route, 404 unless registry.enabled, and
-  # never unsigned. No store may keep it: a cached snapshot is a stale one.
-  $admin->get('/registry/snapshot' => sub {
-    my ($c) = @_;
-    my $skeid = $c->skeid;
-    $c->res->headers->header('Cache-Control' => 'no-store');
-    unless ($skeid->registry_enabled) {
-      $c->render(status => 404,
-        json => { error => { message => 'No registry snapshot is published here', type => 'not_found' } });
-      return;
-    }
-    my ($body, $signature) = eval { Langertha::Skeid::Registry->signed_snapshot($skeid) };
-    unless (defined $body) {
-      my $err = $@ || 'unknown error';
-      unless (length($skeid->registry_secret // '')) {
-        $c->render(status => 503,
-          json => { error => { message => 'Registry secret is not set', type => 'unavailable' } });
-        return;
-      }
-      # Anything else is a bug in building the snapshot. The operator gets the cause in the
-      # log; the caller gets nothing that could describe this process's internals.
-      $err =~ s/\s+\z//;
-      $c->app->log->error("registry snapshot failed: $err");
-      $c->render(status => 500,
-        json => { error => { message => 'Registry snapshot could not be built', type => 'server_error' } });
-      return;
-    }
-    $c->res->headers->header(Langertha::Skeid::Registry->SIGNATURE_HEADER => $signature);
-    $c->render(data => $body, format => 'json');
-  });
-
   $admin->get('/usage' => sub {
     my ($c) = @_;
     my $report = $c->skeid->call_function('usage.report', {
@@ -289,6 +293,52 @@ sub _authorize_admin {
     return undef;
   }
   return 1;
+}
+
+# The snapshot route's gate: the admin API key (compat) or the registry read key, each compared
+# in constant time. 404 when neither is configured, like every closed /skeid route; 401 with the
+# admin route's challenge otherwise.
+sub _authorize_registry_read {
+  my ($c) = @_;
+  my $skeid = $c->skeid;
+  $skeid->maybe_reload_config;
+
+  my @accepted = grep { length } ($skeid->admin_api_key // '', $skeid->registry_read_key // '');
+  unless (@accepted) {
+    $c->render(status => 404, text => 'Not Found');
+    return undef;
+  }
+
+  my $auth = $c->req->headers->authorization // '';
+  my ($scheme, $token) = $auth =~ /\A(\S+)\s+(.+)\z/;
+  my $ok = 0;
+  if (defined($scheme) && lc($scheme) eq 'bearer' && defined($token)) {
+    # No short-circuit: both candidates are compared whichever one matches.
+    $ok |= _equal_constant_time($token, $_) for @accepted;
+  }
+  return 1 if $ok;
+
+  $c->res->headers->header('WWW-Authenticate' => 'Bearer realm="skeid-admin"');
+  $c->render(
+    status => 401,
+    json   => {
+      error => {
+        type    => 'unauthorized',
+        message => 'Missing or invalid registry bearer token',
+      },
+    },
+  );
+  return undef;
+}
+
+# Compares SHA-256 digests of both strings, so the time depends neither on where they first
+# differ nor on the secret's length.
+sub _equal_constant_time {
+  my ($given, $want) = @_;
+  my ($have, $need) = (Digest::SHA::sha256("$given"), Digest::SHA::sha256("$want"));
+  my $diff = 0;
+  $diff |= ord(substr($have, $_, 1)) ^ ord(substr($need, $_, 1)) for 0 .. length($need) - 1;
+  return $diff == 0 ? 1 : 0;
 }
 
 # What a key is shown depends on who presents it, so no cache may hand one key's answer to

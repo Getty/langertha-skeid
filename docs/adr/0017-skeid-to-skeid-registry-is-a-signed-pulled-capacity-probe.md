@@ -1,6 +1,6 @@
 # ADR 0017 — The Skeid-to-Skeid registry is a signed, pulled capacity probe
 
-- Status: accepted — implemented (skeid #18)
+- Status: accepted — implemented (skeid #18); updated (skeid #49)
 - Date: 2026-09-25
 - Tags: admission, capacity, multi-instance, registry, security
 
@@ -198,7 +198,8 @@ Rules the mapping follows:
   compromised fronting tier therefore exfiltrates the downstream's provider keys, not only its
   telemetry. The snapshot route must be served over TLS, and the fronting tier's copy of the
   key needs the same care as the downstream's own. A read-only registry credential is the fix
-  and is tracked as skeid #49.
+  and is tracked as skeid #49. *(Resolved: see the Update below. The admin key remains accepted
+  for compatibility, so this consequence still holds for a fronting tier configured with it.)*
 - With `--workers N` on the downstream, the snapshot samples one worker: the one that answered,
   with its own `inflight` and its own share of `max_conns`. It is representative only when the
   workers are evenly loaded. When the answering worker is emptier than the others, the fronting
@@ -227,3 +228,37 @@ Rules the mapping follows:
   node. They are written on every failed request whether or not the registry is enabled.
 - Default config is unchanged: no `registry` block means no route, no probe, and no extra
   work.
+
+## Update (skeid #49, 2026-09-25): a registry read key for the snapshot route
+
+The consequence above -- the fronting tier holding a write-capable admin key -- is closed by a
+dedicated credential for the snapshot route.
+
+- **Downstream:** `registry.read_key_env` names the environment variable holding the registry
+  read key. The key itself is never in the config (an unknown `read_key` is refused, like
+  `secret`). A named variable that is empty fails the config load.
+- **The route** `GET /skeid/registry/snapshot` accepts a bearer that is either the read key or
+  the admin API key (kept for compatibility). Both are compared in constant time over SHA-256
+  digests, so neither the position of the first difference nor the key length shows in the
+  timing. The route is registered outside the `/skeid` admin block: **the read key authorizes
+  that one route and nothing else**. Every other `/skeid/*` route still takes only the admin key.
+  With neither key configured the route answers `404`, like every closed `/skeid` route.
+- **Load check relaxed:** an enabled registry needs *a* credential to read it -- the read key or
+  an admin API key -- instead of requiring the admin key. A downstream can now publish its
+  snapshot with no admin API at all.
+- **Fronting side:** the `registry` probe takes `read_key_env` besides `admin_key_env`; one of
+  the two is required. When `read_key_env` is configured the probe sends the read key and
+  **never falls back** to the admin key, not even when the read key variable is empty (it
+  forgets with `missing_secret` instead): an operator who named a read key does not want the
+  admin key on the wire.
+
+Consequences:
+
+- Leaking the read key exposes the snapshot, which is operational telemetry by construction
+  (the "Never in a snapshot" list above), and nothing more. The HMAC still decides whether the
+  fronting tier believes a snapshot; the read key only decides who may fetch one.
+- The read key has the same rotation model as the secret: one value per pair, from the
+  environment, rotated by restart. A missed rotation shows as `unreachable` (`401`) on the probe
+  and admission falls back to `inflight`.
+- A deployment that keeps `admin_key_env` on the probe keeps the old exposure. It is documented,
+  not refused, so existing configs load unchanged.

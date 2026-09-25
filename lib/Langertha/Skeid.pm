@@ -559,19 +559,25 @@ off; ADR 0017). Set by the config's C<registry> block:
     ttl_s: 10                           # how long a snapshot may be believed
     instance_id: skeid-b                # default: the hostname
     error_window_s: 60                  # how far back errors_in_window counts
+    read_key_env: SKEID_REGISTRY_READ_KEY   # optional; a bearer for the snapshot route only
 
 The fronting tier reads the snapshot with L<Langertha::Skeid::CapacityProbe::Registry>. The
 secret is taken from the environment only and kept in memory (ADR 0003); an enabled registry
 whose variable is empty or shorter than 32 bytes does not load, because a snapshot is never
-published unsigned or weakly signed. Neither does one without an admin API key: the snapshot is
-served on an admin route.
-C<registry_secret>, C<registry_ttl_s>, C<registry_instance_id> and C<registry_error_window_s>
-hold the other fields.
+published unsigned or weakly signed. Neither does one without a credential to read it: an admin
+API key or a registry read key.
+
+C<read_key_env> names the variable holding the B<registry read key> (skeid #49). The snapshot
+route accepts it as a bearer token besides the admin API key; it opens no other route, so a
+fronting tier holding it cannot add nodes or flip health. A named variable that is empty does
+not load. C<registry_secret>, C<registry_read_key>, C<registry_ttl_s>, C<registry_instance_id>
+and C<registry_error_window_s> hold the other fields.
 
 =cut
 
 has registry_enabled        => (is => 'rw', default => sub { 0 });
 has registry_secret         => (is => 'rw', default => sub { '' });
+has registry_read_key       => (is => 'rw', default => sub { '' });
 has registry_ttl_s          => (is => 'rw', default => sub { 10 });
 has registry_instance_id    => (is => 'rw', default => sub { undef });
 has registry_error_window_s => (is => 'rw', default => sub { 60 });
@@ -827,7 +833,7 @@ my @CONFIG_STATE = qw(
   model_aliases policies default_policy key_policies key_names nodes
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count admin_api_key
   manifest_enabled manifest_available key_manifests
-  registry_enabled registry_secret registry_ttl_s registry_instance_id registry_error_window_s
+  registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
 
 sub reload_config {
@@ -1204,16 +1210,17 @@ sub _is_true {
   return (defined($value) && "$value" =~ /^(1|true|yes|on)$/i) ? 1 : 0;
 }
 
-my %REGISTRY_KEYS = map { $_ => 1 } qw(enabled secret_env ttl_s instance_id error_window_s);
+my %REGISTRY_KEYS = map { $_ => 1 } qw(enabled secret_env read_key_env ttl_s instance_id error_window_s);
 
 # The registry section (ADR 0017). Absent means off, so removing the block disables publishing
 # on the next reload. Enabled without a usable secret (set, at least MIN_SECRET_BYTES) or
-# without an admin key is a load error: the route never answers unsigned, is unreadable without
-# the admin key, and a config that asked for it should not load as if it had not.
+# without any credential to read it (admin key or read key) is a load error: the route never
+# answers unsigned, is unreadable without one of the two, and a config that asked for it should
+# not load as if it had not.
 sub _load_registry {
   my ($self, $cfg) = @_;
   my $section = $cfg->{registry};
-  my ($enabled, $secret, $ttl, $instance, $window) = (0, '', 10, undef, 60);
+  my ($enabled, $secret, $read_key, $ttl, $instance, $window) = (0, '', '', 10, undef, 60);
 
   if (defined $section) {
     croak 'registry must be a hashref' unless ref($section) eq 'HASH';
@@ -1254,17 +1261,28 @@ sub _load_registry {
       croak "registry.secret_env names '$env', which holds fewer than $min bytes: use a random "
         . "secret of at least $min bytes (e.g. openssl rand -hex 32)"
         if length($secret) < $min;
-      # The fronting tier reads the snapshot with this Skeid's admin key. Without one every
-      # /skeid route is closed, and a registry nobody can read is a config mistake, not a
-      # choice -- say so at load instead of answering 403 forever.
-      croak 'registry.enabled needs an admin API key (admin.api_key or admin.api_key_env): '
-        . 'the snapshot is served on an admin route'
-        unless length($self->admin_api_key // '');
+      # The read key opens the snapshot route and nothing else (skeid #49), so a fronting tier
+      # need not hold the admin key. Named but empty is a mistake, not "no read key".
+      if (defined $section->{read_key_env}) {
+        my $read_env = $section->{read_key_env};
+        croak 'registry.read_key_env must name an environment variable'
+          if ref($read_env) || !length($read_env);
+        $read_key = $ENV{$read_env} // '';
+        croak "registry.read_key_env names '$read_env', which is not set"
+          unless length $read_key;
+      }
+      # The fronting tier reads the snapshot with the read key or this Skeid's admin key.
+      # Without either nobody can, and a registry nobody can read is a config mistake, not a
+      # choice -- say so at load instead of answering 404 forever.
+      croak 'registry.enabled needs a credential to read the snapshot: registry.read_key_env '
+        . 'or an admin API key (admin.api_key or admin.api_key_env)'
+        unless length($read_key) || length($self->admin_api_key // '');
     }
   }
 
   $self->registry_enabled($enabled);
   $self->registry_secret($secret);
+  $self->registry_read_key($read_key);
   $self->registry_ttl_s($ttl);
   $self->registry_instance_id($instance);
   $self->registry_error_window_s($window);

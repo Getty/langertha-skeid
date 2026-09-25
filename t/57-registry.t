@@ -96,9 +96,26 @@ sub downstream_config {
   {
     my $cfg = downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV });
     delete $cfg->{admin};
-    like $load->($cfg), qr/needs an admin API key/,
-      'enabled without an admin key does not load: nobody could read the snapshot';
+    like $load->($cfg), qr/needs a credential to read the snapshot/,
+      'enabled without an admin key or a read key does not load: nobody could read the snapshot';
   }
+  {
+    # skeid #49: the read key alone is enough -- a downstream need not have an admin API at all.
+    local $ENV{SKEID_T57_READ} = 'read-only-57';
+    my $cfg = downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV,
+      read_key_env => 'SKEID_T57_READ' });
+    delete $cfg->{admin};
+    is $load->($cfg), '', 'enabled with only a read key loads';
+  }
+  {
+    local $ENV{SKEID_T57_UNSET};
+    delete $ENV{SKEID_T57_UNSET};
+    like $load->(downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV,
+      read_key_env => 'SKEID_T57_UNSET' })), qr/read_key_env names 'SKEID_T57_UNSET', which is not set/,
+      'a read_key_env naming an empty variable does not load, admin key or not';
+  }
+  like $load->(downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV, read_key => 'x' })),
+    qr/unknown key 'read_key'/, 'the read key itself in the config is refused, not ignored';
 
   my $probe_node = sub {
     my (%cap) = @_;
@@ -107,8 +124,10 @@ sub downstream_config {
   };
   like $load->($probe_node->(admin_key_env => $ADMIN_ENV)), qr/secret_env is required/,
     'a registry probe without secret_env does not load';
-  like $load->($probe_node->(secret_env => $SECRET_ENV)), qr/admin_key_env is required/,
-    'nor without admin_key_env';
+  like $load->($probe_node->(secret_env => $SECRET_ENV)), qr/read_key_env \(or admin_key_env\) is required/,
+    'nor without read_key_env or admin_key_env';
+  is $load->($probe_node->(secret_env => $SECRET_ENV, read_key_env => 'SKEID_T57_READ')), '',
+    'read_key_env alone is enough on the probe';
   like $load->($probe_node->(secret_env => $SECRET_ENV, admin_key_env => $ADMIN_ENV, secret => 'x')),
     qr/unknown key 'secret'/, 'nor with the secret itself in the block';
   like $load->($probe_node->(secret_env => $SECRET_ENV, admin_key_env => $ADMIN_ENV, url => 'ftp://x')),
@@ -390,6 +409,84 @@ sub downstream_config {
   my ($node) = @{$skeid->registry_snapshot->{nodes}};
   is_deeply [@{$node}{qw(errors_in_window last_failure_at)}], [0, undef],
     'a node re-added under the same id starts without the old machine\'s errors';
+}
+
+# --- the registry read key (skeid #49): the snapshot route, and nothing else ---
+# The fronting tier used to need the downstream's full admin key, which can add a node pointing
+# at any host under a key reference the downstream resolves -- a compromised fronting tier
+# could exfiltrate provider keys. The read key must open the snapshot and no other route.
+{
+  local $ENV{SKEID_T57_READ} = 'read-only-57';
+  my $READ = { Authorization => 'Bearer read-only-57' };
+  my $skeid = Langertha::Skeid->new(config_loader => sub {
+    downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV, read_key_env => 'SKEID_T57_READ' }) });
+  my $t = Test::Mojo->new(quiet_app($skeid));
+
+  $t->get_ok('/skeid/registry/snapshot' => $READ)->status_is(200, 'the read key reads the snapshot')
+    ->header_like('X-Skeid-Registry-Signature' => qr/\Asha256=/, 'signed as ever');
+  $t->get_ok('/skeid/registry/snapshot' => $ADMIN)->status_is(200, 'the admin key still does (compat)');
+  $t->get_ok('/skeid/registry/snapshot' => { Authorization => 'Bearer read-only-5' })
+    ->status_is(401, 'a prefix of the read key does not')
+    ->header_is('WWW-Authenticate' => 'Bearer realm="skeid-admin"');
+  $t->get_ok('/skeid/registry/snapshot')->status_is(401, 'nor does no key');
+
+  $t->get_ok('/skeid/nodes' => $READ)->status_is(401, 'the read key does not list nodes');
+  $t->post_ok('/skeid/nodes' => $READ => json => { id => 'evil', url => 'http://attacker.example/v1',
+    model => 'm', api_key_env => 'GROQ_API_KEY' })->status_is(401, 'nor add one');
+  ok !(grep { $_->{id} eq 'evil' } @{$skeid->nodes}), 'and no node was added';
+  $t->post_ok('/skeid/nodes/gpu-hot/health' => $READ => json => { healthy => 0 })
+    ->status_is(401, 'nor flip health');
+  $t->get_ok("/skeid/$_" => $READ)->status_is(401, "nor read /skeid/$_") for qw(config metrics/nodes usage);
+  $t->get_ok('/skeid/nodes' => $ADMIN)->status_is(200, 'while the admin key keeps the admin API');
+
+  # A downstream with only a read key has no admin API at all.
+  my $read_only = Langertha::Skeid->new(config_loader => sub {
+    my $cfg = downstream_config(registry => { enabled => 1, secret_env => $SECRET_ENV,
+      read_key_env => 'SKEID_T57_READ' });
+    delete $cfg->{admin};
+    return $cfg;
+  });
+  my $t2 = Test::Mojo->new(quiet_app($read_only));
+  $t2->get_ok('/skeid/registry/snapshot' => $READ)->status_is(200, 'read key without admin key serves');
+  $t2->get_ok('/skeid/nodes' => $READ)->status_is(404, 'and the admin API stays closed');
+
+  # The fronting probe sends the read key when it has one, never the admin key alongside.
+  my $saw_auth;
+  my $app = Mojolicious->new;
+  $app->log->level('fatal');
+  $app->routes->get('/skeid/registry/snapshot' => sub {
+    my ($c) = @_;
+    $saw_auth = $c->req->headers->authorization;
+    my $body = Langertha::Skeid::Registry->encode({ version => 1, instance => 'b', ttl => 10,
+      workers => 1, generated_at => Time::HiRes::time(),
+      nodes => [ { id => 'n', healthy => 1, inflight => 1, max_conns => 4, tags => [] } ] });
+    $c->res->headers->header('X-Skeid-Registry-Signature'
+      => Langertha::Skeid::Registry->sign($body, $ENV{$SECRET_ENV}));
+    $c->render(data => $body, format => 'json');
+  });
+  my $daemon = Mojo::Server::Daemon->new(app => $app, listen => ['http://127.0.0.1'], silent => 1);
+  $daemon->start;
+  my $port = $daemon->ports->[0];
+
+  my $front = Langertha::Skeid->new(capacity_max_age_ms => 60_000);
+  $front->add_node(id => 'peer', url => "http://127.0.0.1:$port/v1", model => 'm', max_conns => 16,
+    capacity => { probe => 'registry', secret_env => $SECRET_ENV,
+      read_key_env => 'SKEID_T57_READ', admin_key_env => $ADMIN_ENV });
+  my $probe = Langertha::Skeid::CapacityProbe->for_node($front, $front->nodes->[0]);
+  local $SIG{__WARN__} = sub { };
+  $probe->poll; spin(0.3);
+  is $saw_auth, 'Bearer read-only-57', 'the probe prefers the read key over the admin key';
+  is $probe->state, 'accepted', 'and the snapshot is accepted';
+
+  undef $saw_auth;
+  {
+    local $ENV{SKEID_T57_READ} = '';
+    $probe->poll; spin(0.3);
+  }
+  is $saw_auth, undef, 'an empty read key variable does not fall back to sending the admin key';
+  is $probe->state, 'missing_secret', 'it forgets instead';
+  ok !$front->capacity_reading('peer'), 'and holds no reading';
+  $daemon->stop;
 }
 
 # --- the probe against a snapshot endpoint: every rejection forgets ---
