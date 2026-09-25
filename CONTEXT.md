@@ -133,10 +133,11 @@ The node side of a request. The client side is the *client* or *caller* — neve
 _Avoid_: backend, origin, remote (except in `SKEID_REMOTE_KEY_REF`, kept for compatibility).
 
 **SSE relay**:
-Streaming responses pass through byte-for-byte; Skeid parses the chunks only to accumulate
-usage and content size. Only the OpenAI **API format** streams — a `stream: true` request in
-the Anthropic or Ollama format is refused with `501`, because streaming and **Translation**
-have not been made to coexist yet.
+On the OpenAI **API format** streaming responses pass through byte-for-byte; Skeid parses the
+chunks only to accumulate usage and content size. The Anthropic and Ollama formats stream too:
+there the upstream OpenAI SSE is re-chunked by a stream translator (Anthropic events, Ollama
+NDJSON) — the relay-plus-**Translation** case. Every stream is metered and priced from the
+verbatim upstream usage frame, like a non-streamed request (skeid #41).
 _Avoid_: proxying, piping (too vague about the parse-but-don't-modify contract).
 
 **TTFT**:
