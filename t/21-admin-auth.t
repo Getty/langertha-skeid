@@ -59,6 +59,7 @@ sub _request {
   local $ENV{SKEID_ADMIN_API_KEY} = '';
   my $admin_key = '';
   my $skeid = Langertha::Skeid->new(
+    config_reload_interval => 0,   # every dispatch re-reads the loader here
     config_loader => sub {
       return {
         admin => { api_key => $admin_key },

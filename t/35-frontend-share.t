@@ -114,6 +114,7 @@ use Langertha::Skeid;
 {
   my $frontends = 2;
   my $skeid = Langertha::Skeid->new(
+    config_reload_interval => 0,   # every dispatch re-reads the loader here
     config_loader => sub {
       return {
         routing => { frontend_count => $frontends },

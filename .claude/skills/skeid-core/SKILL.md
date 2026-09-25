@@ -228,8 +228,10 @@ Unknown name croaks. Add a function here rather than reaching into the object fr
 
 ## Config
 
-YAML, re-read when mtime changed (`maybe_reload_config`), or a `config_loader` coderef which
-is treated as always-dynamic and re-run on every dispatch.
+YAML, re-read when mtime changed (`maybe_reload_config`), or a `config_loader` coderef re-run
+from dispatch at most once per `config_reload_interval` (default 1s). A load whose fingerprint
+(the loader's optional second return value, else a canonical digest of the structure) matches
+the last applied one is a no-op (skeid #38).
 
 ```yaml
 nodes:      [ … ]                # replaces the whole inventory on reload
@@ -243,11 +245,13 @@ usage_store: { backend: …, … }
 
 In config-managed mode an absent `admin_api_key` **disables** the admin API (`/skeid/*` then
 answers 404, not 401 — absence of the feature, not a failed login). Nodes are replaced
-wholesale on reload: anything pushed through the admin API is lost when the file changes.
-That is deliberate — the file is the declared state.
+wholesale when the `nodes:` section changes: anything pushed through the admin API is lost
+then. That is deliberate — the file is the declared state. An unchanged `nodes:` section keeps
+the list, its inventory generation (so probes keep running) and admin-set health.
 
 ENV defaults: `SKEID_ROUTE_WAIT_TIMEOUT_MS`, `SKEID_ROUTE_WAIT_POLL_MS`, `SKEID_USAGE_DB`,
-`SKEID_ADMIN_API_KEY`, `SKEID_TRUST_KEY_ID_HEADER`, `SKEID_CAPACITY_MAX_AGE_MS`.
+`SKEID_ADMIN_API_KEY`, `SKEID_TRUST_KEY_ID_HEADER`, `SKEID_CAPACITY_MAX_AGE_MS`,
+`SKEID_CONFIG_RELOAD_INTERVAL`.
 
 ## Usage
 

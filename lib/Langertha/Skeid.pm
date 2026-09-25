@@ -6,7 +6,9 @@ use strict;
 use warnings;
 use Carp qw(croak);
 use POSIX qw(strftime);
-use Digest::SHA qw(sha1_hex);
+use Digest::SHA qw(sha1_hex sha256_hex);
+use Scalar::Util qw(blessed refaddr reftype);
+use Time::HiRes ();
 use YAML::PP;
 use Langertha ();
 use Langertha::Skeid::UsageStore;
@@ -353,12 +355,74 @@ has config_file => (
   predicate => 'has_config_file',
 );
 
+=attr config_loader
+
+A code ref that returns the config as a hashref, instead of a C<config_file>. It is called with
+the Skeid object, at construction and then from C<call_function> at most once per
+L</config_reload_interval>.
+
+It may return C<($config, $version)>. A defined version is the change detector: the same
+version as last applied means nothing changed and the config is not applied again. Without a
+version Skeid digests the returned structure (hash keys sorted) instead. Either way an
+unchanged config is a no-op, and a changed one whose C<nodes> section is unchanged keeps the
+node list -- its inventory generation, its running capacity probes and any health set through
+the admin API. A code ref inside the config (a custom probe's C<code>) digests by identity, so
+a loader that builds a fresh closure every call should return a version.
+
+A config file follows the same rules, minus the throttle: an mtime change whose content is
+unchanged applies nothing. An explicit C<config.reload> does too, so a value taken from the
+environment (C<admin.api_key_env>, a usage store's C<password_env>) is read again only when the
+config itself changes.
+
+=cut
+
 has config_loader => (
   is        => 'ro',
   predicate => 'has_config_loader',
 );
 
 has _config_mtime => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+=attr config_reload_interval
+
+The least time, in seconds, between two runs of a C<config_loader> (default 1; fractions
+allowed; 0 runs it on every dispatch, as before skeid #38).
+
+A loader-based config is re-read from C<call_function>, which every request passes through
+several times. Without a throttle every request would rerun the loader. A config file is not
+throttled: its mtime check is one C<stat>.
+
+=cut
+
+has config_reload_interval => (
+  is      => 'rw',
+  default => sub {
+    return (defined($ENV{SKEID_CONFIG_RELOAD_INTERVAL}) && length($ENV{SKEID_CONFIG_RELOAD_INTERVAL}))
+      ? 0 + $ENV{SKEID_CONFIG_RELOAD_INTERVAL}
+      : 1;
+  },
+);
+
+# When the loader may run next (see config_reload_interval).
+has _config_next_check_at => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+# What the last applied config was: the loader's version when it gives one, else a digest of
+# the loaded structure. A reload that reads the same fingerprint changes nothing (skeid #38).
+has _config_fingerprint => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+# Digest of the nodes section the node list was last built from. An unchanged section keeps
+# the node list -- and with it the inventory generation, the running probes and any health an
+# admin set -- even when another section of the config changed.
+has _nodes_fingerprint => (
   is      => 'rw',
   default => sub { undef },
 );
@@ -643,12 +707,24 @@ my @CONFIG_STATE = qw(
 
 sub reload_config {
   my ($self) = @_;
+  my ($cfg, $fingerprint) = $self->_read_config;
+
+  # Same config as last applied: nothing to do. Rebuilding would replace the node list, which
+  # bumps the inventory generation, restarts every capacity probe and forgets health an admin
+  # set -- for a config that did not change (skeid #38).
+  my $last = $self->_config_fingerprint;
+  return $cfg if defined($last) && $last eq $fingerprint;
+
   my %before = map { $_ => $self->$_ } @CONFIG_STATE;
   my %pricing = %{$self->model_pricing || {}};
   my ($generation, $route_cache) = ($self->_inventory_generation, $self->_route_cache);
 
-  my $cfg = eval { $self->_apply_config };
-  return $cfg if $cfg;
+  my $nodes_print;
+  if (eval { $nodes_print = $self->_apply_config($cfg); 1 }) {
+    $self->_config_fingerprint($fingerprint);
+    $self->_nodes_fingerprint($nodes_print);
+    return $cfg;
+  }
 
   my $err = $@ || 'config reload failed';
   for my $attr (@CONFIG_STATE) {
@@ -668,15 +744,20 @@ sub reload_config {
   die $err;
 }
 
-# Applies a config to $self, section by section; reload_config undoes it on a croak. The usage
-# store goes last and swaps only once the new store is prepared, so nothing after it can fail.
-sub _apply_config {
+# Reads the config source: the loader's answer or the parsed file, plus its fingerprint. A
+# loader may return ($config, $version); a defined version is the fingerprint, otherwise it is
+# a digest of the structure (see _config_digest).
+sub _read_config {
   my ($self) = @_;
   my $cfg = {};
+  my $version;
 
   if ($self->has_config_loader) {
-    my $loaded = $self->config_loader->($self);
+    # Counted from the start of the run, so the throttle also holds for a loader that dies.
+    $self->_config_next_check_at($self->_now + (0 + ($self->config_reload_interval // 0)));
+    my ($loaded, $loader_version) = $self->config_loader->($self);
     $cfg = $loaded if ref($loaded) eq 'HASH';
+    $version = $loader_version;
   } elsif ($self->has_config_file) {
     my $file = $self->config_file;
     if (-f $file) {
@@ -686,6 +767,55 @@ sub _apply_config {
       $self->_config_mtime((stat($file))[9] || time);
     }
   }
+
+  my $fingerprint = defined($version) && !ref($version)
+    ? "version:$version"
+    : 'digest:' . _config_digest($cfg);
+  return ($cfg, $fingerprint);
+}
+
+# A canonical digest of a loaded config structure: hash keys sorted, so two loads of the same
+# data digest alike whatever order the loader built them in. A code ref or an object other
+# than a boolean digests by identity -- the same callback digests alike, a fresh closure per
+# load counts as a change, which reloads rather than missing one.
+sub _config_digest {
+  my ($data) = @_;
+  my $out = '';
+  my $walk;
+  $walk = sub {
+    my ($node) = @_;
+    if (!defined $node) {
+      $out .= 'u;';
+    } elsif (!ref $node) {
+      $out .= 's' . length($node) . ':' . $node . ';';
+    } elsif (blessed($node) && reftype($node) eq 'SCALAR') {
+      # JSON / YAML booleans: their value is what counts, not which object carries it.
+      $out .= 'b' . (${$node} ? 1 : 0) . ';';
+    } elsif (!blessed($node) && reftype($node) eq 'HASH') {
+      $out .= 'h{';
+      for my $key (sort keys %$node) {
+        $out .= 's' . length($key) . ':' . $key . ';';
+        $walk->($node->{$key});
+      }
+      $out .= '}';
+    } elsif (!blessed($node) && reftype($node) eq 'ARRAY') {
+      $out .= 'a[';
+      $walk->($_) for @$node;
+      $out .= ']';
+    } else {
+      $out .= 'r' . reftype($node) . ':' . refaddr($node) . ';';
+    }
+  };
+  $walk->($data);
+  undef $walk;
+  return sha256_hex($out);
+}
+
+# Applies a config to $self, section by section; reload_config undoes it on a croak. The usage
+# store goes last and swaps only once the new store is prepared, so nothing after it can fail.
+# Returns the fingerprint of the nodes section the node list now stands for.
+sub _apply_config {
+  my ($self, $cfg) = @_;
 
   if (ref($cfg->{pricing}) eq 'HASH') {
     for my $model (keys %{$cfg->{pricing}}) {
@@ -708,12 +838,18 @@ sub _apply_config {
     }
   }
 
+  my $nodes_print = $self->_nodes_fingerprint // '';
   if (ref($cfg->{nodes}) eq 'ARRAY') {
-    $self->nodes([]);
-    for my $n (@{$cfg->{nodes}}) {
-      next unless ref($n) eq 'HASH';
-      next unless defined $n->{id} && defined $n->{url};
-      $self->add_node(%$n);
+    # An unchanged nodes section keeps the node list as it is (skeid #38).
+    my $print = _config_digest($cfg->{nodes});
+    if ($print ne $nodes_print) {
+      $self->nodes([]);
+      for my $n (@{$cfg->{nodes}}) {
+        next unless ref($n) eq 'HASH';
+        next unless defined $n->{id} && defined $n->{url};
+        $self->add_node(%$n);
+      }
+      $nodes_print = $print;
     }
   }
 
@@ -774,16 +910,21 @@ sub _apply_config {
     });
   }
 
-  return $cfg;
+  return $nodes_print;
 }
 
 sub maybe_reload_config {
   my ($self) = @_;
 
   if ($self->has_config_loader && !$self->has_config_file) {
-    # Loader-based configs are treated as dynamic and refreshed every task.
+    # Loader-based configs are dynamic, but not re-read more often than
+    # config_reload_interval, and a load that reads what was already applied is a no-op.
+    my $now  = $self->_now;
+    my $next = $self->_config_next_check_at;
+    return 0 if defined($next) && $now < $next;
+    my $before = $self->_config_fingerprint // '';
     $self->reload_config;
-    return 1;
+    return (($self->_config_fingerprint // '') ne $before) ? 1 : 0;
   }
 
   return 0 unless $self->has_config_file;
@@ -793,11 +934,14 @@ sub maybe_reload_config {
   my $mtime = (stat($file))[9] || 0;
   my $last  = $self->_config_mtime;
   if (!defined($last) || $mtime > $last) {
+    my $before = $self->_config_fingerprint // '';
     $self->reload_config;
-    return 1;
+    return (($self->_config_fingerprint // '') ne $before) ? 1 : 0;
   }
   return 0;
 }
+
+sub _now { Time::HiRes::time() }
 
 # The client-facing faces Skeid serves, as manifest endpoints. Each face's spec -- dialect,
 # path under public_url, and the capability flags its translator actually carries upstream --

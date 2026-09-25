@@ -228,7 +228,7 @@ unless ($HAS_MANIFEST) {
 # fails it. None of that may stick, and the manifests built from the last good config stay.
 {
   my $cfg = base_config(%ENABLED);
-  my $skeid = Langertha::Skeid->new(config_loader => sub { $cfg });
+  my $skeid = Langertha::Skeid->new(config_loader => sub { $cfg }, config_reload_interval => 0);
   my $t = Test::Mojo->new(Langertha::Skeid::Proxy->build_app(skeid => $skeid));
   $t->get_ok('/.well-known/langertha.json' => { Authorization => "Bearer $ALICE_KEY" })->status_is(200);
   my $good_body  = $t->tx->res->body;

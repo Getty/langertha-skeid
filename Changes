@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A config_loader runs at most once per config_reload_interval (default
+      1s, env SKEID_CONFIG_RELOAD_INTERVAL) instead of on every dispatch, and
+      may return ($config, $version). A load whose version, or else canonical
+      digest, matches the last applied config changes nothing; an unchanged
+      nodes section keeps the node list, so capacity probes are not restarted
+      and health set through the admin API survives. A config file touched
+      without a change is likewise a no-op
     - GET /.well-known/langertha.json serves a provider manifest per customer
       key: only the models that key's keys: entry lists under manifest.models,
       on the openai, anthropic (anthropic-compat) and ollama faces under
