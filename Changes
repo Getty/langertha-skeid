@@ -2,6 +2,14 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Customer key ids (skeid keyid) are the key's full SHA-1 digest, k_ plus
+      40 hex digits, instead of its first 12 hex digits, which are a prefix of
+      the new id. A config that still names a customer by the short id in
+      keys: or names: keeps routing, billing and serving the manifest to that
+      key, with a one-time deprecation warning; listing both the short id and
+      the full id it prefixes is a load error. Usage events keep the id they
+      were recorded under, so a report by api_key_id splits at the upgrade:
+      query both ids for one customer's full history
     - A config_loader runs at most once per config_reload_interval (default
       1s, env SKEID_CONFIG_RELOAD_INTERVAL) instead of on every dispatch, and
       may return ($config, $version). A load whose version, or else canonical

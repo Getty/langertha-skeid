@@ -138,14 +138,14 @@ Which nodes a customer key may be served from, and which models it may ask for:
     burstable: {}                            # cloud is fine when local is full
   default_policy: standard
   names:
-    alice:   k_5f0e1a2b3c4d                   # id from `skeid keyid <key>` -- never the key
-    bigcorp: k_9c8b7a6f5e4d
+    alice:   k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b  # id from `skeid keyid <key>` -- never the key
+    bigcorp: k_9c8b7a6f5e4de5f60718293a4b5c6d7e8f901a2b
   keys:
     alice: burstable                          # a keys: entry may be written by name ...
     bigcorp:
       policy: standard
       models: [house-model]                  # sparse override of one field
-    k_1122334455aa: burstable                 # ... or still by the raw key id
+    k_1122334455aae5f60718293a4b5c6d7e8f901a2b: burstable  # ... or still by the raw key id
 
 Resolved once at config load: a request costs one hash lookup, keys on the same profile share
 one policy object, and a key that takes the default is not listed at all. C<deny_tags> filters
@@ -183,8 +183,8 @@ config turns it on, and a key without a C<manifest:> entry gets C<403>, never th
     capabilities:                         # optional claims per model; default chat + streaming
       house-model: { tools_native: true, tool_choice_auto: true }
   names:                                  # ids from `skeid keyid <key>` -- never the key
-    alice: k_5f0e1a2b3c4d
-    bob:   k_9c8b7a6f5e4d
+    alice: k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b
+    bob:   k_9c8b7a6f5e4de5f60718293a4b5c6d7e8f901a2b
   keys:
     alice:
       policy: burstable
@@ -1248,8 +1248,8 @@ L<Langertha::Manifest>. Built at config load; see L</Provider Manifest>.
 sub manifest_for_key {
   my ($self, $api_key_id) = @_;
   return undef unless $self->manifest_enabled && $self->manifest_available;
-  return undef unless defined($api_key_id) && length($api_key_id);
-  return $self->key_manifests->{$api_key_id};
+  my $id = $self->_configured_key_id($self->key_manifests, $api_key_id);
+  return defined($id) ? $self->key_manifests->{$id} : undef;
 }
 
 sub configure_usage_store {
@@ -1829,6 +1829,11 @@ sub resolve_policy {
   };
 }
 
+# Key ids before ADR 0016 were the first 12 hex digits of the same digest, so a short id is
+# the prefix of the full id of the same key.
+my $LEGACY_KEY_ID_HEX = 12;
+my %legacy_key_id_warned;
+
 # Resolves the whole policy section once, at config load. Nothing here happens per request:
 # a request costs one hash lookup, and identical resolutions share a single object, so a
 # thousand keys on three profiles are three policy objects and a thousand pointers.
@@ -1922,11 +1927,50 @@ sub _load_policies {
     }
   }
 
+  # Short key ids from before ADR 0016 still name their customer: a request's full id falls
+  # back to its short prefix (see _configured_key_id). Where one key would match two entries --
+  # a short id and a full id it is the prefix of -- which one governs is not for Skeid to guess.
+  my %legacy = map { $_ => 1 } grep { _is_legacy_key_id($_) } keys %seen_id;
+  for my $id (sort keys %seen_id) {
+    next unless $id =~ /\Ak_[0-9a-f]{40}\z/;
+    my $short = substr($id, 0, 2 + $LEGACY_KEY_ID_HEX);
+    croak "key id '$short' is the short form of '$id', and both have a keys entry: one key "
+      . 'would match both; keep only the full id'
+      if $legacy{$short};
+  }
+  _warn_legacy_key_id($_) for sort(keys %legacy), grep { _is_legacy_key_id($_) } values %key_names;
+
   $self->policies(\%policies);
   $self->default_policy($default);
   $self->key_policies(\%key_policies);
   $self->key_names(\%key_names);
   return 1;
+}
+
+sub _is_legacy_key_id {
+  my ($id) = @_;
+  return defined($id) && $id =~ /\Ak_[0-9a-f]{$LEGACY_KEY_ID_HEX}\z/ ? 1 : 0;
+}
+
+sub _warn_legacy_key_id {
+  my ($id) = @_;
+  return if $legacy_key_id_warned{$id}++;
+  warn "skeid: key id '$id' is a short key id from before ADR 0016; it still matches the key "
+    . "whose full id starts with it, but is deprecated: replace it with the full id "
+    . "`skeid keyid` prints\n";
+  return;
+}
+
+# The id a customer's entry in a config table is filed under: the request's own id, or -- for
+# a config still written with short ids -- that id's short prefix. Exact wins, so a full id
+# entry is always what a full id finds.
+sub _configured_key_id {
+  my ($self, $table, $api_key_id) = @_;
+  return undef unless defined($api_key_id) && length($api_key_id);
+  return $api_key_id if exists $table->{$api_key_id};
+  return undef unless $api_key_id =~ /\Ak_[0-9a-f]{40}\z/;
+  my $short = substr($api_key_id, 0, 2 + $LEGACY_KEY_ID_HEX);
+  return exists $table->{$short} ? $short : undef;
 }
 
 sub _policy_fingerprint {
@@ -1943,15 +1987,22 @@ The customer key id derived from the presented API key. This is the name a C<key
 to use, and C<skeid keyid> prints it, because the config must be able to name a customer
 without holding that customer's key.
 
-It is a truncated digest, not a secret: it identifies, it does not authenticate. What
-authenticates is that the caller presented the key it was derived from.
+It is the full SHA-1 hex digest of the key (160 bits), not a secret: it identifies, it does not
+authenticate. What authenticates is that the caller presented the key it was derived from.
+
+Before ADR 0016 the id was the first 12 hex digits of the same digest (C<k_5f0e1a2b3c4d>), so
+an old id is the prefix of the new one. A config may still name a customer by its short id:
+it matches the key whose full id starts with it, with a one-time deprecation warning at
+config load, and a config that lists both a short id and a full id it is the prefix of fails
+to load. Usage events keep the id they were recorded under -- events from before the change
+carry the short id, later ones the full id; nothing is migrated.
 
 =cut
 
 sub key_id_for_key {
   my ($self, $api_key) = @_;
   return 'anonymous' unless defined($api_key) && length($api_key);
-  return 'k_' . substr(sha1_hex($api_key), 0, 12);
+  return 'k_' . sha1_hex($api_key);
 }
 
 =method policy_for_key
@@ -1966,14 +2017,14 @@ entries. Returns undef when no policies are configured at all.
 
 sub policy_for_key {
   my ($self, $api_key_id) = @_;
-  return $self->key_policies->{$api_key_id}
-    if defined($api_key_id) && length($api_key_id) && $self->key_policies->{$api_key_id};
+  my $id = $self->_configured_key_id($self->key_policies, $api_key_id);
+  return $self->key_policies->{$id} if defined($id) && $self->key_policies->{$id};
   return $self->default_policy;
 }
 
 =method key_id_for_name
 
-  my $id = $skeid->key_id_for_name('alice');   # k_5f0e1a2b3c4d, or undef
+  my $id = $skeid->key_id_for_name('alice');   # k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b, or undef
 
 The customer key id a readable name maps to under the config C<names:> section, or undef when
 the name is not registered. The registry is a config-authoring convenience -- it lets a

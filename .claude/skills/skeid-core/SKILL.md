@@ -105,13 +105,16 @@ policies:
   trial:     { models: [house-model] }     # one product, anywhere
 default_policy: standard
 keys:
-  k_5f0e1a2b3c4d: burstable                # `skeid keyid <key>` prints the id
-  k_9c8b7a6f5e4d: { policy: standard, deny_tags: [cloud, eu-outside] }
+  k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b: burstable  # `skeid keyid <key>` prints the id
+  k_9c8b7a6f5e4de5f60718293a4b5c6d7e8f901a2b: { policy: standard, deny_tags: [cloud, eu-outside] }
 ```
 
 - A key entry is a profile name, or a hash with `policy` plus **sparse** overrides — an absent
   field keeps the profile's value.
 - Unlisted keys take `default_policy`. Ten thousand identical customers are zero entries.
+- A key id is `k_` + the key's full SHA-1 hex (ADR 0016). A legacy 12-hex id in `keys:` /
+  `names:` still matches by prefix (`_configured_key_id`, warned once); a short id plus the
+  full id it prefixes is a load error. Usage events keep their recorded id — no migration.
 - Identical resolutions are interned, so keys on one profile share one object.
 - Naming an undefined policy **croaks** at load. Failing open here would hand out access.
 

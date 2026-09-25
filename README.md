@@ -76,7 +76,9 @@ curl -X POST http://localhost:5591/v1/chat/completions \
 ```
 
 The key id this bills and routes under is derived from the key itself — `skeid keyid
-sk-alice-secret-key` prints it, and that is what a `keys:` entry names. Skeid ignores a
+sk-alice-secret-key` prints it, and that is what a `keys:` entry names. It is the key's full
+SHA-1 digest (`k_` + 40 hex); an older 12-digit id still matches the key it is the prefix of,
+with a deprecation warning (ADR 0016). Skeid ignores a
 client-supplied `x-skeid-key-id` unless `routing.trust_key_id_header` is set, which is only
 correct when something in front of Skeid authenticates the caller: otherwise any client could
 name itself into another customer's routing policy and invoice.

@@ -150,27 +150,27 @@ use Langertha::Skeid::Proxy;
       },
       default_policy => 'standard',
       names => {
-        alice   => 'k_5f0e1a2b3c4d',
-        bigcorp => 'k_9c8b7a6f5e4d',
+        alice   => 'k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b',
+        bigcorp => 'k_9c8b7a6f5e4de5f60718293a4b5c6d7e8f901a2b',
       },
       keys => {
         alice          => 'burstable',                 # written by readable name ...
         bigcorp        => { policy => 'standard', deny_tags => [] },
-        k_1122334455aa => 'burstable',                 # ... or still by the raw key id
+        k_1122334455aae5f60718293a4b5c6d7e8f901a2b => 'burstable',                 # ... or still by the raw key id
       },
     };
   });
 
-  is($skeid->key_id_for_name('alice'), 'k_5f0e1a2b3c4d', 'a name resolves to the customer key id it was given');
+  is($skeid->key_id_for_name('alice'), 'k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b', 'a name resolves to the customer key id it was given');
   is($skeid->key_id_for_name('nobody'), undef, 'an unregistered name resolves to nothing');
 
   # The registry is a config-authoring convenience: it is resolved to ids at load, so the
   # request path still keys on the derived id the caller's key produces, one hash lookup.
-  is_deeply($skeid->policy_for_key('k_5f0e1a2b3c4d')->{deny_tags}, [],
+  is_deeply($skeid->policy_for_key('k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b')->{deny_tags}, [],
     'a keys: entry written by name attaches its policy to the id the name maps to');
-  is_deeply($skeid->policy_for_key('k_9c8b7a6f5e4d')->{deny_tags}, [],
+  is_deeply($skeid->policy_for_key('k_9c8b7a6f5e4de5f60718293a4b5c6d7e8f901a2b')->{deny_tags}, [],
     "the named override reaches the mapped id, not the name");
-  is_deeply($skeid->policy_for_key('k_1122334455aa')->{deny_tags}, [],
+  is_deeply($skeid->policy_for_key('k_1122334455aae5f60718293a4b5c6d7e8f901a2b')->{deny_tags}, [],
     'and a raw-id entry alongside the named ones still resolves');
 
   # The name itself is never a customer key id, so it must not be a policy key -- looking it up
@@ -183,7 +183,7 @@ use Langertha::Skeid::Proxy;
 {
   ok(!eval {
     Langertha::Skeid->new(config_loader => sub {
-      { names => { alice => { id => 'k_5f0e1a2b3c4d' } } };
+      { names => { alice => { id => 'k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b' } } };
     });
     1;
   }, 'a name mapping to a structure croaks -- a name points at one key id, not an object');
@@ -197,8 +197,8 @@ use Langertha::Skeid::Proxy;
     Langertha::Skeid->new(config_loader => sub {
       {
         policies => { p => {} },
-        names    => { alice => 'k_5f0e1a2b3c4d' },
-        keys     => { alice => 'p', k_5f0e1a2b3c4d => 'p' },
+        names    => { alice => 'k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b' },
+        keys     => { alice => 'p', k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b => 'p' },
       };
     });
     1;
@@ -237,7 +237,7 @@ my $CLOUD_KEY   = 'sk-test-may-use-cloud';
 my $LOCAL_ID    = Langertha::Skeid->key_id_for_key($LOCAL_KEY);
 my $CLOUD_ID    = Langertha::Skeid->key_id_for_key($CLOUD_KEY);
 
-like($LOCAL_ID, qr/^k_[0-9a-f]{12}$/, 'a key id is derived from the key the caller presents');
+like($LOCAL_ID, qr/^k_[0-9a-f]{40}$/, 'a key id is derived from the key the caller presents');
 isnt($LOCAL_ID, $CLOUD_ID, 'and differs per key');
 
 my @events;
