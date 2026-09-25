@@ -9,6 +9,11 @@ Revision history for Langertha-Skeid
       done_reason, prompt_eval_count, eval_count), streamed as NDJSON
       unless stream is false. format, think, suffix, template, raw,
       context and keep_alive are not forwarded, and no context is returned
+    - Images inside an Anthropic tool_result reach the model. An OpenAI
+      tool message cannot carry them, so the tool message keeps the
+      result's other blocks and one user message after the tool messages
+      carries every result's images, each labelled "Images from tool
+      result <tool_use_id>:". A Files API image there is answered with 400
     - Images reach the model through the Anthropic and Ollama faces. An
       Anthropic image block (base64 or url source) and an Ollama message's
       images become OpenAI image_url parts, text and images in the order

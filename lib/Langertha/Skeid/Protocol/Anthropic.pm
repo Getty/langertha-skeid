@@ -8,6 +8,9 @@ use Langertha::Tool;
 use Langertha::ToolCall;
 use Langertha::ToolChoice;
 
+# What a tool message says when its tool_result held images only.
+my $TOOL_IMAGES_MOVED = 'The tool result is the images in the next message.';
+
 =head1 DESCRIPTION
 
 Serves C<POST /v1/messages>. Anthropic-specific field names live here and nowhere else in
@@ -47,7 +50,18 @@ each image as an C<image_url> part -- a C<base64> source as a C<data:> URL with 
 C<media_type>, a C<url> source as that URL. An image source of any other type (a Files API
 C<file_id>) makes it die, answered as a C<400>. C<tool_use> blocks become C<tool_calls> on the assistant message; C<tool_result>
 blocks become their own C<role => 'tool'> message carrying C<tool_call_id>, which is why a
-single Anthropic message can expand into several OpenAI ones.
+single Anthropic message can expand into several OpenAI ones. A structured C<tool_result>
+content is sent as its JSON text.
+
+An OpenAI tool message cannot carry images, so the C<image> blocks of a C<tool_result> are
+lifted out of it: its tool message keeps the other blocks as JSON text (or, when there are none,
+a sentence saying the result is the images in the next message), and right after the run of
+tool messages one user message follows with the images of every C<tool_result> in that
+Anthropic message, each result's images as C<image_url> parts after a text part
+C<Images from tool result E<lt>tool_use_idE<gt>:>. The user message goes after all the tool
+messages because an OpenAI conversation wants the answers to an assistant's tool calls
+directly after it. The client's own text and images in the same message follow as their own
+user message.
 
 Only function tools are translated. A provider built-in in C<tools> (C<web_search_20250305>,
 C<bash_20250124>, C<text_editor_*>, C<computer_*>, C<mcp_toolset>, ...) or a definition
@@ -85,6 +99,7 @@ sub request_to_openai {
       my @parts;        # text and image parts in client order, used once an image appears
       my $has_image;
       my @tool_calls;
+      my @tool_images;  # image parts lifted out of this message's tool_result blocks
 
       for my $block (@$content) {
         next unless ref($block) eq 'HASH';
@@ -120,6 +135,14 @@ sub request_to_openai {
         if ($type eq 'tool_result') {
           my $tcid = $block->{tool_use_id} // $block->{id} // '';
           my $val = $block->{content};
+          # An OpenAI tool message carries no image parts. Its images move to the one user
+          # message that follows this run of tool messages; the tool message keeps the rest.
+          if (ref($val) eq 'ARRAY' && grep { _is_image_block($_) } @$val) {
+            push @tool_images, { type => 'text', text => "Images from tool result $tcid:" },
+              map { _image_part($_) } grep { _is_image_block($_) } @$val;
+            my @rest = grep { !_is_image_block($_) } @$val;
+            $val = @rest ? \@rest : $TOOL_IMAGES_MOVED;
+          }
           my $txt = ref($val) ? Langertha::Skeid::Protocol::encode_json_text_safe($val) : (defined($val) ? "$val" : '');
           push @messages, {
             role => 'tool',
@@ -129,6 +152,8 @@ sub request_to_openai {
           next;
         }
       }
+
+      push @messages, { role => 'user', content => \@tool_images } if @tool_images;
 
       my $text = join('', @text);
       if ($role eq 'assistant') {
@@ -180,6 +205,11 @@ sub request_to_openai {
   }
 
   return \%out;
+}
+
+sub _is_image_block {
+  my ($block) = @_;
+  return ref($block) eq 'HASH' && ($block->{type} // '') eq 'image';
 }
 
 # An Anthropic image block as an OpenAI image_url part: a base64 source becomes a data URL

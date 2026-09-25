@@ -136,6 +136,80 @@ sub upstream_messages_for {
   is(scalar @upstream_bodies, 0, 'and nothing reaches the upstream');
 }
 
+# --- Anthropic tool_result images (skeid #43) ---
+# A computer-use or screenshot tool answers with image blocks inside its tool_result. An OpenAI
+# tool message takes no image parts, so they were JSON-stringified into its text: the model got
+# a base64 blob as characters instead of a picture. They move to one user message placed after
+# the whole run of tool messages -- OpenAI wants the tool answers directly after the assistant's
+# tool calls -- each result's images labelled with its tool_use_id.
+{
+  my $messages = upstream_messages_for('/v1/messages', {
+    model => 'm1', max_tokens => 64,
+    messages => [
+      { role => 'user', content => 'Take two screenshots.' },
+      { role => 'assistant', content => [
+        { type => 'tool_use', id => 'toolu_1', name => 'screenshot', input => { screen => 1 } },
+        { type => 'tool_use', id => 'toolu_2', name => 'screenshot', input => { screen => 2 } },
+      ] },
+      { role => 'user', content => [
+        { type => 'tool_result', tool_use_id => 'toolu_1', content => [
+          { type => 'text', text => 'Bildschirm eins' },
+          { type => 'image', source => { type => 'base64', media_type => 'image/png', data => $PNG } },
+        ] },
+        { type => 'tool_result', tool_use_id => 'toolu_2', content => [
+          { type => 'image', source => { type => 'url', url => 'https://img.example.com/two.jpg' } },
+        ] },
+        { type => 'tool_result', tool_use_id => 'toolu_3', content => 'plain text result' },
+        { type => 'text', text => 'Compare them.' },
+      ] },
+    ],
+  });
+  is_deeply([ map { $_->{role} } @$messages ], [qw(user assistant tool tool tool user user)],
+    'tool messages first, then the one images message, then the client text');
+  is_deeply($messages->[2], { role => 'tool', tool_call_id => 'toolu_1',
+    content => '[{"text":"Bildschirm eins","type":"text"}]' },
+    'the tool message keeps its other blocks as JSON text, without the image');
+  is_deeply($messages->[3], { role => 'tool', tool_call_id => 'toolu_2',
+    content => 'The tool result is the images in the next message.' },
+    'an image-only result says where its content went instead of sending an empty []');
+  is_deeply($messages->[4], { role => 'tool', tool_call_id => 'toolu_3', content => 'plain text result' },
+    'a string result is unchanged');
+  is_deeply($messages->[5], { role => 'user', content => [
+    { type => 'text', text => 'Images from tool result toolu_1:' },
+    { type => 'image_url', image_url => { url => "data:image/png;base64,$PNG" } },
+    { type => 'text', text => 'Images from tool result toolu_2:' },
+    { type => 'image_url', image_url => { url => 'https://img.example.com/two.jpg' } },
+  ] }, 'one user message carries every result\'s images, each labelled with its tool_use_id');
+  is_deeply($messages->[6], { role => 'user', content => 'Compare them.' }, 'the client text follows');
+
+  # Without images a structured result is the JSON text it always was (non-regression).
+  $messages = upstream_messages_for('/v1/messages', {
+    model => 'm1', max_tokens => 64,
+    messages => [
+      { role => 'assistant', content => [ { type => 'tool_use', id => 'toolu_9', name => 't', input => {} } ] },
+      { role => 'user', content => [
+        { type => 'tool_result', tool_use_id => 'toolu_9', content => [ { type => 'text', text => 'ok' } ] },
+      ] },
+    ],
+  });
+  is_deeply($messages->[1], { role => 'tool', tool_call_id => 'toolu_9', content => '[{"text":"ok","type":"text"}]' },
+    'a text-only structured result is unchanged');
+  is(scalar @$messages, 2, 'and no images message is added');
+
+  @upstream_bodies = ();
+  my $res = post_json('/v1/messages', {
+    model => 'm1', max_tokens => 64,
+    messages => [
+      { role => 'assistant', content => [ { type => 'tool_use', id => 'toolu_f', name => 't', input => {} } ] },
+      { role => 'user', content => [ { type => 'tool_result', tool_use_id => 'toolu_f', content => [
+        { type => 'image', source => { type => 'file', file_id => 'file_123' } },
+      ] } ] },
+    ],
+  });
+  is($res->code, 400, 'a Files API image inside a tool_result is refused like one outside it');
+  is(scalar @upstream_bodies, 0, 'and nothing reaches the upstream');
+}
+
 # --- Ollama face: message.images become image_url data URLs with sniffed types ---
 {
   my $messages = upstream_messages_for('/api/chat', {
