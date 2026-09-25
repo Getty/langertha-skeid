@@ -1,0 +1,20 @@
+---
+claimed_at: 2026-09-25T16:28:55Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T16:28:55Z
+created: 2026-09-25T16:08:26Z
+id: 38
+priority: medium
+started: 2026-09-25T16:28:55Z
+status: done
+tags:
+- config
+- reload
+- performance
+title: 'config_loader: every call_function reruns the loader and replaces the node
+  list, restarting probes'
+updated: 2026-09-25T16:28:55Z
+---
+
+From skeid #29 review I2 (general path): with a config_loader, maybe_reload_config runs on every call_function (every chat request); each run rebuilds the node list, which bumps the inventory generation and restarts probes. Fix: loader-based reload needs a change detector (loader returns a version/etag/digest, or skeid digests the loaded structure) and a throttle; identical node lists must not reset probes; keep admin-API-set health across a no-op reload. Tests counting loader calls/probe restarts over N requests.
