@@ -89,6 +89,12 @@ sub build_app {
     $c->render(json => { status => 'ok', proxy => 'skeid' });
   });
 
+  # Provider manifest (skeid #29, ADR 0015): per customer key, never the whole catalog.
+  $r->get('/.well-known/langertha.json' => sub {
+    my ($c) = @_;
+    _handle_manifest($c);
+  });
+
   # OpenAI format
   $r->get('/v1/models' => sub {
     my ($c) = @_;
@@ -224,6 +230,45 @@ sub _authorize_admin {
     return undef;
   }
   return 1;
+}
+
+# What a key is shown depends on who presents it, so no shared cache may hand one key's answer
+# to another: every answer -- 404/401/403 included -- is private and varies on each header that
+# can carry the identity. 404 when nothing is published (disabled, or a Langertha without
+# Langertha::Manifest), 401 without a key (ADR 0015: no anonymous manifest, not even a minimal
+# one), 403 for a key without a manifest: grant, else the manifest built for that key id.
+sub _handle_manifest {
+  my ($c) = @_;
+  my $skeid = $c->skeid;
+  $skeid->maybe_reload_config;
+
+  my $headers = $c->res->headers;
+  $headers->header('Cache-Control' => 'private, no-cache');
+  $headers->header(Vary => 'Authorization, X-Api-Key, X-Skeid-Key-Id, X-Api-Key-Id');
+
+  unless ($skeid->manifest_enabled && $skeid->manifest_available) {
+    $c->render(status => 404,
+      json => { error => { message => 'No provider manifest is published here', type => 'not_found' } });
+    return;
+  }
+
+  my $api_key_id = _request_api_key_id($c);
+  if (!defined($api_key_id) || $api_key_id eq 'anonymous') {
+    $headers->header('WWW-Authenticate' => 'Bearer realm="skeid"');
+    $c->render(status => 401,
+      json => { error => { message => 'An API key is required for the provider manifest', type => 'unauthorized' } });
+    return;
+  }
+
+  my $json = $skeid->manifest_for_key($api_key_id);
+  unless (defined $json) {
+    $c->render(status => 403,
+      json => { error => { message => 'No provider manifest is published for this key', type => 'permission_error' } });
+    return;
+  }
+
+  $c->render(data => $json, format => 'json');
+  return;
 }
 
 sub _handle_openai_chat {

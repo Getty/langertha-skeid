@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - GET /.well-known/langertha.json serves a provider manifest per customer
+      key: only the models that key's keys: entry lists under manifest.models,
+      on the openai, anthropic (anthropic-compat) and ollama faces under
+      manifest.public_url, never a node URL or upstream key. Off until
+      manifest.enabled; 401 without a key, 403 for a key without a grant, 404
+      when disabled or on a Langertha without Langertha::Manifest
     - A streamed request's usage event carries content_bytes, the UTF-8
       byte count of the content relayed or translated (non-ASCII included),
       on every face; it is optional (absent on non-streamed events), never

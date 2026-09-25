@@ -163,6 +163,44 @@ If empty, admin routes are effectively disabled by returning C<404>. If set,
 the proxy expects C<Authorization: Bearer ...>. This value can be changed
 through dynamic config reload.
 
+=head2 Provider Manifest
+
+C<GET /.well-known/langertha.json> serves a provider manifest (core's
+L<Langertha::Manifest>, schema v1) to a customer key -- listing only the models that key's own
+C<keys:> entry names. Nothing is published automatically: the route answers C<404> until the
+config turns it on, and a key without a C<manifest:> entry gets C<403>, never the catalog.
+
+  manifest:
+    enabled: true
+    public_url: https://llm.example.com   # where clients reach Skeid -- never a node URL
+    provider_id: example-llm              # default: skeid
+    faces: [openai, anthropic, ollama]    # default: all three
+    capabilities:                         # optional claims per model; default chat + streaming
+      house-model: { tools_native: true, tool_choice_auto: true }
+  keys:
+    alice:
+      policy: burstable
+      manifest: { models: [house-model, qwen3-32b] }
+    bob:
+      manifest: { models: [house-model] }
+
+One endpoint per face, all under C<public_url> and all with one C<api_key> auth entry (the
+C<Authorization: Bearer> / C<x-api-key> scheme every face already takes): C<openai>
+(C<openai-chat>, C<public_url/v1>), C<anthropic> (C<anthropic-compat> at C<public_url> --
+Skeid translates C</v1/messages> to the OpenAI upstream call and does not carry
+C<output_config.format>, so structured output takes the synthetic-tool path) and C<ollama>
+(C<public_url>). Every listed model appears on every published face with the same
+capabilities, which default to C<chat> and C<streaming> and may only name flags from
+L<Langertha::Manifest::Builder/model_capabilities>.
+
+Resolved at config load, like the routing policy: each key's manifest is built and validated
+once and stored under the key id, so a request costs one hash lookup and one key's manifest
+cannot be served for another. The load croaks on a model the key's routing policy does not
+let it reach (not granted, or served only by nodes it is denied), on an unknown capability
+or face, and on an enabled manifest without C<public_url>.
+Without a key the route answers C<401>. Needs a Langertha with L<Langertha::Manifest>; on an
+older one the route answers C<404>. See ADR 0015 in the distribution repository.
+
 =cut
 
 has nodes => (
@@ -206,6 +244,27 @@ has key_policies => (
 # one line, and is resolved to key ids once at config load. It never reaches the request path
 # -- a request still carries a derived key id, and policy_for_key still costs one hash lookup.
 has key_names => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
+# /.well-known/langertha.json (skeid #29, ADR 0015). Off until the config enables it.
+has manifest_enabled => (
+  is      => 'rw',
+  default => sub { 0 },
+);
+
+# Whether this Langertha has Langertha::Manifest (core newer than 0.503). Enabled without it,
+# the route answers 404 rather than failing the config.
+has manifest_available => (
+  is      => 'rw',
+  default => sub { 0 },
+);
+
+# Key id -> the canonical JSON of that key's manifest, built at config load. This is the
+# manifest cache, and it is keyed by the key id the caller's key derives to: a customer can
+# only ever be served the entry built from its own keys: line, never another key's catalog.
+has key_manifests => (
   is      => 'rw',
   default => sub { {} },
 );
@@ -651,6 +710,9 @@ sub reload_config {
     $self->admin_api_key('');
   }
 
+  # Last: a key's manifest is checked against its routing policy and the aliases.
+  $self->_load_manifest($cfg);
+
   my $usage_cfg = $cfg->{usage_store};
   if (ref($usage_cfg) eq 'HASH') {
     $self->_configure_usage_store($usage_cfg);
@@ -684,6 +746,182 @@ sub maybe_reload_config {
     return 1;
   }
   return 0;
+}
+
+# The client-facing faces Skeid serves, as manifest endpoints: dialect and the path under
+# public_url a client adapter of that dialect takes as its base URL. The Anthropic face is
+# anthropic-compat, not anthropic: it is translated to the OpenAI upstream call and does not
+# carry output_config.format, which is exactly the /anthropic-shim contract of core ADR 0029.
+my %MANIFEST_FACES = (
+  openai    => { dialect => 'openai-chat',      path => '/v1' },
+  anthropic => { dialect => 'anthropic-compat', path => '' },
+  ollama    => { dialect => 'ollama',           path => '' },
+);
+my @MANIFEST_FACE_ORDER = qw(openai anthropic ollama);
+my $manifest_unavailable_warned;
+
+sub _is_true {
+  my ($value) = @_;
+  return (defined($value) && "$value" =~ /^(1|true|yes|on)$/i) ? 1 : 0;
+}
+
+# Resolves the manifest section and every key's manifest: grant once, at config load (ADR
+# 0015). Nothing is published that a keys: entry does not list, and what is listed has to be
+# something that key's routing policy lets it reach -- a contradiction is a load error, not a
+# manifest that promises a model the request path then refuses with 403.
+sub _load_manifest {
+  my ($self, $cfg) = @_;
+  $self->manifest_enabled(0);
+  $self->key_manifests({});
+
+  my %grants;
+  if (ref($cfg->{keys}) eq 'HASH') {
+    for my $label (sort keys %{$cfg->{keys}}) {
+      my $entry = $cfg->{keys}{$label};
+      next unless ref($entry) eq 'HASH' && exists $entry->{manifest};
+      my $grant = $entry->{manifest};
+      croak "key '$label': manifest must be a hashref with a models list"
+        unless ref($grant) eq 'HASH' && ref($grant->{models}) eq 'ARRAY';
+      my (%seen, @models);
+      for my $model (@{$grant->{models}}) {
+        croak "key '$label': manifest models must be non-empty model names"
+          unless defined($model) && !ref($model) && length($model);
+        push @models, "$model" unless $seen{$model}++;
+      }
+      my $id = $self->key_names->{$label} // $label;
+      $grants{$id} = { label => $label, models => \@models };
+    }
+  }
+
+  my $section = $cfg->{manifest};
+  return 1 unless defined $section;
+  croak 'manifest must be a hashref' unless ref($section) eq 'HASH';
+  return 1 unless _is_true($section->{enabled});
+
+  my $public_url = $section->{public_url};
+  croak 'manifest.public_url is required when the manifest is enabled: the URL clients reach '
+    . 'Skeid at, never a node URL'
+    unless defined($public_url) && !ref($public_url) && length($public_url);
+  $public_url =~ s{/+\z}{};
+  my ($issuer) = $public_url =~ m{\A([A-Za-z][A-Za-z0-9+.-]*://[^/?#]+)};
+  croak "manifest.public_url must be an absolute http(s) URL, got '$public_url'" unless $issuer;
+
+  my $provider_id = $section->{provider_id} // 'skeid';
+
+  my @faces = @MANIFEST_FACE_ORDER;
+  if (defined $section->{faces}) {
+    croak 'manifest.faces must be a list' unless ref($section->{faces}) eq 'ARRAY';
+    my %want;
+    for my $face (@{$section->{faces}}) {
+      croak "manifest.faces: unknown face '" . ($face // '') . "' (known: @MANIFEST_FACE_ORDER)"
+        unless defined($face) && !ref($face) && $MANIFEST_FACES{$face};
+      $want{$face} = 1;
+    }
+    @faces = grep { $want{$_} } @MANIFEST_FACE_ORDER;
+    croak 'manifest.faces must name at least one face' unless @faces;
+  }
+
+  my $declared = $section->{capabilities} // {};
+  croak 'manifest.capabilities must map model names to capability hashes'
+    unless ref($declared) eq 'HASH' && !grep { ref($_) ne 'HASH' } values %$declared;
+
+  $self->manifest_enabled(1);
+
+  # Core's manifest (Langertha::Manifest, ADR 0029) is newer than the released Langertha this
+  # dist requires. Without it the route answers 404; the config is still loaded.
+  unless (eval { require Langertha::Manifest::Builder; 1 }) {
+    $self->manifest_available(0);
+    warn "skeid: manifest is enabled, but this Langertha has no Langertha::Manifest; "
+      . "/.well-known/langertha.json answers 404\n"
+      unless $manifest_unavailable_warned++;
+    return 1;
+  }
+  $self->manifest_available(1);
+
+  my %allowed = map { $_ => 1 } Langertha::Manifest::Builder->model_capabilities;
+  for my $model (sort keys %$declared) {
+    for my $flag (sort keys %{$declared->{$model}}) {
+      croak "manifest.capabilities.$model: '$flag' is not a model capability a manifest may "
+        . 'claim (see Langertha::Manifest::Builder->model_capabilities)'
+        unless $allowed{$flag};
+    }
+  }
+
+  my %manifests;
+  for my $id (sort keys %grants) {
+    my $grant = $grants{$id};
+    for my $model (@{$grant->{models}}) {
+      croak "key '$grant->{label}': manifest lists model '$model', which its routing policy "
+        . 'does not let it reach'
+        unless $self->_manifest_model_reachable($model, $id);
+    }
+    my $json = eval {
+      my $builder = Langertha::Manifest::Builder->new(
+        provider_id => $provider_id,
+        issuer      => $issuer,
+      );
+      $builder->add_auth(id => 'api', type => 'api_key');
+      for my $face (@faces) {
+        $builder->add_endpoint(
+          id       => $face,
+          dialect  => $MANIFEST_FACES{$face}{dialect},
+          base_url => $public_url . $MANIFEST_FACES{$face}{path},
+          auth_ref => 'api',
+        );
+        for my $model (@{$grant->{models}}) {
+          my %caps = (chat => 1, streaming => 1);
+          my $claims = $declared->{$model} || {};
+          for my $flag (keys %$claims) {
+            if (_is_true($claims->{$flag})) { $caps{$flag} = 1 } else { delete $caps{$flag} }
+          }
+          $builder->add_model(id => $model, endpoint_ref => $face, capabilities => \%caps);
+        }
+      }
+      $builder->manifest->to_json;
+    };
+    unless (defined $json) {
+      (my $err = $@) =~ s/\s+at \S+ line \d+\.?\s*\z//s;
+      croak "key '$grant->{label}': manifest does not validate: $err";
+    }
+    $manifests{$id} = $json;
+  }
+
+  $self->key_manifests(\%manifests);
+  return 1;
+}
+
+# Whether the key could be routed to the model at all: its policy grants the name, and some
+# node a permitted tier selects -- deny_tags applied, health ignored (a manifest is a claim,
+# not a probe) -- serves it. A raw node model behind a denied tag is as unreachable as an alias
+# the policy leaves out (ADR 0008), so it is not published either.
+sub _manifest_model_reachable {
+  my ($self, $model, $api_key_id) = @_;
+  my $plan = $self->route_plan(model => $model, api_key_id => $api_key_id);
+  return 0 unless $plan->{permitted};
+  for my $tier (@{$plan->{tiers}}) {
+    for my $node (@{$self->select_nodes(tags => $tier->{tags}, deny_tags => $tier->{deny_tags})}) {
+      my $served = $node->{model};
+      return 1 if !defined($served) || !length($served) || $served eq $tier->{model};
+    }
+  }
+  return 0;
+}
+
+=method manifest_for_key
+
+  my $json = $skeid->manifest_for_key($api_key_id);   # UTF-8 JSON bytes, or undef
+
+The provider manifest published to a customer key id, as canonical JSON, or undef when the
+key has no C<manifest:> grant, the manifest is disabled, or this Langertha has no
+L<Langertha::Manifest>. Built at config load; see L</Provider Manifest>.
+
+=cut
+
+sub manifest_for_key {
+  my ($self, $api_key_id) = @_;
+  return undef unless $self->manifest_enabled && $self->manifest_available;
+  return undef unless defined($api_key_id) && length($api_key_id);
+  return $self->key_manifests->{$api_key_id};
 }
 
 sub configure_usage_store {
