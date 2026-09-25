@@ -177,7 +177,7 @@ sub response_from_openai {
       content => $text,
       (@$tool_calls ? (tool_calls => $tool_calls) : ()),
     },
-    done       => 1,
+    done       => \1,
     done_reason => ($choice->{finish_reason} // 'stop'),
     prompt_eval_count => 0 + (($res->{usage} || {})->{prompt_tokens} // 0),
     eval_count        => 0 + (($res->{usage} || {})->{completion_tokens} // 0),

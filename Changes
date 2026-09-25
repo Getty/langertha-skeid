@@ -2,6 +2,9 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A non-streamed Ollama /api/chat answer sends done as the JSON
+      boolean true, as Ollama does, instead of the number 1 that typed
+      clients (Go, Rust serde, pydantic) reject
     - Ollama POST /api/generate is served, with the same key policy,
       routing, usage event and pricing as /api/chat. system and prompt,
       with the request's images, become one chat conversation upstream;

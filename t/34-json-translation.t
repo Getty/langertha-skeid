@@ -5,8 +5,10 @@ use Mojolicious;
 use Mojo::IOLoop;
 use Mojo::Server::Daemon;
 use Mojo::UserAgent;
+use JSON::MaybeXS ();
 use Langertha::Skeid;
 use Langertha::Skeid::Proxy;
+use Langertha::Skeid::Protocol::Ollama::Stream;
 
 # The translated formats have a non-streaming path too, and until this file existed nothing
 # drove it: every /v1/messages and /api/chat test asked for a stream, where the translation is
@@ -65,6 +67,16 @@ sub post_json {
   return $tx->res;
 }
 
+sub get_path {
+  my ($path) = @_;
+  my $tx;
+  my $guard = Mojo::IOLoop->timer(10 => sub { Mojo::IOLoop->stop });
+  $ua->get("http://127.0.0.1:$port$path" => sub { (undef, $tx) = @_; Mojo::IOLoop->stop });
+  Mojo::IOLoop->start;
+  Mojo::IOLoop->remove($guard);
+  return $tx->res;
+}
+
 # --- Anthropic ---
 {
   my $res = post_json('/v1/messages', {
@@ -97,6 +109,56 @@ sub post_json {
   is $body->{model}, 'm1', 'the model is reported, not an empty string';
   is $body->{eval_count}, 2, 'eval_count is the completion token count';
   is $body->{prompt_eval_count}, 7, 'prompt_eval_count is the prompt token count';
+}
+
+# --- Ollama face: JSON types as Ollama sends them (skeid #44) ---
+# Ollama's replies are typed: done is a JSON boolean, the counts and sizes are integers,
+# created_at is an RFC 3339 stamp. A typed client (Go's api package, Rust serde, pydantic)
+# decodes into those types and rejects "done":1 or "eval_count":"2" -- a Perl or JS client
+# never notices, so the assertions read the raw body, not a decoded value that hides the type.
+{
+  my $rfc3339 = qr/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)\z/;
+
+  for my $case (
+    [ '/api/chat',     { messages => [{ role => 'user', content => 'hi' }] } ],
+    [ '/api/generate', { prompt => 'hi' } ],
+  ) {
+    my ($path, $extra) = @$case;
+    my $res = post_json($path, { model => 'm1', stream => JSON::MaybeXS::false, %$extra });
+    is $res->code, 200, "$path non-streamed is answered";
+    my $raw = $res->body;
+    like $raw, qr/"done":true\b/, "$path: done is the JSON boolean true, not the number 1";
+    like $raw, qr/"prompt_eval_count":7\b/, "$path: prompt_eval_count is a JSON integer";
+    like $raw, qr/"eval_count":2\b/, "$path: eval_count is a JSON integer";
+    like $res->json->{created_at}, $rfc3339, "$path: created_at is RFC 3339";
+    ok !grep({ /_duration\z/ } keys %{ $res->json }),
+      "$path: no *_duration is invented -- Skeid does not measure Ollama's stages";
+  }
+
+  my $tags = get_path('/api/tags');
+  is $tags->code, 200, '/api/tags is answered';
+  like $tags->body, qr/"size":0\b/, '/api/tags: size is a JSON integer';
+  my $model = $tags->json->{models}[0];
+  is $model->{name}, 'm1', '/api/tags lists the node model';
+  like $model->{modified_at}, $rfc3339, '/api/tags: modified_at is RFC 3339';
+  is ref($model->{details}), 'HASH', '/api/tags: details is an object';
+
+  my $ps = get_path('/api/ps');
+  is $ps->code, 200, '/api/ps is answered';
+  is ref($ps->json->{models}), 'ARRAY', '/api/ps: models is an array';
+}
+
+# The streamed lines are typed the same way: every delta says "done":false, the closing line
+# "done":true, and its counts are integers -- on both stream shapes.
+for my $shape (qw(chat generate)) {
+  my $stream = Langertha::Skeid::Protocol::Ollama::Stream->new(model => 'm1', shape => $shape);
+  my $delta = $stream->delta({ choices => [{ index => 0, delta => { content => 'Hel' } }] });
+  $stream->delta({ choices => [], usage => { prompt_tokens => 7, completion_tokens => 2 } });
+  my $last = $stream->finish;
+  like $delta, qr/"done":false\b/, "$shape stream: a delta line is done:false";
+  like $last,  qr/"done":true\b/,  "$shape stream: the closing line is done:true";
+  like $last,  qr/"prompt_eval_count":7\b/, "$shape stream: prompt_eval_count is an integer";
+  like $last,  qr/"eval_count":2\b/, "$shape stream: eval_count is an integer";
 }
 
 done_testing;
