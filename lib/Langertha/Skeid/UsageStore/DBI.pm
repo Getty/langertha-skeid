@@ -104,6 +104,8 @@ my @ADDED_COLUMNS = (
   # ("was not measured"), which is not the same as a measured zero. BIGINT is INTEGER affinity
   # in SQLite and a 64-bit integer in PostgreSQL, so one type serves both ALTER statements.
   ['cached_tokens', 'BIGINT'],
+  # UTF-8 bytes a streamed request relayed (skeid #36). Nullable: only streamed events carry it.
+  ['content_bytes', 'BIGINT'],
 );
 
 sub _add_missing_columns {
@@ -234,8 +236,9 @@ sub store {
     INSERT INTO usage_events (
       created_at, request_id, api_format, endpoint, api_key_id, provider, engine, model, node_id, route_url,
       status_code, ok, duration_ms, input_tokens, output_tokens, total_tokens, cached_tokens, tool_calls,
-      cost_input_usd, cost_output_usd, cost_total_usd, error_type, error_message, requested_model
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cost_input_usd, cost_output_usd, cost_total_usd, error_type, error_message, requested_model,
+      content_bytes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   });
   $sth->execute(
     $event->{created_at},
@@ -263,6 +266,8 @@ sub store {
     $event->{error_type},
     $event->{error_message},
     ($event->{requested_model} // $event->{model} // ''),
+    # Nullable: only a streamed request carries it; anything else writes NULL, "not measured".
+    $event->{content_bytes},
   );
 
   my %out = (ok => 1);

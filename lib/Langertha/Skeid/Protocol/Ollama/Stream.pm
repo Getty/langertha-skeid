@@ -123,7 +123,9 @@ sub finish {
 
   my ($input, $output, $content_bytes) = $stream->usage;
 
-What the stream carried, for the usage event. C<content_bytes> counts UTF-8 bytes.
+What the stream carried, for the usage event. C<content_bytes> counts UTF-8 bytes of the text
+this translator wrote and becomes the event's C<content_bytes>, recorded beside the token counts
+on every stream -- an observation, never an estimate of tokens.
 
 =cut
 

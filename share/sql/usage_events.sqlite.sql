@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   total_tokens INTEGER NOT NULL DEFAULT 0,
   cached_tokens INTEGER,
+  content_bytes INTEGER,
   tool_calls INTEGER NOT NULL DEFAULT 0,
   cost_input_usd REAL NOT NULL DEFAULT 0,
   cost_output_usd REAL NOT NULL DEFAULT 0,

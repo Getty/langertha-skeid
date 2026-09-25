@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   output_tokens BIGINT NOT NULL DEFAULT 0,
   total_tokens BIGINT NOT NULL DEFAULT 0,
   cached_tokens BIGINT,
+  content_bytes BIGINT,
   tool_calls BIGINT NOT NULL DEFAULT 0,
   cost_input_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   cost_output_usd DOUBLE PRECISION NOT NULL DEFAULT 0,

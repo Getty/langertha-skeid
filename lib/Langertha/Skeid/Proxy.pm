@@ -678,6 +678,11 @@ sub _proxy_openai_stream {
   my $status = 200;
   my $accumulated_usage = { input => 0, output => 0, total => 0, cached => 0 };
   my $accumulated_content_bytes = 0;
+  # UTF-8 bytes of the content this stream relayed or translated, for the usage event (skeid #36).
+  # A relayed stream counts off the OpenAI deltas it read along; a translated one takes its
+  # translator's own count -- the text it actually wrote in the client's format. An observation
+  # recorded beside the token counts, never a substitute for them.
+  my $content_bytes = sub { $stream ? 0 + ((($stream->usage)[2]) // 0) : $accumulated_content_bytes };
 
   # Upstream chunks arrive faster than they can be written out, so they are queued and drained
   # one at a time. Writing each chunk directly would end the response after the first one:
@@ -805,6 +810,7 @@ sub _proxy_openai_stream {
           duration_ms   => $duration_ms,
           error_type    => 'upstream_error',
           error_message => ($err->{message} // 'unknown'),
+          content_bytes => $content_bytes->(),
           metrics       => $accumulated_usage->{total} > 0 ? { usage => $accumulated_usage } : {},
         });
         _render_error($c, $err_status,
@@ -864,6 +870,7 @@ sub _proxy_openai_stream {
       status_code  => $status,
       ok           => ($had_error || $status >= 500) ? 0 : 1,
       duration_ms  => $duration_ms,
+      content_bytes => $content_bytes->(),
       metrics      => $metrics,
     });
 
@@ -1113,6 +1120,8 @@ sub _record_usage_event {
       duration_ms   => 0 + ($args->{duration_ms} // 0),
       error_type    => ($args->{error_type} // ''),
       error_message => ($args->{error_message} // ''),
+      # Streamed requests only; absent otherwise, so the event says "not measured" (skeid #36).
+      (defined($args->{content_bytes}) ? (content_bytes => 0 + $args->{content_bytes}) : ()),
       metrics       => $safe_metrics,
     });
   };

@@ -112,6 +112,14 @@ B<Option 2 – Subclass override>:
     ...
   }
 
+B<Optional fields.> A streamed request's event also carries C<content_bytes>: the
+UTF-8 byte count of the content Skeid relayed (OpenAI face) or translated (Anthropic
+and Ollama faces). It is set on every stream, including one whose upstream reported
+token counts, and is absent from non-streamed events -- a sink must not assume it is
+there. It is an observation, not a billing quantity: Skeid never derives token counts
+or cost from it. The DBI stores keep it in a nullable C<content_bytes> column (C<NULL>
+for a non-streamed or pre-existing row); C<jsonlog> writes it as part of the event.
+
 When a callback or override is provided, the DBI default is bypassed entirely
 and no database connection is created.  DBI and DBD::SQLite are C<recommends>
 dependencies — they are not required when usage is handled externally.
@@ -839,6 +847,10 @@ sub record_usage {
     error_type    => ($args{error_type} // ''),
     error_message => ($args{error_message} // ''),
   );
+  # UTF-8 bytes of the content a streamed request relayed (skeid #36). Optional and additive: a
+  # non-streamed event has no such key, which a store records as "not measured". An observation
+  # beside the token counts -- never used to estimate or replace them.
+  $event{content_bytes} = _num($args{content_bytes}) if defined $args{content_bytes};
 
   return $self->_store_usage_event(\%event);
 }

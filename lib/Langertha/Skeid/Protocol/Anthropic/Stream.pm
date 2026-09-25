@@ -326,8 +326,9 @@ sub errored { $_[0]->{errored} }
 
   my ($input, $output, $content_bytes) = $stream->usage;
 
-What the stream carried, for the usage event. C<content_bytes> (UTF-8 bytes) is the fallback
-when an upstream never reports token counts.
+What the stream carried, for the usage event. C<content_bytes> (UTF-8 bytes of the text this
+translator wrote) becomes the event's C<content_bytes>, recorded beside the token counts on every
+stream -- an observation, never an estimate of tokens.
 
 =cut
 

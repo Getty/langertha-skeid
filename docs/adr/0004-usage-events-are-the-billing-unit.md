@@ -48,3 +48,18 @@ Further:
   "fix" it by deriving one from the other; they answer different questions.
 - Schema lives in `share/sql/usage_events.<backend>.sql` and is applied via `auto_migrate`,
   which makes the shipped sharedir a runtime dependency of the DBI backends.
+
+## Update (skeid #36, 2026-09-25): streamed events carry `content_bytes`
+
+A streamed request's usage event gains an optional `content_bytes`: the UTF-8 byte count of the
+content Skeid relayed (OpenAI face, counted off the deltas it reads along) or translated (Anthropic
+and Ollama faces, the translator's own count of the text it wrote). The field is additive — an
+event without it means exactly what it meant before, and a non-streamed event omits it — so
+existing sinks and reports are unaffected. `UsageStore::DBI` keeps it in a nullable column added
+the ADR 0013 way (`@ADDED_COLUMNS`), `NULL` for "not measured".
+
+It is set on every stream, including one whose upstream reported token counts: it is an
+observation of what crossed the wire, not a substitute for them. It is not a billing quantity —
+Skeid derives no token count and no cost from it, because a byte-to-token ratio is model- and
+language-specific and an invented estimate on the billing unit would be worse than a recorded
+zero next to an honest byte count.
