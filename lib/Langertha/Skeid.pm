@@ -7,7 +7,7 @@ use warnings;
 use Carp qw(croak);
 use POSIX qw(strftime);
 use Digest::SHA qw(sha1_hex sha256_hex);
-use Scalar::Util qw(blessed refaddr reftype);
+use Scalar::Util qw(blessed looks_like_number refaddr reftype);
 use Time::HiRes ();
 use YAML::PP;
 use Langertha ();
@@ -728,14 +728,39 @@ sub set_node_health {
   return $found;
 }
 
+# The prompt-cache rates a pricing rule may carry (skeid #28, ADR 0013). Optional: a rule
+# without them prices every input token at input_per_million, exactly as before.
+my @CACHE_RATE_KEYS = qw(cached_input_per_million cache_write_per_million);
+my $cache_rates_unsupported_warned;
+
+# True when the installed Langertha prices prompt-cache reads and writes (Langertha::Cost has
+# the cache amounts, core ADR 0031). The released 0.503 does not; there the cache rates are
+# dropped at config load, so a rule prices exactly as a rule without them.
+sub _core_prices_cache { Langertha::Cost->can('cache_read_usd') ? 1 : 0 }
+
 sub set_model_pricing {
   my ($self, $model, $pricing) = @_;
   croak 'model required' unless defined $model && length $model;
   croak 'pricing hash required' unless ref($pricing) eq 'HASH';
-  $self->model_pricing->{$model} = {
+  my %rule = (
     input_per_million  => 0 + ($pricing->{input_per_million}  // 0),
     output_per_million => 0 + ($pricing->{output_per_million} // 0),
-  };
+  );
+  my @rates = grep { defined $pricing->{$_} } @CACHE_RATE_KEYS;
+  for my $key (@rates) {
+    my $rate = $pricing->{$key};
+    croak "pricing for '$model': $key must be a number >= 0"
+      unless !ref($rate) && looks_like_number($rate) && $rate >= 0;
+  }
+  if (@rates && !_core_prices_cache()) {
+    warn "skeid: pricing sets cached_input_per_million / cache_write_per_million, but this "
+      . "Langertha cannot price prompt-cache tokens; they are ignored and cached tokens bill "
+      . "at input_per_million\n"
+      unless $cache_rates_unsupported_warned++;
+    @rates = ();
+  }
+  $rule{$_} = 0 + $pricing->{$_} for @rates;
+  $self->model_pricing->{$model} = \%rule;
   return $self->model_pricing->{$model};
 }
 
@@ -1413,8 +1438,8 @@ sub record_usage {
   # Prompt-cache read count (k27). Read the same way as the token counts above: the normalized
   # name first, then the OpenAI wire spelling (nested under prompt_tokens_details on a real
   # OpenAI usage payload), then a flat cached_tokens some compatible servers use, then the
-  # flattened metrics fallback. Recording only -- Langertha::Pricing 0.503 has no cache-discount
-  # rate, so cost below is unchanged and cached tokens still bill at the normal rate (ADR 0013).
+  # flattened metrics fallback. Pricing it is metrics.normalize's job (skeid #28): the cost
+  # fields below arrive already priced.
   my $cached_tokens = _num($usage->{cached})
     || _num($usage->{cached_tokens})
     || _num(ref($usage->{prompt_tokens_details}) eq 'HASH' ? $usage->{prompt_tokens_details}{cached_tokens} : undef)
@@ -1422,6 +1447,10 @@ sub record_usage {
   my $cost_input    = _num($metrics->{cost_input_usd}) || _num($metrics->{input_cost_usd});
   my $cost_output   = _num($metrics->{cost_output_usd}) || _num($metrics->{output_cost_usd});
   my $cost_total    = _num($metrics->{cost_total_usd}) || _num($metrics->{total_cost_usd});
+  # Prompt-cache amounts (skeid #28), already part of cost_total. 0 when the rule had no cache
+  # rate or the installed Langertha cannot price them -- the cached tokens are then in cost_input.
+  my $cost_cache_read  = _num($metrics->{cost_cache_read_usd})  || _num($metrics->{cache_read_cost_usd});
+  my $cost_cache_write = _num($metrics->{cost_cache_write_usd}) || _num($metrics->{cache_write_cost_usd});
 
   my %event = (
     created_at    => ($args{created_at} // _iso8601_now()),
@@ -1446,6 +1475,8 @@ sub record_usage {
     cost_input_usd  => $cost_input,
     cost_output_usd => $cost_output,
     cost_total_usd  => $cost_total,
+    cost_cache_read_usd  => $cost_cache_read,
+    cost_cache_write_usd => $cost_cache_write,
     error_type    => ($args{error_type} // ''),
     error_message => ($args{error_message} // ''),
   );
@@ -1546,7 +1577,14 @@ sub normalize_metrics {
     tool_names      => \@names,
     pricing_version => $args{pricing_version},
   );
-  return $record->to_hash;
+  my $normalized = $record->to_hash;
+  # The cache read count as the Usage read it, from whichever wire spelling the upstream used
+  # (skeid #28) -- so the event's cached_tokens is the count its cache cost was priced from.
+  # Langertha 0.503's Usage has no such count; there the caller reads it off the raw payload.
+  if ($usage->can('cached_tokens') && defined(my $cached = $usage->cached_tokens)) {
+    $normalized->{cached_tokens} = $cached;
+  }
+  return $normalized;
 }
 
 sub _route_key {

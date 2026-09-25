@@ -1,6 +1,6 @@
 # ADR 0013 — cached_tokens is recorded on the usage event; cache-aware pricing waits on Langertha::Pricing
 
-- Status: accepted — recording implemented (k27); cache-aware pricing deferred, blocked on Langertha::Pricing
+- Status: accepted — recording implemented (k27); cache-aware pricing implemented (skeid #28, see Update)
 - Date: 2026-09-15
 - Tags: usage, metering, schema, pricing, langertha
 
@@ -71,3 +71,38 @@ pricing the count correctly is blocked upstream, while recording it is standalon
 - The additive-migration precedent set by `requested_model` now has a second instance, which fixes
   it as the pattern for growing the usage schema: add the column to both shipped schemas, register
   it in `@ADDED_COLUMNS`, insert and select it by name, never by position.
+
+## Update (skeid #28, 2026-09-25): cached tokens are priced at the configured cache rates
+
+The upstream blocker is gone: Langertha after 0.503 prices the prompt cache (core ADR 0031).
+A `Langertha::Pricing` rule may carry `cached_input_per_million` and `cache_write_per_million`;
+`Langertha::Usage` reads the cache read/write counts from every wire spelling and records
+whether they are counted inside the input count (`input_includes_cache`); `Langertha::Cost` has
+`cache_read_usd` / `cache_write_usd`, part of `total_usd`. Pricing is no longer deferred:
+
+- A per-model `pricing` rule gains the two optional rates, validated at config load (a number
+  `>= 0`; anything else fails the load, and a failed reload keeps the old pricing).
+  `pricing_for_model` returns them.
+- Skeid still invents no rate of its own. It hands the **provider-verbatim** usage block to
+  `Langertha::Usage` (`metrics.normalize` with the decoded response, as before) and prices it with
+  `Langertha::Pricing`, so whether a cache count sits inside `prompt_tokens` (OpenAI Chat, an
+  `/anthropic` shim that says `input_includes_cache`) or beside `input_tokens` (Anthropic) is
+  core's decision, and every token is priced once. A rule with only one of the two rates bills
+  the other at `input_per_million` — no discount the rule did not state.
+- The usage event carries `cost_cache_read_usd` and `cost_cache_write_usd` next to
+  `cost_input_usd` / `cost_output_usd`; `cost_total_usd` includes them and `cost_input_usd`
+  covers only the uncached input. `UsageStore::DBI` adds both as nullable columns the way this
+  ADR fixed (`@ADDED_COLUMNS`, both schemas, by name): an old row reads `NULL`, "not priced
+  apart". The event's `cached_tokens` is now the count `Langertha::Usage` read, so it matches the
+  count that was priced, whatever the upstream's spelling; the raw-payload read stays as the
+  fallback.
+- A rule without cache rates prices exactly as before: every input token at
+  `input_per_million`, both cache amounts `0`.
+- On Langertha 0.503, which cannot price the cache, the two keys are accepted but dropped at
+  config load with a one-time warning, so the stored rule and every cost are what they were.
+  The capability is detected, not version-compared (`Langertha::Cost->can('cache_read_usd')`).
+
+Still open: a streamed request's usage event is not priced at all (its cost fields are `0` — the
+streaming accumulator never runs `metrics.normalize`), so neither its input nor its cache tokens
+are billed. That predates this change and is its own ticket (skeid #41); the fix is to price the
+accumulated provider-verbatim usage the same way.

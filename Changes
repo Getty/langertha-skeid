@@ -2,6 +2,16 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A model's pricing rule may set cached_input_per_million and
+      cache_write_per_million. A non-streamed request's usage event then
+      prices prompt-cache reads and writes at those rates into the new
+      cost_cache_read_usd and cost_cache_write_usd, both part of
+      cost_total_usd, with cost_input_usd covering only the uncached input;
+      OpenAI-, Anthropic- and /anthropic-shim-shaped usage each price every
+      token once. A rule without them bills as before. The DBI stores add
+      both as nullable columns on the existing table. A rate that is not a
+      number >= 0 fails the config load. Needs a Langertha newer than
+      0.503; an older one ignores the two keys with a one-time warning
     - Taking a node in or out of rotation through the admin API no longer
       restarts every capacity probe and drops their readings. Probes restart
       only when a probed node is added, removed, moved to another URL or

@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
   cost_input_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   cost_output_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   cost_total_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  cost_cache_read_usd DOUBLE PRECISION,
+  cost_cache_write_usd DOUBLE PRECISION,
   error_type TEXT,
   error_message TEXT
 );

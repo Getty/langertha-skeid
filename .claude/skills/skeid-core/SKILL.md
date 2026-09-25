@@ -241,7 +241,7 @@ broken result is not applied twice. Construction and explicit `config.reload` st
 
 ```yaml
 nodes:      [ … ]                # replaces the whole inventory on reload
-pricing:    { model: {…} }       # merged per model
+pricing:    { model: {…} }       # merged per model; optional cached_input_per_million / cache_write_per_million
 aliases:    { name: {tiers: […]} }   # replaced wholesale on reload
 policies:   { name: {…} }        # with default_policy: and keys:
 routing:    { wait_timeout_ms: 2000, wait_poll_ms: 25, trust_key_id_header: false }
@@ -263,7 +263,9 @@ ENV defaults: `SKEID_ROUTE_WAIT_TIMEOUT_MS`, `SKEID_ROUTE_WAIT_POLL_MS`, `SKEID_
 
 One usage event per forwarded request, written after `request.finish`, including failures
 (`ok = 0`). `record_usage` normalizes metrics, prices them from `model_pricing` at record
-time, and hands the event to the configured store.
+time, and hands the event to the configured store. Cache rates price the provider-verbatim
+usage block through `Langertha::Usage`/`Pricing` into `cost_cache_read_usd` /
+`cost_cache_write_usd` (part of `cost_total_usd`; ADR 0013 update).
 
 Backend selection in `_configure_usage_store` is inference-first: explicit `backend` wins,
 otherwise `sqlite_path`/`path`/`db_path` → sqlite, `dbi:Pg:` dsn → postgresql, `log_path` →

@@ -680,10 +680,11 @@ sub _proxy_openai_json_async {
           tool_calls  => $tool_calls,
         });
       } || {};
-      # metrics.normalize routes through Langertha::Usage, which in 0.503 does not model the
-      # prompt-cache read count -- so it is dropped there. Pull it straight off the raw upstream
-      # usage and carry it flat, the way input/output survive as metrics->{*_tokens} (k27).
-      if (ref($metrics) eq 'HASH') {
+      # metrics.normalize reports the prompt-cache read count off Langertha::Usage, from every
+      # wire spelling it knows (skeid #28). Langertha 0.503's Usage has no such count, so there
+      # it is pulled straight off the raw upstream usage and carried flat, the way input/output
+      # survive as metrics->{*_tokens} (k27).
+      if (ref($metrics) eq 'HASH' && !defined $metrics->{cached_tokens}) {
         my $cached = _cached_tokens($payload->{usage});
         $metrics->{cached_tokens} = $cached if $cached;
       }
@@ -1198,8 +1199,9 @@ sub _record_usage_event {
 # cached_tokens, and Skeid's own streaming accumulator carries it as `cached`. Missing -> 0, the
 # same fault-tolerance the other token reads here have. This reads a count off a response Skeid
 # already holds -- every upstream answers in the OpenAI dialect (ADR 0001) -- it does not
-# translate a client format. Recording only: Langertha::Pricing 0.503 models no cache-discount
-# rate, so the count is stored but not yet priced (ADR 0013).
+# translate a client format. The non-streaming path prefers the count metrics.normalize reads
+# through Langertha::Usage and prices (skeid #28); this is its fallback on Langertha 0.503 and
+# the streaming accumulator's reader.
 sub _cached_tokens {
   my ($usage) = @_;
   return 0 unless ref($usage) eq 'HASH';

@@ -106,6 +106,10 @@ my @ADDED_COLUMNS = (
   ['cached_tokens', 'BIGINT'],
   # UTF-8 bytes a streamed request relayed (skeid #36). Nullable: only streamed events carry it.
   ['content_bytes', 'BIGINT'],
+  # Prompt-cache read / write cost (skeid #28), already part of cost_total_usd. Nullable: an old
+  # row reads NULL ("was not priced apart"). DOUBLE PRECISION is REAL affinity in SQLite.
+  ['cost_cache_read_usd', 'DOUBLE PRECISION'],
+  ['cost_cache_write_usd', 'DOUBLE PRECISION'],
 );
 
 sub _add_missing_columns {
@@ -237,8 +241,8 @@ sub store {
       created_at, request_id, api_format, endpoint, api_key_id, provider, engine, model, node_id, route_url,
       status_code, ok, duration_ms, input_tokens, output_tokens, total_tokens, cached_tokens, tool_calls,
       cost_input_usd, cost_output_usd, cost_total_usd, error_type, error_message, requested_model,
-      content_bytes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      content_bytes, cost_cache_read_usd, cost_cache_write_usd
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   });
   $sth->execute(
     $event->{created_at},
@@ -268,6 +272,9 @@ sub store {
     ($event->{requested_model} // $event->{model} // ''),
     # Nullable: only a streamed request carries it; anything else writes NULL, "not measured".
     $event->{content_bytes},
+    # Nullable: an event from a caller that does not price the cache apart writes NULL.
+    $event->{cost_cache_read_usd},
+    $event->{cost_cache_write_usd},
   );
 
   my %out = (ok => 1);

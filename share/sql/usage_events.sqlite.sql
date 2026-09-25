@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
   cost_input_usd REAL NOT NULL DEFAULT 0,
   cost_output_usd REAL NOT NULL DEFAULT 0,
   cost_total_usd REAL NOT NULL DEFAULT 0,
+  cost_cache_read_usd REAL,
+  cost_cache_write_usd REAL,
   error_type TEXT,
   error_message TEXT
 );
