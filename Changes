@@ -2,6 +2,9 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A streamed text block now opens with data type content_block_start,
+      as Anthropic specifies, so Anthropic SDKs that dispatch on the data
+      type see the text block begin
     - The Anthropic face reports stop_reason tool_use when the upstream
       reply carries tool calls but finishes with stop (gpt-oss on
       vLLM-style servers, e.g. AKI.IO), on /v1/messages and in the

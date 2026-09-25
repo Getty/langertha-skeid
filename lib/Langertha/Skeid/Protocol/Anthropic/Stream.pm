@@ -162,7 +162,7 @@ sub delta {
       $self->{text_started} = 1;
       push @{$self->{open_blocks}}, $self->{text_index};
       $out .= _event('content_block_start', {
-        type          => 'content_block',
+        type          => 'content_block_start',
         index         => $self->{text_index},
         content_block => { type => 'text', text => '' },
       });
