@@ -6,6 +6,10 @@ use strict;
 use warnings;
 use POSIX qw(strftime);
 use IO::Handle;
+use Fcntl qw(O_WRONLY O_CREAT O_EXCL LOCK_EX);
+use Errno qw(EEXIST EINTR);
+use Digest::SHA qw(sha256_hex);
+use Time::HiRes ();
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
 use File::Spec;
@@ -82,10 +86,75 @@ No-op — nothing is held open between writes.
 
 sub disconnect { return }
 
+our %EVENT_ID_STATE;
+my $CREATE_ATTEMPTS = 16;
+my $PROCESS_NONCE_BYTES = 16;
+
+sub _new_process_nonce {
+  my $random = '';
+  if (open my $fh, '<:raw', '/dev/urandom') {
+    while (length($random) < $PROCESS_NONCE_BYTES) {
+      my $chunk = '';
+      my $read = sysread($fh, $chunk, $PROCESS_NONCE_BYTES - length($random));
+      if (!defined $read) {
+        next if $! == EINTR;
+        last;
+      }
+      last unless $read;
+      $random .= $chunk;
+    }
+    close $fh;
+  }
+  return unpack('H*', $random) if length($random) == $PROCESS_NONCE_BYTES;
+
+  # /dev/urandom is present on supported service platforms. Keep a portable
+  # best-effort fallback for other Perl targets without reseeding the process'
+  # global PRNG, which belongs to the application as a whole.
+  my $marker = {};
+  my @entropy = ($$, Time::HiRes::time(), "$marker", map { rand() } 1 .. 4);
+  return substr(sha256_hex(join("\0", @entropy)), 0, $PROCESS_NONCE_BYTES * 2);
+}
+
 sub _event_id {
+  my $pid = $$;
+  if (!defined($EVENT_ID_STATE{pid}) || $EVENT_ID_STATE{pid} != $pid) {
+    %EVENT_ID_STATE = (
+      pid => $pid,
+      nonce => _new_process_nonce(),
+      sequence => 0,
+    );
+  }
+  my $sequence = ++$EVENT_ID_STATE{sequence};
   my $ts = strftime('%Y%m%d-%H%M%S', gmtime());
-  my $rand = sprintf('%06d', int(rand(1_000_000)));
-  return "${ts}-${rand}";
+  return sprintf('%s-%d-%s-%010d', $ts, $pid, $EVENT_ID_STATE{nonce}, $sequence);
+}
+
+sub _io_error {
+  my ($operation, $path, $reason) = @_;
+  $reason = 'unknown I/O error' unless defined($reason) && length($reason);
+  return "Cannot $operation $path: $reason";
+}
+
+sub _write_and_close {
+  my ($self, $fh, $path, $json, $operation) = @_;
+  my $error;
+
+  unless (print {$fh} $json, "\n") {
+    $error = _io_error($operation, $path, "$!");
+  }
+  if (!$error && $self->fsync) {
+    unless ($fh->flush) {
+      $error = _io_error('flush', $path, "$!");
+    }
+    unless ($error || $fh->sync) {
+      $error = _io_error('sync', $path, "$!");
+    }
+  }
+  unless (close $fh) {
+    $error ||= _io_error('close', $path, "$!");
+  }
+
+  return $error;
 }
 
 =method store
@@ -100,23 +169,41 @@ that was already served.
 
 sub store {
   my ($self, $event) = @_;
-  my $id = _event_id();
-  my $json = encode_json({ %$event, id => $id });
 
   if ($self->mode eq 'dir') {
-    my $file = File::Spec->catfile($self->path, "${id}.json");
-    open my $fh, '>', $file or return { ok => 0, error => "Cannot write $file: $!" };
-    print $fh $json, "\n";
-    if ($self->fsync) { $fh->flush; $fh->sync }
-    close $fh;
-  } else {
-    my $path = $self->path;
-    open my $fh, '>>', $path or return { ok => 0, error => "Cannot append $path: $!" };
-    flock($fh, 2); # LOCK_EX
-    print $fh $json, "\n";
-    if ($self->fsync) { $fh->flush; $fh->sync }
-    close $fh;
+    for (1 .. $CREATE_ATTEMPTS) {
+      my $id = _event_id();
+      my $json = encode_json({ %$event, id => $id });
+      my $file = File::Spec->catfile($self->path, "${id}.json");
+      my $fh;
+      unless (sysopen $fh, $file, O_WRONLY | O_CREAT | O_EXCL, 0666) {
+        next if $! == EEXIST;
+        return { ok => 0, error => "Cannot write $file: $!" };
+      }
+      my $error = _write_and_close($self, $fh, $file, $json, 'write');
+      if ($error) {
+        unlink $file;
+        return { ok => 0, error => $error };
+      }
+      return { ok => 1, id => $id };
+    }
+    return {
+      ok => 0,
+      error => "Cannot store usage event: event id collisions exhausted $CREATE_ATTEMPTS attempts",
+    };
   }
+
+  my $id = _event_id();
+  my $json = encode_json({ %$event, id => $id });
+  my $path = $self->path;
+  open my $fh, '>>', $path or return { ok => 0, error => "Cannot append $path: $!" };
+  unless (flock($fh, LOCK_EX)) {
+    my $error = _io_error('lock', $path, "$!");
+    close $fh;
+    return { ok => 0, error => $error };
+  }
+  my $error = _write_and_close($self, $fh, $path, $json, 'append');
+  return { ok => 0, error => $error } if $error;
 
   return { ok => 1, id => $id };
 }

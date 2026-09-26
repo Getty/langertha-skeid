@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Fix jsonlog event ids colliding under load: a dir-mode write is created
+      exclusively (O_EXCL), retried up to 16 times, and the id is built from
+      timestamp, pid, a per-process random nonce and a sequence, all
+      refreshed after a fork, so two events sharing a second and a pid never
+      overwrite each other. A write, fsync, close or lock failure is now
+      reported as failed instead of a silently truncated or lost event
     - Fix a request-lifecycle leak: the recursive routing callback, and on a
       streamed response the drain callback and the completed upstream read
       listener, kept the finished controller (and its upstream connection)
