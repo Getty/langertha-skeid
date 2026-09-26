@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - The routing cache and its round-robin cursors are bounded at 256
+      entries per inventory generation, FIFO-evicted together, so a stream
+      of client-chosen model names that never resolve to a node can no
+      longer grow either one without limit. Any real inventory change
+      (a node added, removed, moved or its health flipped) still clears
+      every cursor and restarts its fairness, but calling set_node_health
+      with a node's current value is now a no-op and no longer does
     - A config file that fails to parse is retried with the same bounded
       back-off as a failing config_loader (1s doubling to 60s) instead of
       being re-parsed on every dispatch. The last good config stays in

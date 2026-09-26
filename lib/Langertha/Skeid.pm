@@ -472,7 +472,7 @@ has _inventory_generation => (
 
 has _route_cache => (
   is      => 'rw',
-  default => sub { { generation => -1, entries => {} } },
+  default => sub { { generation => -1, entries => {}, order => [] } },
 );
 
 # The probe key (see _probe_inventory_key) as of one inventory generation.
@@ -742,6 +742,10 @@ sub _bump_inventory {
   # Defensive //0: the nodes trigger can fire during construction, before this attribute's own
   # default has been assigned.
   $self->_inventory_generation(($self->_inventory_generation // 0) + 1);
+  # A cursor names weighted ranges in exactly one inventory generation. Keeping it after a
+  # health, node or worker-share change both retains client-created keys and resumes fairness at
+  # a position that described a different set, so inventory invalidation clears all cursors.
+  $self->_rr_cursor({});
   return;
 }
 
@@ -782,17 +786,22 @@ sub list_nodes {
 sub set_node_health {
   my ($self, $id, $healthy) = @_;
   return 0 unless defined $id && length $id;
-  my $found = 0;
+  my ($found, $changed) = (0, 0);
+  my $next = $healthy ? 1 : 0;
   for my $n (@{$self->nodes}) {
     next unless ($n->{id} // '') eq $id;
-    $n->{healthy} = $healthy ? 1 : 0;
+    if (($n->{healthy} ? 1 : 0) != $next) {
+      $n->{healthy} = $next;
+      $changed = 1;
+    }
     $found = 1;
     last;
   }
   # Health is part of eligibility, so flipping it has to drop the derived lists -- otherwise a
   # node taken out of rotation keeps receiving traffic until something else changes. It is not
-  # part of the probe key, so the capacity probes and their readings stay (skeid #40).
-  $self->_bump_inventory if $found;
+  # part of the probe key, so the capacity probes and their readings stay (skeid #40). Repeating
+  # the current value changes no inventory and must not reset its round-robin cursors.
+  $self->_bump_inventory if $changed;
   return $found;
 }
 
@@ -879,8 +888,8 @@ sub reload_config {
 
   my %before = map { $_ => $self->$_ } @CONFIG_STATE;
   my %pricing = %{$self->model_pricing || {}};
-  my ($generation, $route_cache, $probe_key_cache)
-    = ($self->_inventory_generation, $self->_route_cache, $self->_probe_key_cache);
+  my ($generation, $route_cache, $probe_key_cache, $rr_cursor)
+    = ($self->_inventory_generation, $self->_route_cache, $self->_probe_key_cache, $self->_rr_cursor);
 
   my $nodes_print;
   if (eval { $nodes_print = $self->_apply_config($cfg); 1 }) {
@@ -899,14 +908,15 @@ sub reload_config {
   }
   $self->model_pricing(\%pricing);
   # Setting nodes bumps the inventory generation. The old list comes back unchanged (the failed
-  # load only built a new array), so its generation and the caches keyed on it come back with
-  # it: an inventory that did not change must not look changed, and a cache left keyed on a
+  # load only built a new array), so its generation, derived caches and fairness cursors come back
+  # with it: an inventory that did not change must not look changed, and a cache left keyed on a
   # generation number that is about to be reused would answer for a different list.
   if ($self->nodes != $before{nodes}) {
     $self->nodes($before{nodes});
     $self->_inventory_generation($generation);
     $self->_route_cache($route_cache);
     $self->_probe_key_cache($probe_key_cache);
+    $self->_rr_cursor($rr_cursor);
   }
   die $err;
 }
@@ -1950,6 +1960,12 @@ sub _node_has_any_tag {
   return 0;
 }
 
+# The selection cache includes negative requested models, and requested models are client input.
+# Keep a small fixed working set rather than turning every spelling ever seen into process-lifetime
+# state. FIFO makes eviction deterministic; an evicted route's cursor is removed with it, so that
+# route restarts weighted fairness if it is requested again.
+my $ROUTE_CACHE_MAX_ENTRIES = 256;
+
 # Everything derived from the inventory -- which nodes are eligible, their round-robin order
 # and their weights -- is computed once per selection and reused until the inventory changes.
 # Only admission stays per request, because inflight is the one part that moves between two
@@ -1958,7 +1974,7 @@ sub _route_entry {
   my ($self, %args) = @_;
   my $cache = $self->_route_cache;
   if (($cache->{generation} // -1) != $self->_inventory_generation) {
-    $cache = { generation => $self->_inventory_generation, entries => {} };
+    $cache = { generation => $self->_inventory_generation, entries => {}, order => [] };
     $self->_route_cache($cache);
   }
 
@@ -1988,11 +2004,24 @@ sub _route_entry {
   my $total_weight = 0;
   $total_weight += $_ for @weights;
 
-  return $cache->{entries}{$key} = {
+  my $new_entry = {
     nodes        => \@nodes,
     weights      => \@weights,
     total_weight => $total_weight,
   };
+
+  my $order = $cache->{order} ||= [];
+  while (@$order >= $ROUTE_CACHE_MAX_ENTRIES) {
+    my $evicted = shift @$order;
+    next unless exists $cache->{entries}{$evicted};
+    delete $cache->{entries}{$evicted};
+    # The cursor tracks ranges stored by this entry. Keeping it would defeat the bound and would
+    # resume at stale fairness state if this route key later re-enters the working set.
+    delete $self->_rr_cursor->{$evicted};
+  }
+  $cache->{entries}{$key} = $new_entry;
+  push @$order, $key;
+  return $new_entry;
 }
 
 # Returns the live node hashrefs, not copies. Callers read them and must not mutate them --
