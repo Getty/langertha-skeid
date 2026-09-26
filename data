@@ -1,0 +1,40 @@
+---
+claimed_at: 2026-09-26T05:08:33Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-26T05:08:33Z
+created: 2026-09-26T03:36:23Z
+id: 54
+priority: high
+started: 2026-09-26T05:08:33Z
+status: done
+tags:
+- bug
+- config
+- performance
+title: 'Dateibasierter Config-Reload: kaputtes YAML wird bei jedem Dispatch erneut
+  geparst'
+updated: 2026-09-26T05:08:33Z
+---
+
+Follow-up zu k38/k39. Bestätigt auf Skeid 1a848c6: Skeid.pm:969-976 aktualisiert _config_mtime erst nach load_file; Syntaxfehler lassen die alte mtime stehen. 20 Dispatches nach identischer ungültiger Dateiversion erzeugen 20 Parseversuche. config_loader hat Backoff, Datei-Pfad nicht.
+Ziel: fehlgeschlagene Dateiversion/Retry-Fenster geeignet behandeln; gute alte Config beibehalten und korrigierte Datei zuverlässig wieder laden. Bei vorübergehendem I/O-Fehler keinen dauerhaften Freeze. Keine pauschale Verlängerung erfolgreicher Reload-Latenzen.
+Abnahme: deterministische rot/grün Tests für Parseanzahl bei unverändert kaputter Datei, alte Config bleibt aktiv, neue gültige Dateiversion heilt, Loader-Backoff bleibt intakt. Zuständigkeit Skeid.pm plus dedizierte neue Tests.
+
+2026-09-26 03:48 Bearbeitung begonnen: Regressionstest in t/53-config-file-reload.t zuerst rot; danach minimaler Fix in Skeid.pm und gezielte Config-Tests.
+
+2026-09-26 03:50 Root Cause bestätigt: _read_config setzt _config_mtime erst nach erfolgreichem YAML::PP->load_file; Parse-/I/O-Fehler lassen maybe_reload_config dieselbe mtime pro Dispatch erneut versuchen. RED: prove -lv t/53-config-file-reload.t — 3/12 fehlgeschlagen; 20 Dispatches ergaben 20 zusätzliche Parses (21 statt 2), auch das Retry-Fenster fehlte.
+
+2026-09-26 03:52 Umgesetzt: Dateiversion mit Parse-/I/O-Fehler erhält exponentielles Retry-Fenster (mindestens 1 s, maximal 60 s); eine andere mtime wird sofort gelesen, die letzte gute Config bleibt aktiv und dieselbe Version wird nach temporärem Fehler erneut versucht. RED: t/53-config-file-reload.t 3/12 fehlgeschlagen (21 statt 2 Parses). GREEN: t/53-config-file-reload.t 12/12; t/11 + t/47 + t/48 zusammen 135/135 PASS, einschließlich bestehendem Loader-Backoff.
+
+2026-09-26 04:17 Unabhängiges Sol-Review bestätigt einen Reload-Randfall: Datei wird zwischen Parsen und nachträglichem stat ersetzt; Config-Version mtime200 wird angewandt, mtime300 als geladen gespeichert, aktuelle Datei300 danach dauerhaft übersprungen. Repro node=middle,recorded_mtime=300,disk_mtime=300,next_applied=0. Gelesene Version eindeutig markieren bzw. Versionswechsel während Lesen erneut laden; Regressionstest auf t/53 ergänzen.
+
+2026-09-26 04:18 Review-Korrektur begonnen: deterministischer RED-Test für Dateiaustausch zwischen Parse und abschließendem stat; danach minimaler Versionsabgleich ohne Retry-Schleife.
+
+2026-09-26 04:20 RED bestätigt: t/53 2/15 fehlgeschlagen; beim Austausch nach Parse blieb middle aktiv und nur 2 statt 3 Versionen wurden gelesen.
+
+2026-09-26 04:22 Review-Fix bereit: _read_config merkt den vor dem Parse beobachteten mtime, sodass ein atomarer Austausch nach dem Einlesen beim nächsten Dispatch erneut geladen wird. Deterministischer RED 2/15 (middle blieb aktiv, 2 statt 3 Reads), danach GREEN 15/15. Gemeinsame Zielprüfung mit k55: 8 Dateien, 300 Tests, PASS; git diff --check ohne Befund.
+
+2026-09-26 04:48 Abschließende unabhängige Verifikation auf ruhendem gemeinsamen Arbeitsbaum, einschließlich stabilisiertem Lifecycle-Test: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 nice -n 19 ionice -c3 prove -lr t/ -> Files=55, Tests=3052, Result: PASS (67 s). Tatsächlich geladen: Langertha 0.503 aus lokalem Core 193005702eb286481f00438575021659ebbbc118; Tool->classify vorhanden. git diff --check PASS. Der separate Gesamtlauf mit installiertem älterem 0.503-Snapshot bleibt ausschließlich in t/20, t/37 und t/56-ollama-stream-tools.t rot (fehlende classify-/Stream-Tool-Fähigkeiten), siehe k58. Lifecycle-Test darin grün. Karten bleiben review, nicht done; keine Code-Commits/Pushes/Releases, keine globale Installation. Vollständige Abschlusslogs: /tmp/skeid-core-final.YEW7fV.log und /tmp/skeid-installed-final.f51066.log.
+
+2026-09-26 05:08 Committed 103c9b8: Skeid: retry a broken config file with a bounded back-off (skeid #54)
