@@ -1,0 +1,35 @@
+---
+claimed_at: 2026-09-26T05:10:10Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-26T05:10:10Z
+created: 2026-09-26T03:36:23Z
+id: 56
+priority: medium
+started: 2026-09-26T05:10:10Z
+status: done
+tags:
+- bug
+- routing
+- performance
+title: Routing bei Saturation prüft Nodes proportional zur Gewichtssumme wiederholt
+updated: 2026-09-26T05:10:10Z
+---
+
+Bestätigte Call-Counts auf Skeid 1a848c6: pick_node in Skeid.pm:2363-2381 prüft zwei vollständig belegte Nodes mit Gewicht 1:1 dreimal, mit 1000:1000 dreitausendmal, jeweils kein Node. Keine Laufzeit-/Durchsatzmessung; identische Gewichtsrelation.
+Ziel: Admission je Node/Selektionsdurchlauf nur begrenzt prüfen und belegte Gewichtsbereiche überspringen, ohne die bestehende weighted-round-robin-Sequenz im normalen Fall zu ändern. Keine simple Gewichtsnormierung, die Sequenz/Fairness ungeprüft ändert.
+Abnahme: deterministische rot/grün Call-Count-Tests für vollständig/teilweise saturierte Nodes und große Gewichte; Verteilung und Cursor-Verhalten bestehender Tests erhalten. Skeid.pm und dedizierte neue Tests.
+
+2026-09-26 03:48 Eingeplant nach k55: Regressionstest in t/55-weighted-saturation.t zuerst rot; danach gewichtsspannenbasierte Admission mit deterministischen Call-Counts.
+
+2026-09-26 03:59 Root Cause bestätigt: pick_node läuft über jede gewichtete Position; bei nicht zugelassenem Candidate setzt das innere next die Node-Schleife fort, danach werden dieselben Nodes für weitere Slots erneut geprüft. RED: prove -lv t/55-weighted-saturation.t — 3/24 fehlgeschlagen; vollständig saturiert 3 Calls bei 1:1 und 3000 bei 1000:1000, partiell saturierter letzter 1000er-Bereich 1001 Calls statt jeweils 2. Reihenfolge und Cursor-Erwartungen waren bereits grün.
+
+2026-09-26 04:00 Umgesetzt: pick_node lokalisiert den aktuellen gewichteten Bereich ohne Slot-Expansion und prüft Admission zyklisch höchstens einmal je Node. Saturierte Gewichtsbereiche werden als Bereiche übersprungen; normale 3:1-Sequenz sowie Cursor-Fortschritt vor/nach Wrap und bei partieller Saturation bleiben unverändert. RED: t/55-weighted-saturation.t 3/24 fehlgeschlagen (3, 3000 bzw. 1001 Calls statt 2). GREEN: neuer Test 24/24; t/10 + t/13 + t/28 + t/30 + t/35 zusammen 157/157 PASS.
+
+2026-09-26 04:04 Abschlussverifikation im gemeinsamen Baum: Scoped Control-Plane-Lauf 14 Dateien/472 Tests PASS. prove -lr t/ lief 55 Dateien/2458 Tests und blieb außerhalb dieser Card rot: t/20 und t/37 wegen installiertem Langertha 0.503 ohne Langertha::Tool->classify (bereits separat im Kompatibilitätsabgleich); t/42 und das parallel entstehende t/56-ollama-stream-tools.t endeten wegen der fremden Ollama-Stream-Änderung mit fehlendem Langertha::Engine::OpenAIBase->_finish_stream_state. Für das Skeid-Board als separaten Protocol/Langertha-Kompatibilitätsbefund vormerken; hier nicht angefasst.
+
+2026-09-26 04:17 Unabhängiges Sol-Review: keine weiteren bestätigten JsonLog-/Gewichtsregressionen. Gewichteter Algorithmus in 454740 statischen Zuständen gegen alten Algorithmus verglichen, ohne Abweichung. Gezielte 10 Testdateien/282 Tests PASS. Abschließender gemeinsamer Testlauf folgt nach Randfall-Korrekturen an k54/k55/k57.
+
+2026-09-26 04:48 Abschließende unabhängige Verifikation auf ruhendem gemeinsamen Arbeitsbaum, einschließlich stabilisiertem Lifecycle-Test: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 nice -n 19 ionice -c3 prove -lr t/ -> Files=55, Tests=3052, Result: PASS (67 s). Tatsächlich geladen: Langertha 0.503 aus lokalem Core 193005702eb286481f00438575021659ebbbc118; Tool->classify vorhanden. git diff --check PASS. Der separate Gesamtlauf mit installiertem älterem 0.503-Snapshot bleibt ausschließlich in t/20, t/37 und t/56-ollama-stream-tools.t rot (fehlende classify-/Stream-Tool-Fähigkeiten), siehe k58. Lifecycle-Test darin grün. Karten bleiben review, nicht done; keine Code-Commits/Pushes/Releases, keine globale Installation. Vollständige Abschlusslogs: /tmp/skeid-core-final.YEW7fV.log und /tmp/skeid-installed-final.f51066.log.
+
+2026-09-26 05:10 Committed d07264e: Skeid: pick_node checks each node once per selection under saturation (skeid #56)
