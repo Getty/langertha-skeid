@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Fix a request-lifecycle leak: the recursive routing callback, and on a
+      streamed response the drain callback and the completed upstream read
+      listener, kept the finished controller (and its upstream connection)
+      alive after the response had ended. Each callback now clears its own
+      self-reference once its work is done, so a completed request releases
+      its controller instead of accumulating until the process is restarted
     - The admin API key is checked in constant time, like the registry
       read key and the snapshot signature; all three share one comparison
       (Langertha::Skeid::Secret)

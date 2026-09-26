@@ -655,6 +655,7 @@ sub _begin_route_async {
   my $index = 0;
   my $tier_deadline = 0;
 
+  my $tick;
   my $fail = sub {
     # Nothing eligible can mean two different things once a policy is in play: the model is
     # unroutable, or it is routable and this key is not allowed at the nodes that serve it.
@@ -670,6 +671,7 @@ sub _begin_route_async {
       }
       if ($without_deny) {
         _render_error($c, 403, "Model '$model' is not available for this key", 'permission_error');
+        undef $tick;
         $cb->();
         return;
       }
@@ -684,11 +686,11 @@ sub _begin_route_async {
         : "Timed out waiting for free capacity for model '$model' (waited ${waited_ms}ms)";
       _render_error($c, 429, $msg, 'rate_limit_error');
     }
+    undef $tick;
     $cb->();
     return;
   };
 
-  my $tick;
   $tick = sub {
     return $fail->() if $index > $#$plan;
 
@@ -709,6 +711,9 @@ sub _begin_route_async {
         my $node_id = $route->{id};
         $last_node_id = $node_id if defined $node_id;
         if ($c->skeid->call_function('request.start', { id => $node_id })->{ok}) {
+          # Break the recursive callback's self-reference before control moves into the upstream
+          # lifecycle. The active call frame keeps it alive until this invocation returns.
+          undef $tick;
           $cb->($route, $node_id, $started, $tier);
           return;
         }
@@ -855,6 +860,9 @@ sub _proxy_openai_stream {
       if ($upstream_done && !$finished) {
         $finished = 1;
         $c->finish;
+        # write_chunk retains its last drain callback. Clear the recursive callback scalar once
+        # the queue is complete so that callback cannot retain the controller through $drain.
+        undef $drain;
       }
       return;
     }
@@ -942,6 +950,11 @@ sub _proxy_openai_stream {
   $c->app->ua->start($tx => sub {
     my ($ua, $tx_done) = @_;
 
+    # The read listener closes over both the upstream transaction and the client controller.
+    # Completion means no further bytes can arrive, so remove it before returning from any path;
+    # otherwise the completed transaction owns the listener that owns the transaction forever.
+    $tx_done->res->content->unsubscribe('read');
+
     if (my $err = $tx_done->error) {
       $had_error = 1;
       unless ($headers_sent) {
@@ -965,6 +978,7 @@ sub _proxy_openai_stream {
         });
         _render_error($c, $err_status,
           'Upstream error: ' . _upstream_error_message($err, $upstream_error_body), 'upstream_error');
+        undef $drain;
         return;
       }
     }
@@ -1037,6 +1051,7 @@ sub _proxy_openai_stream {
     if (!$draining && !$finished) {
       $finished = 1;
       $c->finish;
+      undef $drain;
     }
   });
   });
