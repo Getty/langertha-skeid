@@ -1,0 +1,60 @@
+---
+claimed_at: 2026-09-26T05:11:50Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-26T05:11:50Z
+created: 2026-09-26T03:36:24Z
+id: 57
+priority: high
+started: 2026-09-26T05:11:50Z
+status: done
+tags:
+- bug
+- ollama
+- streaming
+- tools
+title: Ollama-Streaming verliert Tool-Calls, obwohl sie nichtstreamend funktionieren
+updated: 2026-09-26T05:11:50Z
+---
+
+Bestätigt auf Skeid 1a848c6: Protocol/Ollama/Stream.pm:107-121 verarbeitet nur delta.content; delta.tool_calls wird weder gesammelt noch ausgegeben. Gleicher weather-Call liefert nichtstreamend message.tool_calls, streamend nur leere Assistant-Message/done_reason tool_calls. stream:true ist bei Ollama Standard.
+Vor Umsetzung aktuellen Langertha-Stand prüfen: vorhandene Tool-/Stream-Abstraktionen wiederverwenden, keine konkurrierende Formatlogik implementieren. Fehlende Upstream-Fähigkeit mit konkretem Repro auf Langertha-Board melden statt halbgarer lokaler Emulation.
+Abnahme: Regressionstests für fragmentierte Argumente, mehrere Calls, Unicode, Tool-only und gemischten Text/Tool-Stream; vollständige korrekt geformte Ollama-Tool-Calls, Usage/Fehlerpfade bleiben korrekt. Noch keine Umsetzung bis Langertha-Abgleich vorliegt.
+
+2026-09-26 03:39 Langertha k221 ist bereits done und beschreibt Tool-Call-Akkumulation in den OpenAI-/Anthropic-/Gemini-/Ollama-Streampfaden. Vor lokalem Fix wird die vorhandene öffentliche API auf Wiederverwendung geprüft; eine fehlende Core-Streaming-Fähigkeit wird nicht ohne Nachweis neu behauptet.
+
+2026-09-26 03:46 Sol-Abgleich: Core main besitzt die nötige öffentliche API bereits: OpenAIBase->parse_stream_chunk mit separatem Stream-State, Stream::Chunk->tool_calls und ToolCall->to_ollama. Delta-Fragmente nicht lokal zusammenbauen und nicht mit ToolCall->extract behandeln. Skeid-Fix wird diese APIs nutzen; Verifikation gegen aktuellen lokalen Langertha ohne globale Installation. Deployment-/Release-Voraussetzung bleibt Skeid k58 / Langertha k216.
+
+2026-09-26 03:47 Begonnen: prüfe zuerst die tatsächliche Langertha-Core-API und schreibe anschließend t/56-ollama-stream-tools.t test-first. Scope bleibt Ollama-Stream-Translator; keine lokale Tool-Fragmentlogik.
+
+2026-09-26 03:50 Core geprüft: /home/getty/dev/langertha ist sauber auf main 193005702eb286481f00438575021659ebbbc118. Verwendete API: Engine::OpenAIBase->parse_stream_chunk($data, undef, \%request_state), fertige Stream::Chunk->tool_calls, ToolCall->to_ollama; Parser sammelt indexweise und leert nach finalem finish_reason. Lokaler Test-PERL5LIB lädt diese Dateien aus /home/getty/dev/langertha/lib. Installierte 0.503 trägt gleichlautende Methoden, muss aber noch verhaltensseitig als alter Snapshot behandelt werden.
+
+2026-09-26 03:55 RED belegt gegen Core main 1930057: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 prove -I/home/getty/dev/langertha-skeid/lib -v t/56-ollama-stream-tools.t. Erwarteter Fehler: beide /api/chat-Fälle liefern 0 message.tool_calls statt 1; Text, Usage, /api/generate und Admission bleiben bereits grün. Inline-Upstream läuft als relative /fake/v1-Route im selben build_app/Test::Mojo-App.
+
+2026-09-26 04:00 Patch fertig für Review: Ollama::Stream delegiert delta.tool_calls lazy an einen geteilten OpenAIBase-Parser, führt pro Translator eigenen State, rendert ausschließlich fertige Langertha::ToolCall->to_ollama und finalisiert Parser-State; generate bleibt ohne Tools. Neu t/56-ollama-stream-tools.t: Inline-Upstream im build_app/Test::Mojo, fragmentierte/parallele Calls, Unicode, Tool-only, Text+Tools, Usage-only ohne Duplikat, interleavter Request-State und generate-Abgrenzung. Verifiziert gegen sauberes Langertha main 193005702eb286481f00438575021659ebbbc118: 6 gezielte Dateien, 408 Tests, PASS; git diff --check PASS. Installierte alte /home/getty/perl5 0.503 scheitert erwartungsgemäß (_finish_stream_state fehlt / keine Tool-Akkumulation); Release bleibt von Skeid k58 / Langertha k216 abhängig. Keine cpanfile-Änderung.
+
+2026-09-26 04:03 Integrationsreview des ersten Patches: die neue Anbindung ruft noch den ausdrücklich internen Langertha-Hook _finish_stream_state auf. Außerdem kann der öffentliche parse_stream_chunk bei choice.error/finish_reason=error croaken; Proxy ruft stream->delta im read-Callback ohne eval. Vor Abnahme private API entfernen/saubere öffentliche Lifecycle-Lösung wählen und Parserfehler in Ollama error_event übersetzen, statt den Mojo-Callback entkommen zu lassen. Regressionstests für tool-bearing error/truncation ergänzen; kein neuer Core-Bug ohne weitere Evidenz.
+
+2026-09-26 04:07 Review verifiziert: OpenAICompatible::_finish_stream_state ist ausdrücklich intern; Proxy ruft delta/finish ohne eval. Saubere lokale Grenze ist möglich ohne Core-Privatfelder: requesteigene Parser-State-HashRef nur über ihre Lebensdauer verwerfen, Toolfragment offen/abgeschlossen anhand eigener Rohframe-Beobachtung plus öffentlichem Stream::Chunk (is_final/has_tool_calls) verfolgen, ToolCall::arguments_undecodable ablehnen. parse_stream_chunk-Fehler werden generisch als Ollama error_event beendet; kein done:true danach. Schreibe jetzt RED-Repros zuerst.
+
+2026-09-26 04:09 RED belegt (Core main 1930057, t/56): Error-Frame nach Toolfragment entkommt als Reactor-Watcher-Exception und erzeugt anschließend fälschlich done:true/ok=1; choice.error, skalares top-level error und finish_reason=error croaken direkt. Fehlender finish_reason liefert trotz pending Call done:true; undekodierbare Args werden als arguments:{} ausgegeben; eigene finish-Ausnahme entkommt. Bestehende Happy Paths bleiben grün.
+
+2026-09-26 04:13 GREEN nach Minimalfix: kein Zugriff mehr auf _finish_stream_state/Core-Privatfelder. Jeder Translator verwirft nur seine eigene State-HashRef; offene Fragmente ohne finish_reason werden als Ollama-Fehler beendet. parse_stream_chunk-Exceptions (choice.error, skalares top-level error, finish_reason=error) und eigene finish-Ausnahmen bleiben an der Translator-Grenze, ohne Roh-/Secrettext und ohne done:true; ToolCall::arguments_undecodable verhindert erfundene {}. Vollständige Calls + Final-/Usage-only bleiben einmalig. Gezielter Lauf gegen Core 1930057: 11 Dateien, 1332 Tests, PASS; Syntax und diff --check PASS. Releaseblocker bleibt k58 / Langertha k216; kein neuer Core-Hook nötig.
+
+2026-09-26 04:14 Reviewfix fertig: Ollama::Stream nutzt nur öffentliche parse_stream_chunk-/Chunk-/ToolCall-Informationen; requesteigene State-Lebensdauer ersetzt den privaten _finish_stream_state-Aufruf. Parser-/finish-Fehler, fehlender finish_reason und undekodierbare Args enden genau einmal als sicherer Ollama error_event, nie mit done:true/arguments:{}. TDD-RED zeigte Reactor-Exception, falsches done:true/ok=1 und erfundene {}. GREEN: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 prove -I/home/getty/dev/langertha-skeid/lib t/{23-proxy-stream,31-stream-translation,34-json-translation,39-upstream-sse-content-type,43-ollama-tool-history,44-stream-content-bytes,52-stream-pricing,54-ollama-generate,55-ollama-format,56-ollama-errors,56-ollama-stream-tools}.t => 11 Dateien, 1332 Tests, PASS. Geladen: OpenAIBase/ToolCall aus /home/getty/dev/langertha/lib, Core 193005702eb286481f00438575021659ebbbc118. perl -c Stream.pm und git diff --check auf beiden Lane-Dateien PASS. Kein Core-Ticket nötig; Release bleibt durch k58/Langertha k216 blockiert. Kein Commit/Push/Changes.
+
+2026-09-26 04:16 Letzter Integrationspunkt vor Gesamttest: Proxy.pm wertet stream->errored aus und schreibt request.finish/Usage vor stream->finish. Ein erst in finish erkannter fehlender Tool-finish_reason kann deshalb bereits als ok=1 verbucht sein, obwohl anschließend ein Ollama-Fehlerframe folgt. Bitte gezielten Integrationstest (vollständiger HTTP-Stream mit Toolfragment, ohne finish_reason) rot/grün prüfen und Finalisierung vor dem Billing-Abschluss sauber einordnen.
+
+2026-09-26 04:18 Fortsetzung des Integrationsfixes: reproduziere jetzt test-first, dass ein erst in stream->finish erkannter Translatorfehler vor request.finish/Usage und Node-Metrik berücksichtigt werden muss. Scope bleibt generische Stream-Finalisierung in Proxy.pm plus gezielte Proxy-Regressionen; kein Ollama-Sonderfeld im Proxy.
+
+2026-09-26 04:20 RED reproduziert gegen Langertha main 1930057: vollständiger in-process HTTP/SSE-Stream mit Toolfragment, Usage, [DONE] und normalem Ende liefert korrekt genau eine Ollama-Fehlerzeile, wird aber als Usage ok=1 und Node ok statt error verbucht; inflight fällt auf 0. t/56 scheitert ausschließlich an diesen drei Ordering-Assertions.
+
+2026-09-26 04:22 Zweiter RED-Repro über die echte Proxy-Route: lokal injizierter Stream-Translator wirft aus finish. Ohne Callback-Grenze meldet Mojo 'I/O watcher failed', Client läuft ins Timeout, keine Usage wird geschrieben, Node bleibt inflight=1. Test prüft zusätzlich sichere Ollama-Fehlerzeile ohne interne Exceptiondetails sowie ok=0/error-Metrik.
+
+2026-09-26 04:25 GREEN/Verifikation: Proxy finalisiert jeden übersetzten Stream jetzt vor request.finish und Usage, queued den Tail weiterhin hinter Deltas und kapselt unerwartete finish-Exceptions als generisches vorhandenes error_event; danach wird erst der endgültige errored-Status gemessen. Neue Proxy-Repros in t/56 decken fehlenden finish_reason sowie tatsächlich werfendes finish ab: Fehlerzeile ohne done:true/Interna, Usage genau einmal ok=0, Node error und inflight=0. PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5; Langertha 193005702eb286481f00438575021659ebbbc118. Gezielter Lauf: 16 Dateien, 1619 Tests, PASS; Proxy.pm, Ollama/Stream.pm und t/56 Syntax OK; diff --check für getrackte Lane-Dateien PASS. Keine Changes-/cpanfile-Änderung, kein Commit; Releaseblocker k58/Langertha k216 bleibt.
+
+2026-09-26 04:25 Review: Ollama Tool-Streams verwenden weiter ausschließlich öffentliche Langertha-API; finale Translatorfehler werden nun vor Metering/Admission bewertet und finish-Exceptions verlassen den Mojo-Callback nicht. RED/GREEN in t/56, gezielte 16 Dateien/1619 Tests PASS gegen Langertha 1930057. Bitte Proxy-Finalisierungsreihenfolge und neue Integrationsfälle prüfen.
+
+2026-09-26 04:48 Abschließende unabhängige Verifikation auf ruhendem gemeinsamen Arbeitsbaum, einschließlich stabilisiertem Lifecycle-Test: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 nice -n 19 ionice -c3 prove -lr t/ -> Files=55, Tests=3052, Result: PASS (67 s). Tatsächlich geladen: Langertha 0.503 aus lokalem Core 193005702eb286481f00438575021659ebbbc118; Tool->classify vorhanden. git diff --check PASS. Der separate Gesamtlauf mit installiertem älterem 0.503-Snapshot bleibt ausschließlich in t/20, t/37 und t/56-ollama-stream-tools.t rot (fehlende classify-/Stream-Tool-Fähigkeiten), siehe k58. Lifecycle-Test darin grün. Karten bleiben review, nicht done; keine Code-Commits/Pushes/Releases, keine globale Installation. Vollständige Abschlusslogs: /tmp/skeid-core-final.YEW7fV.log und /tmp/skeid-installed-final.f51066.log.
+
+2026-09-26 05:11 Committed dc9f9c0: Ollama streaming carries tool calls, finalized before Usage closes (skeid #57)
