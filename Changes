@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Routing at saturation checks each node at most once per selection
+      instead of once per unit of weight: two fully busy nodes weighted
+      1000:1000 used to cost 3000 admission checks to fail over, now 2.
+      Normal weighted round-robin sequencing, cursor progress across a
+      wrap, and partial saturation are unchanged
     - The routing cache and its round-robin cursors are bounded at 256
       entries per inventory generation, FIFO-evicted together, so a stream
       of client-chosen model names that never resolve to a node can no

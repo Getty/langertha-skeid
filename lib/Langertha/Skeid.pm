@@ -2425,25 +2425,41 @@ sub pick_node {
 
   my $key = $self->_route_key(%args);
   my $cursor = 0 + ($self->_rr_cursor->{$key} // 0);
+  $cursor %= $total_weight;
 
-  # Weighted round-robin with admission checks.
-  for my $step (0 .. $total_weight - 1) {
-    my $target = ($cursor + $step) % $total_weight;
-    my $acc = 0;
-    for my $idx (0 .. $#nodes) {
-      $acc += $weights[$idx];
-      next if $target >= $acc;
-      my $candidate = $nodes[$idx];
-      next unless $self->_node_can_take($candidate);
-      $self->_rr_cursor->{$key} = ($cursor + $step + 1) % $total_weight;
-      my $id = $candidate->{id};
-      my $inflight = 0 + ($self->_inflight->{$id} // 0);
-      return {
-        %$candidate,
-        inflight => $inflight,
-        route_key => $key,
-      };
+  # Locate the weighted range containing the cursor without expanding weights into slots. From
+  # that owner onward, the old slot walk considered nodes in inventory order and, if none admitted
+  # before the end, wrapped to target zero. Admission is one per-node observation for this
+  # synchronous selection pass; resampling it once per weight slot describes no new capacity.
+  # Check each node once and skip the rest of every saturated weight range.
+  my ($owner, $range_end) = (0, 0);
+  for my $idx (0 .. $#nodes) {
+    $range_end += $weights[$idx];
+    if ($cursor < $range_end) {
+      $owner = $idx;
+      last;
     }
+  }
+
+  for my $offset (0 .. $#nodes) {
+    my $idx = ($owner + $offset) % @nodes;
+    my $candidate = $nodes[$idx];
+    next unless $self->_node_can_take($candidate);
+
+    # Before a wrap, the historical cursor advances one weighted slot even when a later node was
+    # selected because the owning range was saturated. After a wrap, the first target examined is
+    # slot zero, so its successor is slot one. Keeping both cases preserves partial-saturation
+    # ordering while avoiding one admission check per skipped slot.
+    $self->_rr_cursor->{$key} = $idx < $owner
+      ? (1 % $total_weight)
+      : (($cursor + 1) % $total_weight);
+    my $id = $candidate->{id};
+    my $inflight = 0 + ($self->_inflight->{$id} // 0);
+    return {
+      %$candidate,
+      inflight => $inflight,
+      route_key => $key,
+    };
   }
 
   return;
