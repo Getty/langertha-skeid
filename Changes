@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A config file that fails to parse is retried with the same bounded
+      back-off as a failing config_loader (1s doubling to 60s) instead of
+      being re-parsed on every dispatch. The last good config stays in
+      force; a different mtime, including one that changed again while a
+      failed version was being retried, is always read immediately
     - An upstream HTTP error (a 429 with Retry-After, or any other 4xx/5xx)
       is now observed for capacity on every face -- OpenAI JSON, and the
       Anthropic/Ollama streaming paths -- before the error is returned, not

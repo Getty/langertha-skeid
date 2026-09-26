@@ -369,10 +369,11 @@ node list -- its inventory generation, its running capacity probes and any healt
 the admin API. A code ref inside the config (a custom probe's C<code>) digests by identity, so
 a loader that builds a fresh closure every call should return a version.
 
-A config file follows the same rules, minus the throttle: an mtime change whose content is
-unchanged applies nothing. An explicit C<config.reload> does too, so a value taken from the
-environment (C<admin.api_key_env>, a usage store's C<password_env>) is read again only when the
-config itself changes.
+A config file follows the same rules, minus the throttle for a new file version: an mtime change
+whose content is unchanged applies nothing. A version that fails to parse is retried with the
+same bounded back-off as a failing loader, while a different mtime is read immediately. An
+explicit C<config.reload> does too, so a value taken from the environment (C<admin.api_key_env>,
+a usage store's C<password_env>) is read again only when the config itself changes.
 
 =cut
 
@@ -386,14 +387,27 @@ has _config_mtime => (
   default => sub { undef },
 );
 
+# A file version that failed before it could update _config_mtime, and when that same version
+# may be tried again. A different mtime bypasses this window, so a correction is prompt; the
+# retry keeps a transient read error from freezing an otherwise unchanged file forever.
+has _config_file_failed_mtime => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+has _config_file_retry_at => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
 =attr config_reload_interval
 
 The least time, in seconds, between two runs of a C<config_loader> (default 1; fractions
 allowed; 0 runs it on every dispatch, as before skeid #38).
 
 A loader-based config is re-read from C<call_function>, which every request passes through
-several times. Without a throttle every request would rerun the loader. A config file is not
-throttled: its mtime check is one C<stat>.
+several times. Without a throttle every request would rerun the loader. A config file normally
+pays only one C<stat> per dispatch; only retries of one failed file version are throttled.
 
 =cut
 
@@ -925,6 +939,8 @@ sub _clear_reload_failure {
   $self->last_reload_error_at(undef);
   $self->reload_failures(0);
   $self->_failed_fingerprint(undef);
+  $self->_config_file_failed_mtime(undef);
+  $self->_config_file_retry_at(undef);
   return;
 }
 
@@ -969,10 +985,14 @@ sub _read_config {
   } elsif ($self->has_config_file) {
     my $file = $self->config_file;
     if (-f $file) {
+      # Record the version observed before parsing. The file may be atomically replaced after
+      # load_file has read its bytes; recording a later stat would mark that unread replacement
+      # as applied and prevent the next dispatch from loading it.
+      my $read_mtime = (stat($file))[9];
       my $ypp = YAML::PP->new;
       my $loaded = $ypp->load_file($file);
       $cfg = $loaded if ref($loaded) eq 'HASH';
-      $self->_config_mtime((stat($file))[9] || time);
+      $self->_config_mtime($read_mtime) if defined $read_mtime;
     }
   }
 
@@ -1131,10 +1151,11 @@ Reloads the config if its source may have changed: the file's mtime moved, or a
 C<config_loader> is due (L</config_reload_interval>). Returns true when a changed config was
 applied. C<call_function> runs it on every dispatch, so it never dies: a reload that fails is
 logged, recorded in L</reload_status>, and the request goes on under the config that was in
-force before (the reload is all or nothing). A failing loader is then retried with a back-off
--- the interval doubling per failure, from at least a second up to a minute -- and a loader
-that keeps returning the same broken config is not applied again; a config file is retried
-when it changes. Only construction and an explicit C<config.reload> still die on a bad config.
+force before (the reload is all or nothing). A failing source is then retried with a back-off --
+the interval doubling per failure, from at least a second up to a minute. A loader that keeps
+returning the same broken config is not applied again; a changed config-file mtime bypasses the
+failed version's retry window. Only construction and an explicit C<config.reload> still die on
+a bad config.
 
 =cut
 
@@ -1160,29 +1181,45 @@ sub maybe_reload_config {
   my $mtime = (stat($file))[9] || 0;
   my $last  = $self->_config_mtime;
   if (!defined($last) || $mtime > $last) {
-    return $self->_reload_on_request;
+    my $failed = $self->_config_file_failed_mtime;
+    my $retry  = $self->_config_file_retry_at;
+    return 0 if defined($failed) && $mtime == $failed
+      && defined($retry) && $self->_now < $retry;
+    return $self->_reload_on_request($mtime);
   }
   return 0;
+}
+
+# One retry schedule for loader and file failures. A file's next version bypasses this delay in
+# maybe_reload_config; the delay applies only while the observed mtime is unchanged.
+sub _reload_retry_delay {
+  my ($self) = @_;
+  my $failures = $self->reload_failures // 0;
+  my $base     = 0 + ($self->config_reload_interval // 0);
+  $base = 1 if $base < 1;
+  my $delay = $base * 2 ** ($failures - 1);
+  $delay = $RELOAD_BACKOFF_MAX if $delay > $RELOAD_BACKOFF_MAX;
+  return $delay;
 }
 
 # A reload triggered by a request (skeid #39). Its failure is not the request's: the previous
 # config is still fully in force, so the request is served under it. Failing it with a 500
 # would take every request down until the config is fixed -- with a loader, every one.
 sub _reload_on_request {
-  my ($self) = @_;
-  my $before     = $self->_config_fingerprint // '';
+  my ($self, $file_mtime) = @_;
+  my $before       = $self->_config_fingerprint // '';
   my $error_before = $self->last_reload_error;
-  return (($self->_config_fingerprint // '') ne $before) ? 1 : 0
-    if eval { $self->reload_config; 1 };
+  if (eval { $self->reload_config; 1 }) {
+    return (($self->_config_fingerprint // '') ne $before) ? 1 : 0;
+  }
 
   my $err = $@ || 'config reload failed';
   my $failures = $self->reload_failures // 0;
   if ($self->has_config_loader && $failures > 0) {
-    my $base  = 0 + ($self->config_reload_interval // 0);
-    $base = 1 if $base < 1;
-    my $delay = $base * 2 ** ($failures - 1);
-    $delay = $RELOAD_BACKOFF_MAX if $delay > $RELOAD_BACKOFF_MAX;
-    $self->_config_next_check_at($self->_now + $delay);
+    $self->_config_next_check_at($self->_now + $self->_reload_retry_delay);
+  } elsif (defined($file_mtime) && $failures > 0) {
+    $self->_config_file_failed_mtime($file_mtime);
+    $self->_config_file_retry_at($self->_now + $self->_reload_retry_delay);
   }
   # Logged when the reason is new; the same failure again, retry after retry, is not.
   if (!defined($error_before) || $error_before ne $err) {
