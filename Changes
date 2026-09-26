@@ -2,6 +2,16 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Ollama streaming (/api/chat) now carries tool calls: fragmented
+      arguments, parallel calls and Unicode are accumulated through
+      Langertha's stream parser and rendered as message.tool_calls on the
+      closing line, matching what non-streamed /api/chat already returned.
+      A stream that ends without completing a pending tool call, or whose
+      translator fails while finalizing, closes with a safe Ollama error
+      line instead of a false done:true or invented empty arguments. A
+      translated stream is now finalized before its Usage event and
+      admission are closed, so a translator error discovered only at the
+      end of the stream is billed and recorded as failed, not as ok
     - Routing at saturation checks each node at most once per selection
       instead of once per unit of weight: two fully busy nodes weighted
       1000:1000 used to cost 3000 admission checks to fail over, now 2.

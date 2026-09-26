@@ -40,6 +40,9 @@ sub new {
     done_reason   => undef,
     text_bytes    => 0,
     errored       => 0,
+    tool_stream_state => {},
+    tool_parser_active => 0,
+    tool_call_pending  => 0,
   }, $class;
 }
 
@@ -57,11 +60,70 @@ sub _line {
   return Langertha::Skeid::Protocol::encode_json_safe($payload) . "\n";
 }
 
-# The text of one line in this stream's shape: a chat message, or generate's bare response.
+# Parsing OpenAI tool-call deltas is Langertha's wire-format job.  The parser
+# object is stateless when every caller supplies its own state, so construct it
+# only when the first tool fragment reaches this process and share it; each
+# translator below still owns a separate tool_stream_state HashRef.
+my $OPENAI_STREAM_PARSER;
+sub _openai_stream_parser {
+  require Langertha::Engine::OpenAIBase;
+  return $OPENAI_STREAM_PARSER ||= Langertha::Engine::OpenAIBase->new(
+    url => 'http://skeid.invalid',
+  );
+}
+
+# The state belongs to one translated request.  Replacing our reference ends
+# its lifetime without reaching into Langertha's private parser state.
+sub _discard_tool_stream_state {
+  my ($self) = @_;
+  $self->{tool_stream_state} = {};
+  $self->{tool_parser_active} = 0;
+  $self->{tool_call_pending} = 0;
+  return;
+}
+
+# Feed a tool-bearing stream through Langertha until it returns finished
+# Langertha::ToolCall objects.  Text-only streams never instantiate the engine,
+# and /api/generate never grows a chat-only tool_calls field.
+sub _tool_calls_from_chunk {
+  my ($self, $chunk) = @_;
+  return [] if $self->{shape} eq 'generate';
+
+  my $choice = (ref($chunk->{choices}) eq 'ARRAY' ? $chunk->{choices}[0] : undef) || {};
+  my $delta = ref($choice->{delta}) eq 'HASH' ? $choice->{delta} : {};
+  my $fragments = $delta->{tool_calls};
+  my $has_fragments = ref($fragments) eq 'ARRAY' && @$fragments;
+  return [] unless $self->{tool_parser_active} || $has_fragments;
+
+  if ($has_fragments) {
+    $self->{tool_parser_active} = 1;
+    $self->{tool_call_pending} = 1;
+  }
+  my $parsed = _openai_stream_parser()->parse_stream_chunk(
+    $chunk, undef, $self->{tool_stream_state},
+  );
+  return [] unless $parsed;
+
+  my $tool_calls = $parsed->has_tool_calls ? ($parsed->tool_calls // []) : [];
+  die "OpenAI stream produced undecodable tool arguments\n"
+    if grep { $_->arguments_undecodable } @$tool_calls;
+  die "OpenAI stream ended without a complete tool call\n"
+    if $parsed->is_final && $self->{tool_call_pending} && !@$tool_calls;
+
+  $self->{tool_call_pending} = 0 if @$tool_calls;
+  $self->_discard_tool_stream_state if $parsed->is_final;
+  return $tool_calls;
+}
+
+# The content of one line in this stream's shape: a chat message, or generate's bare response.
 sub _text_field {
-  my ($self, $text) = @_;
+  my ($self, $text, $tool_calls) = @_;
   return (response => $text) if $self->{shape} eq 'generate';
-  return (message => { role => 'assistant', content => $text });
+
+  my $message = { role => 'assistant', content => $text };
+  $message->{tool_calls} = [ map { $_->to_ollama } @$tool_calls ]
+    if ref($tool_calls) eq 'ARRAY' && @$tool_calls;
+  return (message => $message);
 }
 
 =method start
@@ -79,10 +141,13 @@ sub start {
 
 =method delta
 
-One decoded OpenAI chunk becomes one Ollama line, or nothing when the chunk carries no text
-(an opening role-only chunk, or the final usage-only one). Usage and finish reason are recorded
-for the closing line. A chunk carrying an OpenAI error object instead of choices ends the
-stream with L</error_event>.
+One decoded OpenAI chunk becomes one Ollama line when it carries text or completed tool calls,
+or nothing for a role-only chunk or the final usage-only one. OpenAI tool-call fragments are
+fed to L<Langertha::Engine::OpenAIBase/parse_stream_chunk> with state private to this stream;
+only its completed L<Langertha::ToolCall> objects are rendered, through C<to_ollama>. Usage and
+finish reason are recorded for the closing line. A top-level OpenAI error object ends the stream
+with L</error_event>; a parser rejection does the same with a generic message rather than
+reflecting parser/provider details.
 
 =cut
 
@@ -109,14 +174,20 @@ sub delta {
   $self->{model} = $chunk->{model} if defined($chunk->{model}) && length($chunk->{model});
 
   my $text = $choice->{delta}{content};
-  return '' unless defined($text) && length($text);
+  my $tool_calls;
+  unless (eval { $tool_calls = $self->_tool_calls_from_chunk($chunk); 1 }) {
+    return $self->error_event(500, 'Upstream stream could not be translated');
+  }
+  my $has_text = defined($text) && length($text);
+  return '' unless $has_text || @$tool_calls;
 
+  $text = '' unless defined $text;
   $self->{started} = 1;
-  $self->{text_bytes} += Langertha::Skeid::Protocol::utf8_length($text);
+  $self->{text_bytes} += Langertha::Skeid::Protocol::utf8_length($text) if $has_text;
   return _line({
     model      => $self->{model},
     created_at => Langertha::Skeid::Protocol::iso8601_now(),
-    $self->_text_field($text),
+    $self->_text_field($text, $tool_calls),
     done       => \0,
   });
 }
@@ -124,24 +195,42 @@ sub delta {
 =method finish
 
 The closing line: C<done> true, the reason, and the token counts an Ollama client reads its
-statistics from. Idempotent.
+statistics from. Idempotent. A pending tool call whose stream supplied no final chunk is an
+L</error_event>, not a successful close; failures while building the closing line are contained
+at the same boundary.
 
 =cut
 
 sub finish {
   my ($self, %args) = @_;
   return '' if $self->{finished};
-  $self->{finished} = 1;
 
-  return _line({
-    model       => $self->{model},
-    created_at  => Langertha::Skeid::Protocol::iso8601_now(),
-    $self->_text_field(''),
-    done        => \1,
-    done_reason => ($args{done_reason} // $self->{done_reason} // 'stop'),
-    prompt_eval_count => 0 + ($args{input_tokens}  // $self->{input_tokens}  // 0),
-    eval_count        => 0 + ($args{output_tokens} // $self->{output_tokens} // 0),
-  });
+  # A tool fragment is not a call until Langertha returns it on a final chunk.
+  # Ending the request first is a failed stream, never a successful call with
+  # guessed arguments.  Dropping our request-owned state needs no Core hook.
+  if ($self->{tool_call_pending}) {
+    return $self->error_event(500, 'Upstream tool stream ended without finish_reason');
+  }
+
+  my $line;
+  unless (eval {
+    $line = _line({
+      model       => $self->{model},
+      created_at  => Langertha::Skeid::Protocol::iso8601_now(),
+      $self->_text_field(''),
+      done        => \1,
+      done_reason => ($args{done_reason} // $self->{done_reason} // 'stop'),
+      prompt_eval_count => 0 + ($args{input_tokens}  // $self->{input_tokens}  // 0),
+      eval_count        => 0 + ($args{output_tokens} // $self->{output_tokens} // 0),
+    });
+    1;
+  }) {
+    return $self->error_event(500, 'Stream translation failed');
+  }
+
+  $self->_discard_tool_stream_state;
+  $self->{finished} = 1;
+  return $line;
 }
 
 =method error_event
@@ -162,6 +251,7 @@ the stream has already finished.
 sub error_event {
   my ($self, $status, $message) = @_;
   return '' if $self->{finished};
+  $self->_discard_tool_stream_state;
   $self->{finished} = 1;
   $self->{errored}  = 1;
   return _line(Langertha::Skeid::Protocol::Ollama->error_body($message));

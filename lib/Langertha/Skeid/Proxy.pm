@@ -1018,8 +1018,32 @@ sub _proxy_openai_stream {
       }
     }
 
-    # An upstream that reported its failure inside the stream (an error chunk) was answered
-    # with an error event by the translator; the request still failed.
+    # Finalize a translated stream before closing admission or recording its Usage event: a
+    # translator can discover a terminal error only when it sees that no more upstream frames
+    # are coming. Its tail is queued like any other chunk so it still lands after deltas already
+    # in flight. Keep an unexpected finalizer exception inside the callback boundary and use the
+    # translator's existing in-band error shape without reflecting internal details.
+    if ($stream && $headers_sent) {
+      my $tail = '';
+      my $finalized = eval {
+        $tail = $stream->finish;
+        1;
+      };
+      unless ($finalized) {
+        $had_error = 1;
+        $tail = eval { $stream_errors
+          ? $stream->error_event(500, 'Stream translation failed')
+          : '' };
+      }
+      $tail = '' unless defined $tail;
+      if (length $tail) {
+        push @queue, $tail;
+        $drain->() unless $draining;
+      }
+    }
+
+    # An upstream that reported its failure inside the stream, or a translator that could only
+    # detect one while finalizing, was answered with an error event; the request still failed.
     $had_error = 1 if $stream && $stream->can('errored') && $stream->errored;
 
     my $duration_ms = _duration_ms($started);
@@ -1040,17 +1064,6 @@ sub _proxy_openai_stream {
       content_bytes => $content_bytes->(),
       metrics      => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
     });
-
-    # A translated stream has to be closed in its own format: both target protocols end with
-    # events the client waits for, and the OpenAI stream this was built from carries no
-    # equivalent. Queued like any other chunk so it lands after the deltas already in flight.
-    if ($stream && $headers_sent) {
-      my $tail = $stream->finish;
-      if (length $tail) {
-        push @queue, $tail;
-        $drain->() unless $draining;
-      }
-    }
 
     # Only finish once the queue has drained, or the tail of the stream is cut off. If the
     # drain loop is still running it will finish for us when it empties.
