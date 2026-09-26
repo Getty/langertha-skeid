@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - An upstream HTTP error (a 429 with Retry-After, or any other 4xx/5xx)
+      is now observed for capacity on every face -- OpenAI JSON, and the
+      Anthropic/Ollama streaming paths -- before the error is returned, not
+      only on success. A rate-limited node backs off instead of receiving
+      the very next request immediately
     - Fix jsonlog event ids colliding under load: a dir-mode write is created
       exclusively (O_EXCL), retried up to 16 times, and the id is built from
       timestamp, pid, a per-process random nonce and a sequence, all

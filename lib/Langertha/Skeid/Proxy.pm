@@ -748,6 +748,12 @@ sub _proxy_openai_json_async {
   $c->app->ua->start($tx => sub {
     my ($ua, $done) = @_;
     my $duration_ms = _duration_ms($started);
+    my $res = $done->res;
+
+    # Mojo reports an HTTP 4xx/5xx through tx->error too. Observe the response that actually
+    # arrived before taking that error return, so a 429's Retry-After can gate the next request.
+    # A transport failure has no useful status or headers and _observe_capacity records nothing.
+    _observe_capacity($c, $node_id, $res);
 
     if (my $err = $done->error) {
       $c->skeid->call_function('request.finish', {
@@ -771,10 +777,8 @@ sub _proxy_openai_json_async {
       return;
     }
 
-    my $res = $done->res;
     my $status = $res->code // 200;
 
-    _observe_capacity($c, $node_id, $res);
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => ($status < 500) ? 1 : 0,
@@ -955,6 +959,10 @@ sub _proxy_openai_stream {
     # otherwise the completed transaction owns the listener that owns the transaction forever.
     $tx_done->res->content->unsubscribe('read');
 
+    # As on the JSON path, an HTTP error is still a response whose capacity headers matter.
+    # Observe it before the pre-stream error return; transport failures contribute nothing.
+    _observe_capacity($c, $node_id, $tx_done->res);
+
     if (my $err = $tx_done->error) {
       $had_error = 1;
       unless ($headers_sent) {
@@ -1015,7 +1023,6 @@ sub _proxy_openai_stream {
     $had_error = 1 if $stream && $stream->can('errored') && $stream->errored;
 
     my $duration_ms = _duration_ms($started);
-    _observe_capacity($c, $node_id, $tx_done->res);
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => ($had_error || $status >= 500) ? 0 : 1,
