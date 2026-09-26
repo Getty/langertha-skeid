@@ -1,0 +1,40 @@
+---
+claimed_at: 2026-09-26T05:09:22Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-26T05:09:22Z
+created: 2026-09-26T03:36:23Z
+id: 55
+priority: high
+started: 2026-09-26T05:09:22Z
+status: done
+tags:
+- bug
+- routing
+- memory
+title: 'Routing: clientbestimmte Route keys lassen Cache und RR-Cursor unbegrenzt
+  wachsen'
+updated: 2026-09-26T05:09:22Z
+---
+
+Bestätigt auf Skeid 1a848c6: Skeid.pm:1920-1958 cached auch unbekannte Modelle ohne Node; :2360-2372 hält RR-Cursor für jede Auswahl. 1000 verschiedene unbekannte Modelle -> 1000 Cache-Einträge; Wildcard-Node + 1000 Modelle -> 1000 RR-Cursor auch nach Inventory-Wechsel.
+Ziel: nachvollziehbare feste Obergrenze mit gekoppelter Eviction für Cache und Cursor (einschließlich negativer Einträge), vorhandene Wildcard-/Policy-/Tag-Semantik erhalten. Kein neues Capability-Routing. Fairness-Auswirkung von Eviction dokumentieren.
+Abnahme: rot/grün Test überschreitet Grenze, beide Strukturen bleiben begrenzt; normale Cursor-Trennung und Inventory-Invalidierung/Policy bleiben richtig. Skeid.pm und dedizierte neue Tests.
+
+2026-09-26 03:48 Eingeplant nach k54: Regressionstest in t/54-routing-cache-bounds.t zuerst rot; danach feste Cache-Grenze mit gekoppelter Cursor-Bereinigung.
+
+2026-09-26 03:55 Root Cause bestätigt: _route_entry legt jeden clientbestimmten Route key (auch leere eligible Sets) dauerhaft in entries ab; pick_node legt parallel Cursor ohne Eviction an, und _bump_inventory erhöht nur die Generation. RED: prove -lv t/54-routing-cache-bounds.t — 7/17 fehlgeschlagen; 400 negative Einträge und 401 Wildcard-Einträge/Cursor, ältester Cursor blieb bestehen, Inventory-Wechsel ließ ihn stehen.
+
+2026-09-26 03:56 Umgesetzt: Der generationsgebundene Route-Cache hält maximal 256 Einträge inklusive negativer requested models. Deterministische FIFO-Eviction entfernt den gekoppelten RR-Cursor; der nächste Zugriff startet dessen Fairness bewusst neu. Jeder Inventory-Wechsel leert alle Cursor sofort, ein fehlgeschlagener Config-Apply stellt sie mit dem alten Inventory wieder her. RED: t/54-routing-cache-bounds.t 7/17 fehlgeschlagen (400/401 Einträge, stale Cursor). GREEN: neuer Test 17/17; t/24 + t/25 + t/26 zusammen 127/127 PASS (Wildcard, Tags, Aliases und Policy).
+
+2026-09-26 04:17 Unabhängiges Sol-Review bestätigt Fairness-Regression: idempotentes set_node_health(a,1) auf bereits gesundem a ruft _bump_inventory und leert jetzt Cursor; zwei gleichgewichtete Nodes liefern dadurch a,a statt a,b. No-op Health-Updates dürfen keinen Inventory-/Cursor-Reset auslösen. Regressionstest auf t/54 ergänzen; echte Änderungen und Cache-Obergrenze bleiben wirksam.
+
+2026-09-26 04:18 Review-Korrektur begonnen: RED-Test für idempotentes set_node_health ohne Inventory-/Cursor-Reset; echte Health-Wechsel und Eviction bleiben unverändert.
+
+2026-09-26 04:20 RED bestätigt: t/54 3/22 fehlgeschlagen; No-op Health erhöhte Inventory-/Probe-Generation 4→5 und lieferte a statt b.
+
+2026-09-26 04:22 Review-Fix bereit: set_node_health bumped Inventory nur bei echtem Bool-Zustandswechsel; No-op behält Inventory-/Probe-Generation und RR-Cursor, echte Wechsel invalidieren weiter. Deterministischer RED 3/22 (Generation 4→5, a statt b), danach GREEN 22/22. Gemeinsame Zielprüfung mit k54: 8 Dateien, 300 Tests, PASS; git diff --check ohne Befund.
+
+2026-09-26 04:48 Abschließende unabhängige Verifikation auf ruhendem gemeinsamen Arbeitsbaum, einschließlich stabilisiertem Lifecycle-Test: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 nice -n 19 ionice -c3 prove -lr t/ -> Files=55, Tests=3052, Result: PASS (67 s). Tatsächlich geladen: Langertha 0.503 aus lokalem Core 193005702eb286481f00438575021659ebbbc118; Tool->classify vorhanden. git diff --check PASS. Der separate Gesamtlauf mit installiertem älterem 0.503-Snapshot bleibt ausschließlich in t/20, t/37 und t/56-ollama-stream-tools.t rot (fehlende classify-/Stream-Tool-Fähigkeiten), siehe k58. Lifecycle-Test darin grün. Karten bleiben review, nicht done; keine Code-Commits/Pushes/Releases, keine globale Installation. Vollständige Abschlusslogs: /tmp/skeid-core-final.YEW7fV.log und /tmp/skeid-installed-final.f51066.log.
+
+2026-09-26 05:09 Committed 29c52ea: Skeid: bound the routing cache and its round-robin cursors (skeid #55)
