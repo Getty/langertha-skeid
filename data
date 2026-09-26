@@ -1,0 +1,31 @@
+---
+claimed_at: 2026-09-26T04:48:53Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-26T18:02:26Z
+created: 2026-09-26T03:36:24Z
+id: 58
+priority: high
+started: 2026-09-26T18:02:26Z
+status: done
+tags:
+- bug
+- dependencies
+- anthropic
+- tools
+title: 'Langertha-Abhängigkeit: erfüllter 0.503-Pin garantiert Tool->classify nicht'
+updated: 2026-09-26T18:02:26Z
+---
+
+Skeid cpanfile:1 verlangt Langertha 0.503. Installierte 0.503 erfüllt dies, besitzt aber kein Langertha::Tool->classify; Protocol/Anthropic.pm:190 ruft es für Tool-Definitionen auf. Gesamtsuite: 48 Dateien/2375 Tests/FAIL; t/20-proxy-mapping.t exit255, t/37-anthropic-builtin-tools.t 10 Fehler.
+Aktuellen veröffentlichten Release vs lokalen Langertha-Baum abgleichen; dort war classify bei gleichem VERSION unter Changes NEXT. Langertha k216 existiert bereits als in-progress: keinen doppelten Feature-Bug erfinden.
+Ziel: API-/Release-Vertrag korrekt schließen, bestehende Klassifikation nutzen, keinen eigenen Klassifikator in Skeid nachbauen und keinen unveröffentlichten Versions-Pin erfinden. Falls Release noch fehlt, konkreten Blocker dokumentieren und Tests zusätzlich gegen lokalen aktuellen Langertha-Baum ohne globale Installation laufen lassen.
+Abnahme: klar belegt ob veraltete Installation, unreleased API oder Bug; sichere Skeid-Anpassung soweit möglich, sonst präziser Karr-Blocker mit Tests. Keine Langertha-Quelländerungen/Releases ohne gesonderten Auftrag.
+
+2026-09-26 03:39 Abgleich der vorhandenen Tickets: Langertha k216 dokumentiert den fehlenden Release-Pin bereits ausdrücklich und ist mit genau diesem Grund blockiert. Kein neuer classify-Feature-Bug auf dem Core-Board angelegt. Diese Skeid-Karte verfolgt die lokale Integrations-/Release-Abhängigkeit; der Sol-Abgleich prüft zusätzlich den aktuell veröffentlichten Stand.
+
+2026-09-26 03:46 Sol-Abgleich: öffentlich aktuell MetaCPAN 0.502, kein öffentlicher 0.503-Tag; installierte 0.503 ist älterer Development-Snapshot. Aktueller sauberer Langertha-main enthält classify und Stream-Tool-Akkumulation, ebenfalls VERSION 0.503. Gegen ihn bestehen t/20 + t/37 (58/58); Core t/92_tool_builtin_guard.t (50/50) und t/43_stream_tool_calls.t (13/13) bestehen. Kein neuer Core-Bug. Vor Skeid-Release einen tatsächlichen featuretragenden Core-Release veröffentlichen/installieren und den Pin eindeutig setzen; keine Version erfunden. Quellen: https://metacpan.org/dist/Langertha ; https://github.com/Getty/langertha/tags . Bestehendes Langertha k216 deckt den Releaseblocker bereits ab.
+
+2026-09-26 04:48 Finaler Abgleich nach allen Skeid-Fixes: installierte /home/getty/perl5/lib/perl5/Langertha.pm meldet 0.503, Tool->classify fehlt; nice -n 19 ionice -c3 prove -lr t/ -> Files=55, Tests=2483, Result: FAIL ausschließlich in t/20-proxy-mapping.t, t/37-anthropic-builtin-tools.t und t/56-ollama-stream-tools.t. Mit PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 und Core 193005702eb286481f00438575021659ebbbc118 (ebenfalls 0.503, classify vorhanden): Files=55, Tests=3052, Result: PASS. Kein neuer Core-Implementierungsbug: benötigte Funktionalität ist im aktuellen main vorhanden und wird von Skeid wiederverwendet. Blocker bleibt der veröffentlichte featuretragende Core-Release mit anschließend eindeutigem Dependency-Pin; bestehende needs:langertha#216-Verknüpfung bleibt. Kein erfundener Versionspin, kein globales Upgrade/Release ausgeführt.
+
+2026-09-26 18:02 Abgeschlossen auf Maintainer-Entscheid: cpanfile verlangt Langertha 0.503, das ist die VERSION im aktuellen Langertha-Baum (lib/Langertha.pm, main 1930057) und damit der nächste Release; CPAN hat derzeit 0.502. Der Pin drückt die Abhängigkeit aus, keine cpanfile-Änderung nötig. Das Veröffentlichen von Langertha 0.503 (Langertha k216) ist kein Skeid-Thema. Suite gegen Langertha-main: Files=55, Tests=3052, PASS.
