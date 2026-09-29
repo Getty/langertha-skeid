@@ -55,14 +55,16 @@ No Skeid credential is needed on these; see L</Customer identity>.
   POST /v1/messages                Anthropic Messages, streamed or not
   POST /api/chat                   Ollama chat; streams unless "stream": false
   POST /api/generate               Ollama generate; streams unless "stream": false
-  GET  /api/tags                   Ollama: one entry per configured node
+  GET  /api/tags                   Ollama: the same models as /v1/models
   GET  /api/ps                     Ollama: always an empty list
 
 C</health> stays C<ok> while a config reload is failing -- the proxy serves under the config it
 kept -- and shows the reload state without its message. C</v1/models> and C</api/tags> list the
-nodes' own model names: aliases are not listed, no key's policy is applied, and unhealthy nodes
-are included. The manifest route answers C<404> unless the config enables it, C<401> without a
-key and C<403> for a key without a grant; see L<Langertha::Skeid/Provider Manifest>.
+nodes' own model names, each once: aliases are not listed, no key's policy is applied, and
+unhealthy nodes are included. A node without a C<model> is not listed -- it matches any
+requested name, so no name reaches it in particular. The manifest route answers C<404> unless
+the config enables it, C<401> without a key and C<403> for a key without a grant; see
+L<Langertha::Skeid/Provider Manifest>.
 
 =head2 Registry route
 

@@ -206,7 +206,8 @@ aliases:
   a config without aliases routes as it always did.
 - The usage event records both the served model (`model`, what is priced) and the
   requested model (`requested_model`, what the customer asked for).
-- `GET /v1/models` and `GET /api/tags` list the models the nodes serve, not alias names.
+- `GET /v1/models` and `GET /api/tags` list the models the nodes serve, not alias names. A
+  node without a `model` matches any name and has none of its own, so it is not listed.
 
 ### Customer key ids and per-key policy
 
@@ -326,7 +327,7 @@ read when the config is applied. Upstream requests time out after 10s connect / 
 | `POST /v1/messages` | Anthropic | translated to and from OpenAI |
 | `POST /api/chat` | Ollama | translated; streams unless `"stream": false` |
 | `POST /api/generate` | Ollama | translated; streams unless `"stream": false` |
-| `GET /api/tags` | Ollama | the node models (size, digest etc. left empty) |
+| `GET /api/tags` | Ollama | the same models as `/v1/models` (size, digest etc. left empty) |
 | `GET /api/ps` | Ollama | always an empty list |
 | `GET /health` | — | `{status, proxy, config_reload}`; no auth |
 | `GET /.well-known/langertha.json` | — | provider manifest for the calling key |
