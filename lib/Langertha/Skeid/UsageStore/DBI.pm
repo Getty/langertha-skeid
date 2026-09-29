@@ -181,7 +181,9 @@ sub dbh {
 
 =method disconnect
 
-Drops the cached handle. Called when the store is replaced and from Skeid's C<DEMOLISH>.
+Drops the cached handle, so the next L</dbh> connects anew. Called when the store is replaced,
+from Skeid's C<DEMOLISH>, and by L</store> / L</report> when a failed statement left the
+handle dead.
 
 =cut
 
@@ -240,20 +242,64 @@ is reported, never thrown, because the request it describes has already been ser
 logs such an answer at C<error> level as a lost usage event. A C<password=> in the error text
 (a DSN that carries one) is masked.
 
+A dropped connection is survived: when the insert fails and the handle turns out to be dead
+(not C<Active>, or C<ping> fails -- checked only after a failure, so a healthy write costs
+nothing extra), the store connects once more and retries that one event once. The new handle
+serves every later event. A reconnect that fails is reported like any other failure (the next
+event tries again), and a failure on a live handle -- a dropped table, a constraint -- is
+reported without a reconnect. There is no loop and no wait: at most one extra synchronous
+connect per event, the cost ADR 0005 already accepts for this backend. The schema is not
+re-applied on a reconnect; L</prepare> ran when the store was configured, and a lost connection
+does not lose the table. One corner remains: a connection that drops after the server committed
+the insert but before it answered is indistinguishable from one that dropped before, so that
+event can be written twice. A duplicate row carries the same C<request_id>; a lost one leaves
+nothing to reconcile.
+
 =cut
 
 sub store {
   my ($self, $event) = @_;
+  return $self->_with_handle(sub {
+    my ($dbh) = @_;
+    return { ok => 1, $self->_insert($dbh, $event) };
+  });
+}
+
+# Runs $work with the store's handle and returns its answer, or { ok => 0, error } when it dies.
+# On a failure that left the handle dead the handle is dropped, connected once more and $work
+# retried once on the new one (skeid k71). Never more than that, never a wait.
+sub _with_handle {
+  my ($self, $work) = @_;
 
   my $dbh = eval { $self->dbh };
-  if (!$dbh || $@) {
-    return { ok => 0, error => $self->_error_text($@ || 'failed to connect usage database') };
-  }
+  return $self->_failure($@ || 'failed to connect usage database') unless $dbh;
 
-  my %out;
-  my $inserted = eval { %out = $self->_insert($dbh, $event); 1 };
-  return { ok => 0, error => $self->_error_text($@) } unless $inserted;
-  return { ok => 1, %out };
+  my $res = eval { $work->($dbh) };
+  return $res if $res;
+  my $err = $@;
+  return $self->_failure($err) if $self->_handle_alive($dbh);
+
+  $self->disconnect;
+  my $fresh = eval { $self->dbh };
+  return $self->_failure('usage database connection lost, reconnect failed: '
+    .($@ || 'no database handle')) unless $fresh;
+
+  $res = eval { $work->($fresh) };
+  return $res || $self->_failure($@);
+}
+
+# Asked only after a statement failed, so the round-trip a ping costs on PostgreSQL is never
+# paid by a healthy write. DBD::Pg keeps Active set on a connection the server dropped; ping
+# is what notices.
+sub _handle_alive {
+  my ($self, $dbh) = @_;
+  return 0 unless $dbh->{Active};
+  return eval { $dbh->ping } ? 1 : 0;
+}
+
+sub _failure {
+  my ($self, $err) = @_;
+  return { ok => 0, error => $self->_error_text($err) };
 }
 
 # A DBI error names the DSN it failed on, and a DSN may carry the password. Nothing that
@@ -324,7 +370,8 @@ Aggregates in SQL: totals, per-key and per-model breakdowns, and the newest C<li
 The same C<since> / C<api_key_id> / C<model> filter set applies to every part of the report, so
 the breakdowns always add up to the totals shown next to them. C<limit> defaults to 20. The shape
 is described in L<Langertha::Skeid::UsageStore/The store contract>; a failure to connect or a
-failing query is C<< { ok => 0, enabled => 0, error => … } >>.
+failing query is C<< { ok => 0, enabled => 0, error => … } >>. A dropped connection is
+reconnected once, exactly as for L</store>.
 
 =cut
 
@@ -332,14 +379,11 @@ sub report {
   my ($self, $filters) = @_;
   $filters ||= {};
 
-  my $dbh = eval { $self->dbh };
-  if (!$dbh || $@) {
-    return { ok => 0, enabled => 0, error => $self->_error_text($@ || 'failed to connect usage database') };
-  }
-
-  my $report = eval { $self->_report($dbh, $filters) };
-  return { ok => 0, enabled => 0, error => $self->_error_text($@) } unless $report;
-  return $report;
+  my $report = $self->_with_handle(sub {
+    my ($dbh) = @_;
+    return $self->_report($dbh, $filters);
+  });
+  return $report->{ok} ? $report : { %$report, enabled => 0 };
 }
 
 sub _report {

@@ -408,6 +408,10 @@ Revision history for Langertha-Skeid
       out of the file is deliberately kept until restart and warned about
       once, so a reload cannot silently stop recording billing data; a
       changed usage_store is still swapped live
+    - A SQLite or PostgreSQL usage store whose connection dropped reconnects
+      once and retries the event, instead of losing every later usage event
+      until restart. A failed reconnect is reported as a lost event, never
+      thrown, and the next event tries again (skeid k71)
 
 0.003     2026-05-16 17:10:00Z
 
