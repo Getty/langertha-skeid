@@ -2,6 +2,8 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - examples/README.md documents every example script with its options
+      and environment, and carries the Avatar, one-box and Vast lab recipes
     - Docker images no longer take a KNARR_SRC build argument; Skeid does not
       depend on Langertha::Knarr. LANGERTHA_SRC still installs a specific
       Langertha before the cpanfile
