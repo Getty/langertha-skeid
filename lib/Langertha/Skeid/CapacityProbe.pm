@@ -227,8 +227,9 @@ Builds the probe a node's C<capacity> block asks for, or nothing when it asks fo
     url: http://gpu-1:8000/metrics
     interval_ms: 2000
 
-C<inflight> (and an absent block) means no probe object at all — that is the default admission
-path, not a probe that reports the same thing. C<ratelimit> is likewise not built here: it is
+C<probe> may also be spelled C<type>. C<inflight> (the default; also C<none>, and an absent
+block) means no probe object at all — that is the default admission path, not a probe that
+reports the same thing. C<ratelimit> is likewise not built here: it is
 passive, read off responses the proxy already has, and needs nothing running.
 
 C<registry> is for a node that is itself a Skeid: it pulls that Skeid's signed registry
@@ -236,7 +237,11 @@ snapshot (L<Langertha::Skeid::CapacityProbe::Registry>, ADR 0017).
 
 C<custom> takes either a C<code> callback (given the probe, reports through the same methods)
 or a C<class> to load, because Skeid is generic and the built-ins only cover the engines we
-happen to know.
+happen to know. The class must look like a Perl package name, is loaded by name and built
+with C<skeid>, C<node_id>, C<config> and C<interval_ms>.
+
+C<interval_ms> in the block becomes L</interval_ms>. Croaks on an unknown probe, and on a
+C<custom> block with neither C<code> nor a valid C<class>.
 
 =cut
 
@@ -289,7 +294,8 @@ sub for_node {
   my $probes = Langertha::Skeid::CapacityProbe->start_for_skeid($skeid);
 
 Builds and starts a probe for every node that asks for one, and returns them by node id. The
-caller holds them: a probe that goes out of scope stops polling.
+caller holds them: a probe that goes out of scope stops polling. A node whose block does not
+build is skipped with a warning, so one bad block does not stop the others.
 
 =cut
 
@@ -309,5 +315,19 @@ sub start_for_skeid {
   }
   return \%probes;
 }
+
+=seealso
+
+=over 4
+
+=item * L<Langertha::Skeid::CapacityProbe::Prometheus>, L<Langertha::Skeid::CapacityProbe::Registry>,
+L<Langertha::Skeid::CapacityProbe::Custom>
+
+=item * L<Langertha::Skeid/set_capacity_reading>, L<Langertha::Skeid/observe_response_headers> --
+the reading every probe reports, and the passive one
+
+=back
+
+=cut
 
 1;

@@ -27,6 +27,15 @@ a stream that fails mid-flight can still be closed correctly.
 
 =cut
 
+=method new
+
+  my $stream = Langertha::Skeid::Protocol::Anthropic::Stream->new(model => $requested_model);
+
+C<model> is the model named in C<message_start> -- the one the client asked for. C<message_id>
+defaults to C<msg_> plus the current time in milliseconds.
+
+=cut
+
 sub new {
   my ($class, %args) = @_;
   return bless {
@@ -243,7 +252,8 @@ C<stop> or not at all, otherwise the mapping of the upstream C<finish_reason>.
 
 Idempotent, and it opens the message first if nothing ever did: a stream that produced no
 text and no tool calls still has to be a well-formed Anthropic message, or the client waits
-for an end that never comes.
+for an end that never comes. C<< stop_reason => ... >> and C<< output_tokens => ... >>
+override what the stream recorded.
 
 =cut
 
@@ -336,5 +346,11 @@ sub usage {
   my ($self) = @_;
   return ($self->{input_tokens}, $self->{output_tokens}, $self->{text_bytes});
 }
+
+=seealso
+
+L<Langertha::Skeid::Protocol::Anthropic>, L<Langertha::Skeid::Protocol::Ollama::Stream>
+
+=cut
 
 1;

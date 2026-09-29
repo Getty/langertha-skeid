@@ -32,16 +32,19 @@ L<Langertha::Skeid::Protocol::Anthropic::Stream> for the per-chunk rewrite and t
 accumulator, and F<t/31-stream-translation.t> for what the wire looks like end-to-end.
 
 C<< finish_reason >> mapping is the same as the non-streaming path: C<tool_calls> becomes
-C<tool_use>, C<length> becomes C<max_tokens>, anything else becomes C<end_turn>. Tool calls
-emitted during a stream are not yet re-emitted as C<tool_use> content blocks — only the
-closing C<stop_reason> reports C<tool_use> today; streaming tool calls is a separate ticket
-that touches the translator's delta shape.
+C<tool_use>, C<length> becomes C<max_tokens>, anything else becomes C<end_turn> -- and a reply
+that carries tool calls but finished with C<stop> reports C<tool_use>. Tool calls in a stream
+are re-emitted as C<tool_use> content blocks with C<input_json_delta> deltas, one block per
+parallel call.
 
 =method request_to_openai
 
   my $openai_body = Langertha::Skeid::Protocol::Anthropic->request_to_openai($body);
 
-Turns an Anthropic Messages request into the OpenAI chat-completions body Skeid forwards.
+Turns an Anthropic Messages request into the OpenAI chat-completions body Skeid forwards:
+C<model>, the messages, and C<max_tokens>, C<temperature> and C<top_p> when given. Nothing else
+of the request is carried -- C<stop_sequences>, C<metadata>, C<thinking> and C<cache_control>
+included; C<stream> is set by the proxy.
 
 C<system> (a string or a block array) becomes a leading system message. Content block arrays
 fold to text, unless a user message carries an C<image> block: then its text and image blocks
@@ -354,6 +357,7 @@ sub error_body {
 =method manifest_endpoint
 
   my $spec = Langertha::Skeid::Protocol::Anthropic->manifest_endpoint;
+  # { dialect => 'anthropic-compat', path => '', capabilities => [ ... ] }
 
 How this face appears in the provider manifest (skeid #29): C<anthropic-compat> at the public
 root, and the capability flags L</request_to_openai> actually carries to the upstream --
@@ -381,5 +385,12 @@ sub manifest_endpoint {
     )],
   };
 }
+
+=seealso
+
+L<Langertha::Skeid::Protocol::Anthropic::Stream>, L<Langertha::Skeid::Protocol>,
+L<Langertha::Skeid::Proxy>
+
+=cut
 
 1;

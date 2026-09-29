@@ -15,6 +15,34 @@ F<docs/adr/0004-usage-events-are-the-billing-unit.md>.
 This module owns the config shape and hands back the object that implements it:
 L<Langertha::Skeid::UsageStore::JsonLog> or L<Langertha::Skeid::UsageStore::DBI>.
 
+=head2 The store contract
+
+A store object answers C<backend> (its name), C<prepare> (create what it needs; called once
+when the store is configured, may croak), C<store($event)>, C<report(\%filters)> and
+C<disconnect>. C<store> and C<report> report failure in their answer rather than dying: the
+request an event describes has already been served. (The DBI store still dies when a statement
+fails; see L<Langertha::Skeid::UsageStore::DBI/store>.)
+
+C<store> returns C<< { ok => 1 } >> (with an C<id> where the backend has one) or
+C<< { ok => 0, error => $message } >>. C<report> takes the filters C<since> (an ISO 8601 UTC
+timestamp, compared as a string), C<api_key_id>, C<model> (the served model) and C<limit>, and
+returns
+
+  {
+    ok => 1, enabled => 1, backend => 'jsonlog', since => '...',
+    db_path  => '...',                  # DBI stores: the SQLite file, '' for postgresql
+    totals   => { requests, input_tokens, output_tokens, total_tokens, cached_tokens,
+                  cache_write_tokens, tool_calls, total_cost_usd },
+    by_key   => [ { api_key_id, requests, total_tokens, total_cost_usd }, ... ],
+    by_model => [ { model, requests, total_tokens, total_cost_usd }, ... ],
+    recent   => [ { id, created_at, api_format, endpoint, api_key_id, model, requested_model,
+                    node_id, status_code, ok, input_tokens, output_tokens, total_tokens,
+                    cached_tokens, cache_write_tokens, tool_calls, cost_total_usd }, ... ],
+  }
+
+or C<< { ok => 0, enabled => 0, error => $message } >>. The breakdowns are ordered by cost,
+highest first; C<recent> is newest first.
+
 =method normalize_config
 
   my $normalized = Langertha::Skeid::UsageStore->normalize_config($cfg, %opts);
@@ -26,6 +54,29 @@ C<log_path> decides. C<password_env> reads the password from the environment so 
 to sit in the file.
 
 C<default_sqlite_path> supplies the path for a sqlite config that names none.
+
+The keys it reads, per backend:
+
+=over 4
+
+=item * C<backend> -- C<jsonlog>, C<sqlite> or C<postgresql> (anything starting with C<json> or
+C<postgres> counts). Absent: C<sqlite_path>, C<path> or C<db_path> means sqlite, a C<dbi:Pg:>
+C<dsn> means postgresql, C<log_path> means jsonlog, and nothing at all means sqlite -- which then
+needs a path. A C<path> alone is therefore a sqlite file; a jsonlog store must say so.
+
+=item * jsonlog -- C<log_path> (or C<path>), required; C<mode> C<dir> or C<file>, default C<dir>
+when the path is an existing directory or ends in C</>, else C<file>; C<fsync> (default off).
+
+=item * sqlite -- C<sqlite_path> (or C<path>, C<db_path>), required; C<schema_file> (default:
+the shipped one); C<auto_migrate> (default on).
+
+=item * postgresql -- C<dsn>, else one built from C<host> (default C<127.0.0.1>), C<port> (5432)
+and C<dbname> or C<database> (C<skeid>); C<user>; C<password>, or C<password_env> naming the
+variable that holds it; C<schema_file>; C<auto_migrate> (default on).
+
+=back
+
+Croaks on a config that is not a hashref, a missing path, or an unknown backend.
 
 =cut
 
@@ -136,7 +187,9 @@ sub for_config {
   );
 }
 
-=method num
+=func num
+
+  my $n = Langertha::Skeid::UsageStore::num($row->{total_tokens});
 
 Numeric coercion that treats undef as zero. Reports sum columns that may be C<NULL> on an empty
 table, so this is the one place that is allowed to be lax about it.
@@ -149,7 +202,9 @@ sub num {
   return 0 + $v;
 }
 
-=method read_text_file
+=func read_text_file
+
+  my $sql = Langertha::Skeid::UsageStore::read_text_file($path);
 
 Slurps a file, dying with the path on failure.
 
@@ -163,5 +218,17 @@ sub read_text_file {
   close $fh;
   return $text;
 }
+
+=seealso
+
+=over 4
+
+=item * L<Langertha::Skeid::UsageStore::JsonLog>, L<Langertha::Skeid::UsageStore::DBI>
+
+=item * L<Langertha::Skeid/record_usage>, L<Langertha::Skeid/usage_report> -- what writes and reads a store
+
+=back
+
+=cut
 
 1;

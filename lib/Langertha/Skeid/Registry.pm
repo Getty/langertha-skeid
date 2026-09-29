@@ -73,6 +73,8 @@ sub encode {
 
   my $signature = Langertha::Skeid::Registry->sign($body, $secret);   # 'sha256=...'
 
+C<sha256=> plus the hex HMAC-SHA256 of C<$body> under C<$secret>.
+
 =cut
 
 sub sign {
@@ -197,5 +199,12 @@ sub _num {
   return 0 unless defined $value && !ref $value && $value =~ /\A-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\z/;
   return 0 + $value;
 }
+
+=seealso
+
+L<Langertha::Skeid/registry_snapshot> and L<Langertha::Skeid/registry_enabled> (publishing),
+L<Langertha::Skeid::CapacityProbe::Registry> (reading), L<Langertha::Skeid::Secret>
+
+=cut
 
 1;

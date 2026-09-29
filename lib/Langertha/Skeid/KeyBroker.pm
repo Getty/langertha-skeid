@@ -190,8 +190,29 @@ sub _cache_result {
   return;
 }
 
+=method needs_refresh
+
+True when the broker's own credential has to be renewed before the next resolution. Always 0
+here; L<Langertha::Skeid::KeyBroker::OpenBao> overrides it.
+
+=cut
+
 sub needs_refresh { 0 }
 
+=method refresh
+
+Renews the broker's own credential. A no-op here; L<Langertha::Skeid::KeyBroker::OpenBao>
+overrides it.
+
+=cut
+
 sub refresh { }
+
+=seealso
+
+L<Langertha::Skeid::KeyBroker::OpenBao>, L<Langertha::Skeid/key_broker>, and ADR 0003 (secrets
+live in memory only) in the distribution repository.
+
+=cut
 
 1;

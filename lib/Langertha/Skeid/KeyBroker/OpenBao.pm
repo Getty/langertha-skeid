@@ -21,7 +21,29 @@ extends 'Langertha::Skeid::KeyBroker';
     renew_secs  => 300,  # renew token every 5 minutes
   );
 
-  my $api_key = $broker->resolve_key('secret/skeid/remote/openai');
+  my $api_key = $broker->resolve_key('secret/skeid/remote/openai');   # blocking; CLI and tests
+
+  # the request path
+  $broker->key_async('secret/skeid/remote/openai', sub { my ($key, $error) = @_; ... });
+
+=cut
+
+=attr addr
+
+The OpenBao address (default C<OPENBAO_ADDR>, else C<http://127.0.0.1:8200>).
+
+=attr role_id
+
+Required. The AppRole role id, injected at container start (C<OPENBAO_ROLE_ID>).
+
+=attr secret_id
+
+Required. The AppRole secret id, injected at container start (C<OPENBAO_SECRET_ID>). Held in
+memory only.
+
+=attr renew_secs
+
+How often L</start_renewal> renews the token, in seconds (default 300; below 1 means 60).
 
 =cut
 
@@ -151,6 +173,12 @@ sub _fetch_token {
   return 1;
 }
 
+=method needs_refresh
+
+True when there is no client token yet or it expires within the next 60 seconds.
+
+=cut
+
 sub needs_refresh {
   my ($self) = @_;
   # Refresh if: time is near expiry, OR we have no client_token yet
@@ -158,6 +186,14 @@ sub needs_refresh {
   return 1 unless $self->_token;
   return 0;
 }
+
+=method refresh
+
+Renews the token through C<renew-self>, blocking. Dies when there is no token to renew with or
+the renewal fails -- the AppRole credential is then spent and the process has to restart. The
+request path renews through L</resolve_key_async> instead.
+
+=cut
 
 sub refresh {
   my ($self) = @_;
@@ -217,6 +253,17 @@ sub _key_from_payload {
   my $data = $decoded->{data} // {};
   return $data->{data}{api_key} // $data->{api_key} // undef;
 }
+
+=method resolve_key
+
+  my $key = $broker->resolve_key('secret/skeid/remote/groq');
+
+Reads the KV-v2 secret the reference names and returns its C<api_key> field, renewing the token
+first when it is due. C<secret/skeid/remote/groq> is read from C<secret/data/skeid/remote/groq>.
+Blocking -- never call it from a request handler. Returns undef for an empty reference, a failed
+read (warned with the reference and the HTTP status only) or a secret without C<api_key>.
+
+=cut
 
 sub resolve_key {
   my ($self, $ref) = @_;
@@ -372,6 +419,16 @@ sub start_renewal {
   return $id;
 }
 
+=method list_secrets
+
+  my $names = $broker->list_secrets('secret/metadata/skeid/remote');
+
+The keys under a path, via a blocking C<LIST>. The path is the API path as given -- for KV-v2
+that is C<secret/metadata/...>; no C<secret/> rewriting happens here. Returns an empty arrayref
+on any failure. For setup scripts, not the request path.
+
+=cut
+
 sub list_secrets {
   my ($self, $path) = @_;
   return [] unless defined $path && length $path;
@@ -410,15 +467,32 @@ sub DEMOLISH {
 
 =head1 DESCRIPTION
 
-This KeyBroker implementation fetches API keys from OpenBao KV-v2 secrets.
+This KeyBroker implementation fetches API keys from OpenBao KV-v2 secrets. Security model:
 
-Security model:
-- AppRole credentials (role_id + secret_id) are injected at container start
-- Initial AppRole login returns a RENEW token (stored in _renew_token attribute)
-- First API call triggers refresh() → renew-self → gets client_token for API calls
-- renew-self returns a NEW client_token AND a new renew token (same value)
-- Token is renewed every C<renew_secs> seconds (default: 5min) via renew-self
-- If renewal fails → die → container restart (to get new AppRole credential)
-- No secrets are ever written to disk. Tokens live only in memory.
+=over 4
+
+=item * AppRole credentials (C<role_id> + C<secret_id>) are injected at container start.
+Construction logs in with them, blocking, and dies when the login fails.
+
+=item * The login token is used only to call C<renew-self>; the first resolution does that and
+gets the client token for API calls.
+
+=item * C<renew-self> returns a new client token, which is also the next renew token.
+
+=item * The token is renewed every C<renew_secs> seconds via C<renew-self> once
+L</start_renewal> runs.
+
+=item * If renewal fails after the token expired, the process dies, so the container restarts
+and logs in again.
+
+=item * No secret is ever written to disk. Tokens and resolved keys live only in memory, and are
+dropped when the broker is destroyed.
+
+=back
+
+=seealso
+
+L<Langertha::Skeid::KeyBroker>, L<Langertha::Skeid::Proxy/build_app> (which builds this broker
+from C<OPENBAO_ROLE_ID>, C<OPENBAO_SECRET_ID> and C<OPENBAO_ADDR>)
 
 =cut

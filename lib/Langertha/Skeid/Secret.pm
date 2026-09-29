@@ -36,4 +36,10 @@ sub equal {
   return $diff == 0 ? 1 : 0;
 }
 
+=seealso
+
+L<Langertha::Skeid::Proxy> (admin and registry bearer checks), L<Langertha::Skeid::Registry/verify>
+
+=cut
+
 1;

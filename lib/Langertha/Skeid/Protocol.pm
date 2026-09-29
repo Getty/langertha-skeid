@@ -22,9 +22,13 @@ own translator and nowhere else. Routing, admission, usage accounting and the up
 builder never learn that Anthropic calls it C<system> or that Ollama calls it
 C<prompt_eval_count>. See F<docs/adr/0001-one-upstream-call-shape-all-client-formats-translated.md>.
 
-This module itself holds only the handful of helpers the translators share.
+This module itself holds only the handful of helpers the translators share. They are plain
+functions, called fully qualified (C<Langertha::Skeid::Protocol::utf8_length($text)>) and not
+exported; only L</openai_manifest_endpoint> is a class method.
 
-=method iso8601_now
+=func iso8601_now
+
+  my $now = Langertha::Skeid::Protocol::iso8601_now();   # '2026-09-29T16:54:00Z'
 
 Current UTC time as C<YYYY-MM-DDTHH:MM:SSZ>.
 
@@ -34,7 +38,9 @@ sub iso8601_now {
   return strftime('%Y-%m-%dT%H:%M:%SZ', gmtime());
 }
 
-=method encode_json_safe
+=func encode_json_safe
+
+  my $line = Langertha::Skeid::Protocol::encode_json_safe($payload) . "\n";
 
 JSON-encodes a value to UTF-8 B<bytes>, returning C<'{}'> rather than dying on anything
 unencodable. For a whole wire unit that goes out as-is -- one SSE event or NDJSON line. Never
@@ -48,7 +54,9 @@ sub encode_json_safe {
   return eval { encode_json($value) } || '{}';
 }
 
-=method encode_json_text_safe
+=func encode_json_text_safe
+
+  my $arguments = Langertha::Skeid::Protocol::encode_json_text_safe($block->{input});
 
 JSON-encodes a value to a B<character> string, returning C<'{}'> rather than dying. For JSON
 nested as a string inside a body that is encoded as a whole later -- C<tool_use.input> becoming
@@ -65,7 +73,9 @@ sub encode_json_text_safe {
   return eval { $TEXT_JSON->encode($value) } || '{}';
 }
 
-=method utf8_length
+=func utf8_length
+
+  my $bytes = Langertha::Skeid::Protocol::utf8_length($text);
 
 Length of a character string in UTF-8 B<bytes> -- what a C<content_bytes> count means.
 C<length> on decoded text counts characters and undercounts every non-ASCII answer.
@@ -79,7 +89,9 @@ sub utf8_length {
   return length $octets;
 }
 
-=method decode_json_safe
+=func decode_json_safe
+
+  my $data = Langertha::Skeid::Protocol::decode_json_safe($bytes);   # or undef
 
 Decodes a JSON string of UTF-8 B<bytes> (a raw body or SSE payload), returning C<undef> instead
 of dying. Not for text that is already characters, such as C<function.arguments> read from a
@@ -96,7 +108,7 @@ sub decode_json_safe {
   return $@ ? undef : $decoded;
 }
 
-=method image_media_type
+=func image_media_type
 
   my $mt = Langertha::Skeid::Protocol::image_media_type($base64);   # 'image/jpeg'
 
@@ -119,7 +131,7 @@ sub image_media_type {
   return 'image/png';
 }
 
-=method image_url_part
+=func image_url_part
 
   my $part = Langertha::Skeid::Protocol::image_url_part($url);
   my $part = Langertha::Skeid::Protocol::image_url_part(undef, $base64, $media_type);
@@ -170,5 +182,19 @@ sub openai_manifest_endpoint {
     )],
   };
 }
+
+=seealso
+
+=over 4
+
+=item * L<Langertha::Skeid::Protocol::Anthropic>, L<Langertha::Skeid::Protocol::Anthropic::Stream>
+
+=item * L<Langertha::Skeid::Protocol::Ollama>, L<Langertha::Skeid::Protocol::Ollama::Stream>
+
+=item * L<Langertha::Skeid::Proxy> -- the routes that use them
+
+=back
+
+=cut
 
 1;

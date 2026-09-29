@@ -47,9 +47,22 @@ has code => (
   isa      => sub { croak 'custom capacity probe needs a coderef' unless ref($_[0]) eq 'CODE' },
 );
 
+=method poll
+
+Calls L</code> with the probe. A callback that dies makes the probe forget its reading, as any
+failed poll does.
+
+=cut
+
 sub poll {
   my ($self) = @_;
   return $self->code->($self);
 }
+
+=seealso
+
+L<Langertha::Skeid::CapacityProbe>
+
+=cut
 
 1;

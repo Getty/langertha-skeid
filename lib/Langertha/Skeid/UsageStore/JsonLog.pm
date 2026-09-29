@@ -28,12 +28,15 @@ database, not an index on a directory of JSON files.
 
 =attr path
 
-Directory (C<mode> C<dir>) or file (C<mode> C<file>) the events are written to.
+Required. Directory (C<mode> C<dir>) or file (C<mode> C<file>) the events are written to.
 
 =attr mode
 
-C<dir> writes one C<< <id>.json >> per event, which never needs a lock. C<file> appends one
-JSON line per event under an exclusive C<flock>.
+C<dir> (the default) writes one C<< <id>.json >> per event, created exclusively, which never needs
+a lock and is safe with several writers. C<file> appends one JSON line per event under an
+exclusive C<flock>; any value other than C<dir> behaves as C<file>. The event id --
+UTC time, process id, a per-process random nonce and a sequence number -- is stored in the event
+as C<id>.
 
 =cut
 
@@ -213,7 +216,9 @@ sub store {
   my $report = $store->report(\%filters);
 
 Reads every event, applies the C<since> / C<api_key_id> / C<model> filters, and aggregates
-totals plus per-key and per-model breakdowns. C<recent> holds the newest C<limit> events.
+totals plus per-key and per-model breakdowns. C<recent> holds the newest C<limit> events
+(default 20). Unreadable files and lines are skipped. The shape is described in
+L<Langertha::Skeid::UsageStore/The store contract>.
 
 =cut
 
@@ -308,5 +313,11 @@ sub report {
     } @recent ],
   };
 }
+
+=seealso
+
+L<Langertha::Skeid::UsageStore>, L<Langertha::Skeid::UsageStore::DBI>
+
+=cut
 
 1;

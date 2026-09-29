@@ -31,9 +31,18 @@ one, and admitting more because they are "only waiting" is how a queue becomes a
 
 =head2 Metric names
 
-Defaults cover the common engines; C<used>/C<running>/C<waiting> in the C<capacity> block
-override them. Names are matched ignoring labels, and several series with the same name are
-summed — a per-model breakdown still adds up to what the node is doing.
+Defaults cover the common engines: C<vllm:num_requests_running>, C<sglang:num_running_reqs> and
+C<tgi_batch_current_size> for running, C<vllm:num_requests_waiting>, C<sglang:num_queue_reqs> and
+C<tgi_queue_size> for waiting. C<running> (or C<used>) and C<waiting> in the C<capacity> block
+override them, each a name or a list of names. Names are matched ignoring labels, and several
+series with the same name are summed — a per-model breakdown still adds up to what the node is
+doing.
+
+=head2 The capacity block
+
+C<url> (the metrics endpoint) or C<path> (default C</metrics>, see L</url>), C<interval_ms>
+(default 2000), C<running>/C<used>, C<waiting>, and C<limit> (the ceiling; default the node's
+C<max_conns>, and with neither the reading does not narrow admission).
 
 =cut
 
@@ -88,7 +97,22 @@ sub url {
   return $base . $path;
 }
 
+=method source
+
+C<prometheus>.
+
+=cut
+
 sub source { 'prometheus' }
+
+=method poll
+
+Fetches L</url> without blocking, one request at a time (a poll still out when the next tick
+fires is skipped), and reports C<used> = running + waiting against the limit. A non-2xx answer,
+an unreachable endpoint, or a body without any of the metric names forgets the reading instead.
+An answer that arrives after L<Langertha::Skeid::CapacityProbe/stop> is dropped.
+
+=cut
 
 sub poll {
   my ($self) = @_;
@@ -186,5 +210,11 @@ sub parse_metrics {
   }
   return \%values;
 }
+
+=seealso
+
+L<Langertha::Skeid::CapacityProbe>, and ADR 0009 in the distribution repository.
+
+=cut
 
 1;

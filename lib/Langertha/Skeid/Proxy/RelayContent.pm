@@ -27,4 +27,10 @@ Always false, so the body is parsed as plain content and every byte arrives on C
 
 sub is_sse {0}
 
+=seealso
+
+L<Langertha::Skeid::Proxy>, L<Mojo::Content::Single>
+
+=cut
+
 1;

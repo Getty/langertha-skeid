@@ -27,9 +27,19 @@ backend must not require one to be installed.
 
 C<sqlite> or C<postgresql>. Decides the schema file and whether an insert can report a row id.
 
-=attr dsn, user, password
+=attr dsn
 
-Connect info, as normalized by L<Langertha::Skeid::UsageStore>.
+Required. The DBI data source, as normalized by L<Langertha::Skeid::UsageStore/normalize_config>
+(C<dbi:SQLite:dbname=...> or C<dbi:Pg:...>).
+
+=attr user
+
+Database user (default empty).
+
+=attr password
+
+Database password (default empty). Normalization reads it from C<password_env> when the config
+names that instead; it is never written anywhere.
 
 =attr path
 
@@ -57,9 +67,11 @@ has _dbh => (is => 'rw');
 
 =method prepare
 
-Connects if possible and applies the schema when C<auto_migrate> is on. Returns false without
-complaint when C<DBI> is unavailable — an unusable store degrades to "no usage recorded", it
-does not take the proxy down.
+Connects if possible and applies the schema when C<auto_migrate> is on: its C<CREATE TABLE>
+statements, then any column an older table lacks (C<ALTER TABLE ... ADD COLUMN>; nothing is
+ever dropped or rewritten), then the rest. Returns false without complaint when C<DBI> is
+unavailable -- an unusable store degrades to "no usage recorded", it does not take the proxy
+down. Croaks when the schema file does not exist; a failing connect or statement dies.
 
 =cut
 
@@ -222,9 +234,11 @@ sub shipped_schema_file {
 
   my $res = $store->store($event);
 
-Inserts one event. Returns C<< { ok => 1 } >> (plus C<id> on SQLite) or
-C<< { ok => 0, error => … } >> — a failing usage write is reported, not thrown, because the
-request it describes has already been served.
+Inserts one event. Returns C<< { ok => 1 } >> (plus C<id> on SQLite), or
+C<< { ok => 0, error => … } >> when there is no database handle -- a store that cannot connect
+is reported, not thrown, because the request it describes has already been served. A statement
+that fails once connected dies (the handle has C<RaiseError>); the proxy catches that around
+C<usage.record>.
 
 =cut
 
@@ -294,7 +308,9 @@ sub store {
 
 Aggregates in SQL: totals, per-key and per-model breakdowns, and the newest C<limit> events.
 The same C<since> / C<api_key_id> / C<model> filter set applies to every part of the report, so
-the breakdowns always add up to the totals shown next to them.
+the breakdowns always add up to the totals shown next to them. C<limit> defaults to 20. The shape
+is described in L<Langertha::Skeid::UsageStore/The store contract>; a failure to connect is
+C<< { ok => 0, enabled => 0, error => … } >>.
 
 =cut
 
@@ -440,5 +456,11 @@ sub report {
     } @$recent ],
   };
 }
+
+=seealso
+
+L<Langertha::Skeid::UsageStore>, L<Langertha::Skeid::UsageStore::JsonLog>
+
+=cut
 
 1;

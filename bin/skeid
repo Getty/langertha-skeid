@@ -240,3 +240,149 @@ Usage:
                                (reads stdin when given no argument)
 USAGE
 }
+
+=head1 SYNOPSIS
+
+  skeid serve [--listen host:port] [--config skeid.yaml] [--admin-api-key KEY] [--workers N]
+  skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
+              [--backend sqlite|postgresql] [--db /path/to.sqlite]
+              [--dsn dbi:Pg:...] [--db-user USER] [--db-pass PASS | --db-pass-env VAR]
+              [--api-key-id ID] [--model NAME]
+  skeid keyid [KEY ...]
+
+=head1 DESCRIPTION
+
+Runs the Skeid proxy (L<Langertha::Skeid::Proxy>), reports recorded usage, and prints the
+customer key id a key routes and bills under. With no command, or when the first argument is an
+option, the command is C<serve>. An unknown command prints the usage text and exits non-zero.
+
+The config file is described in L<Langertha::Skeid/CONFIGURATION>.
+
+=head1 COMMANDS
+
+=head2 serve
+
+  skeid serve --config /etc/skeid/skeid.yaml --listen 0.0.0.0:8090 --workers 4
+
+Builds the app with L<Langertha::Skeid::Proxy/build_app> and serves it -- with
+L<Mojo::Server::Daemon>, or L<Mojo::Server::Prefork> when C<--workers> is above 1. Prints the
+address and config it starts with, and warns for every node whose C<max_conns> cannot be split
+across the workers and frontends (L<Langertha::Skeid/worker_share_warnings>).
+
+=opt --listen, -l
+
+C<host:port> to listen on (default C<127.0.0.1:8090>).
+
+=opt --config, -c
+
+The YAML config (default C<skeid.yaml>). A path that is not an existing file is ignored, and
+Skeid starts without a config -- with no nodes.
+
+=opt --admin-api-key
+
+Admin API key, set after the config is loaded. A later change to the config file sets the admin
+key from the config again (absent there: admin API off), so with a config file prefer
+C<admin.api_key_env> in it.
+
+=opt --workers, -w
+
+Prefork worker count (default 1; below 1 counts as 1). Each worker admits its share of every
+node's C<max_conns> and polls capacity probes at its share of the rate (ADR 0010). Under several
+workers a SQLite usage store is unsafe, and an admin API write reaches only the worker that
+served it.
+
+=head2 usage
+
+  skeid usage --config /etc/skeid/skeid.yaml --since 2026-09-01T00:00:00Z --limit 50
+
+Prints a usage report: totals, per API key id, per model, and the newest events. The store is
+the config's C<usage_store>; any of C<--backend>, C<--db>, C<--dsn>, C<--db-user>, C<--db-pass>
+or C<--db-pass-env> replaces it with a store built from those options alone, so a C<jsonlog> store
+is read through the config. Exits 0, or 2 after printing C<ERROR: ...> when the report fails (no
+store configured, say).
+
+=opt --config, -c
+
+As for C<serve> (default C<skeid.yaml>).
+
+=opt --since
+
+Only events with C<created_at> at or after this ISO 8601 UTC timestamp.
+
+=opt --limit
+
+How many recent events to list (default 20, at most 500; below 1 means 20).
+
+=opt --json
+
+Print the report as JSON instead of the text summary.
+
+=opt --backend
+
+C<sqlite> or C<postgresql>. Implied by C<--db> or C<--dsn>.
+
+=opt --db, --sqlite
+
+SQLite database file.
+
+=opt --dsn
+
+PostgreSQL DSN, C<dbi:Pg:...>.
+
+=opt --db-user, --db-pass
+
+PostgreSQL credentials. A password on the command line lands in the shell history; prefer
+C<--db-pass-env>.
+
+=opt --db-pass-env
+
+Name of an environment variable holding the PostgreSQL password.
+
+=opt --api-key-id
+
+Only events of this customer key id.
+
+=opt --model
+
+Only events for this served model.
+
+=head2 keyid
+
+  echo -n "$CUSTOMER_KEY" | skeid keyid
+  skeid keyid sk-alice-secret
+
+Prints the customer key id (L<Langertha::Skeid/key_id_for_key>) of each key given, one per line
+-- the id a config's C<keys:> and C<names:> sections use, so the config never holds the key.
+Without arguments it reads one key per line from standard input, which keeps the key out of the
+shell history. With no key at all it prints the usage text and exits non-zero.
+
+=head1 ENVIRONMENT
+
+C<serve> and C<usage> build a L<Langertha::Skeid>, which reads C<SKEID_ROUTE_WAIT_TIMEOUT_MS>,
+C<SKEID_ROUTE_WAIT_POLL_MS>, C<SKEID_TRUST_KEY_ID_HEADER>, C<SKEID_FRONTEND_COUNT>,
+C<SKEID_ADMIN_API_KEY>, C<SKEID_USAGE_DB>, C<SKEID_CAPACITY_MAX_AGE_MS> and
+C<SKEID_CONFIG_RELOAD_INTERVAL> (L<Langertha::Skeid/ENVIRONMENT>), and whatever variables the
+config names. C<serve> also reads:
+
+=env OPENBAO_ROLE_ID, OPENBAO_SECRET_ID
+
+Both set: upstream keys (C<api_key_ref>) are resolved from OpenBao through AppRole.
+
+=env OPENBAO_ADDR
+
+The OpenBao address (default C<http://127.0.0.1:8200>).
+
+=env OPENBAO_VERIFY_SSL
+
+C<0>, C<false>, C<no> or C<off> disables TLS verification towards OpenBao -- for a dev vault
+only.
+
+=env SKEID_UPSTREAM_POOL
+
+Upstream connections kept per process (default 100).
+
+=seealso
+
+L<Langertha::Skeid>, L<Langertha::Skeid::Proxy>
+
+=cut

@@ -189,7 +189,22 @@ sub _tags {
   return [ ref($tags) eq 'ARRAY' ? @$tags : split(/[,\s]+/, "$tags") ];
 }
 
+=method source
+
+C<registry>.
+
+=cut
+
 sub source { 'registry' }
+
+=method poll
+
+Fetches the snapshot from L</url> without blocking, one request at a time, with the bearer
+token described above, and checks and maps it as described above. Reports nothing (and forgets
+its own reading, setting L</state> to C<missing_secret>) when the secret or bearer variable is
+empty or the secret is too short.
+
+=cut
 
 sub poll {
   my ($self) = @_;
@@ -285,5 +300,12 @@ sub _enter {
     . (defined $detail ? " ($detail)" : '') . "\n";
   return;
 }
+
+=seealso
+
+L<Langertha::Skeid::Registry>, L<Langertha::Skeid/registry_enabled> (the publishing side),
+L<Langertha::Skeid::CapacityProbe>
+
+=cut
 
 1;

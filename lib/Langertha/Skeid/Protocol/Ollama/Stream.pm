@@ -28,6 +28,16 @@ C<message>; C<< shape => 'generate' >> selects that, the default C<chat> is C</a
 
 =cut
 
+=method new
+
+  my $stream = Langertha::Skeid::Protocol::Ollama::Stream->new(model => $requested_model,
+    shape => 'chat');
+
+C<model> is named on every line until an upstream chunk names its own; C<shape> is C<chat>
+(default) or C<generate>. Tool calls are only rendered for C<chat>.
+
+=cut
+
 sub new {
   my ($class, %args) = @_;
   return bless {
@@ -195,7 +205,8 @@ sub delta {
 =method finish
 
 The closing line: C<done> true, the reason, and the token counts an Ollama client reads its
-statistics from. Idempotent. A pending tool call whose stream supplied no final chunk is an
+statistics from. C<< done_reason => ... >>, C<< input_tokens => ... >> and
+C<< output_tokens => ... >> override what the stream recorded. Idempotent. A pending tool call whose stream supplied no final chunk is an
 L</error_event>, not a successful close; failures while building the closing line are contained
 at the same boundary.
 
@@ -280,5 +291,11 @@ sub usage {
   my ($self) = @_;
   return ($self->{input_tokens}, $self->{output_tokens}, $self->{text_bytes});
 }
+
+=seealso
+
+L<Langertha::Skeid::Protocol::Ollama>, L<Langertha::Skeid::Protocol::Anthropic::Stream>
+
+=cut
 
 1;

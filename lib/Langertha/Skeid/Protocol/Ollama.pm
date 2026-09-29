@@ -29,7 +29,14 @@ F<t/31-stream-translation.t> for what the wire looks like end-to-end.
 
 Turns an Ollama chat request into the OpenAI chat-completions body Skeid forwards.
 C<options.temperature> and C<options.num_predict> are lifted out of the nested hash to
-C<temperature> and C<max_tokens>; C<tools> and C<tool_choice> pass through unchanged.
+C<temperature> and C<max_tokens>; C<tools> and C<tool_choice> pass through unchanged. No other
+option is carried.
+
+Tool-call history is made OpenAI-shaped: an assistant message's C<tool_calls> get their
+C<arguments> object encoded as a JSON string and an id (C<call_skeid_N>) where they have none,
+and a C<tool> message that names its call only by C<tool_name> gets the C<tool_call_id> of the
+matching unanswered call of the preceding assistant turn (the first unanswered one when no name
+matches).
 
 C<format>, Ollama's structured output, becomes C<response_format>: C<"json"> is
 C<< {type => 'json_object'} >>, a JSON schema object is
@@ -274,7 +281,8 @@ sub generate_response_from_openai {
 
   my $tags = Langertha::Skeid::Protocol::Ollama->tags_from_nodes($skeid->list_nodes);
 
-Renders the node inventory as an Ollama C<< /api/tags >> model list. The fields Ollama clients
+Renders the node inventory as an Ollama C<< /api/tags >> model list, one entry per node named
+after the node's C<model> -- nodes serving the same model appear once each. The fields Ollama clients
 expect but Skeid cannot know — size, digest, parameter size, quantisation — are filled with
 empty or C<'unknown'> placeholders rather than invented, so a client that displays them shows
 nothing instead of showing a lie.
@@ -304,6 +312,7 @@ sub tags_from_nodes {
 =method manifest_endpoint
 
   my $spec = Langertha::Skeid::Protocol::Ollama->manifest_endpoint;
+  # { dialect => 'ollama', path => '', capabilities => [ ... ] }
 
 How this face appears in the provider manifest (skeid #29): C<ollama> at the public root, and
 the capability flags L</request_to_openai> actually carries to the upstream -- messages
@@ -351,5 +360,12 @@ sub error_body {
   my ($class, $message) = @_;
   return { error => '' . ($message // '') };
 }
+
+=seealso
+
+L<Langertha::Skeid::Protocol::Ollama::Stream>, L<Langertha::Skeid::Protocol>,
+L<Langertha::Skeid::Proxy>
+
+=cut
 
 1;

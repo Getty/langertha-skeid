@@ -19,6 +19,143 @@ use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Ollama::Stream;
 use Langertha::ToolCall;
 
+=head1 SYNOPSIS
+
+  use Langertha::Skeid::Proxy;
+  use Mojo::Server::Daemon;
+
+  my $app = Langertha::Skeid::Proxy->build_app(config_file => '/etc/skeid/skeid.yaml');
+  Mojo::Server::Daemon->new(app => $app, listen => ['http://127.0.0.1:8090'])->run;
+
+  # or simply
+  skeid serve --config /etc/skeid/skeid.yaml --listen 127.0.0.1:8090
+
+=head1 DESCRIPTION
+
+The Mojolicious application in front of L<Langertha::Skeid>. It speaks three client formats --
+OpenAI, Anthropic and Ollama -- and makes one kind of upstream call, an OpenAI-shaped C<POST> to
+the node routing picked (ADR 0001); the translation lives in L<Langertha::Skeid::Protocol> and
+its per-format modules. Everything else -- nodes, routing, admission, pricing, usage -- is the
+control plane's, driven through L<Langertha::Skeid/call_function>, and is configured there (see
+L<Langertha::Skeid/CONFIGURATION>). C<skeid serve> runs it.
+
+The request path is asynchronous throughout (ADR 0005): waiting for capacity is a timer, key
+resolution goes through L<Langertha::Skeid::KeyBroker/key_async>, and the upstream call never
+blocks the loop.
+
+=head2 Client routes
+
+No Skeid credential is needed on these; see L</Customer identity>.
+
+  GET  /health                     {status: ok, proxy: skeid, config_reload: {...}}
+  GET  /.well-known/langertha.json provider manifest for the presented key
+  GET  /v1/models                  OpenAI: the distinct models of the configured nodes
+  POST /v1/chat/completions        OpenAI chat; a stream is relayed byte for byte
+  POST /v1/embeddings              OpenAI embeddings
+  POST /v1/messages                Anthropic Messages, streamed or not
+  POST /api/chat                   Ollama chat; streams unless "stream": false
+  POST /api/generate               Ollama generate; streams unless "stream": false
+  GET  /api/tags                   Ollama: one entry per configured node
+  GET  /api/ps                     Ollama: always an empty list
+
+C</health> stays C<ok> while a config reload is failing -- the proxy serves under the config it
+kept -- and shows the reload state without its message. C</v1/models> and C</api/tags> list the
+nodes' own model names: aliases are not listed, no key's policy is applied, and unhealthy nodes
+are included. The manifest route answers C<404> unless the config enables it, C<401> without a
+key and C<403> for a key without a grant; see L<Langertha::Skeid/Provider Manifest>.
+
+=head2 Registry route
+
+  GET  /skeid/registry/snapshot    signed capacity snapshot, for a fronting Skeid
+
+Bearer token: the admin API key or the registry read key (C<registry.read_key_env>), and nothing
+else accepts the read key. C<404> when neither is configured or the registry is not enabled,
+C<401> for a wrong token, C<503> while the signing secret is missing. The body is signed in C<X-Skeid-Registry-Signature> and sent
+C<Cache-Control: no-store>. See L<Langertha::Skeid/registry_enabled> and ADR 0017.
+
+=head2 Admin routes
+
+Bearer token: the admin API key (L<Langertha::Skeid/admin>). Without one configured every
+C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
+
+  GET  /skeid/nodes                {nodes}
+  POST /skeid/nodes                body: a node, as a config nodes entry -> {ok, nodes}, or 400
+  POST /skeid/nodes/:id/health     body: {"healthy": true|false} -> {ok}
+  GET  /skeid/config               {reload}: the config reload status, with its message
+  GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
+  GET  /skeid/usage                ?since=&api_key_id=&model=&limit= (default 50) -> the report
+
+Changes made here live in this process only: a changed C<nodes> section in the config replaces
+them, and under C<--workers> each write reaches one worker (ADR 0010).
+
+=head2 Customer identity
+
+Skeid does not authenticate customers. The key a client presents (C<Authorization: Bearer>, else
+C<x-api-key>) derives the customer key id (L<Langertha::Skeid/key_id_for_key>; no key is
+C<anonymous>), which selects the routing policy and is recorded on the usage event. With
+C<routing.trust_key_id_header> a C<x-skeid-key-id> (or C<x-api-key-id>) header names the key id
+instead.
+
+=head2 The upstream call
+
+The node URL gets C</v1> added unless it ends in it, then C</chat/completions> or
+C</embeddings>; the body carries the served model (an alias tier's C<model>), everything else as
+the client sent it or as translated. The client's headers go upstream except the hop-by-hop
+ones, C<Host>, C<Content-Length> and C<Accept-Encoding>. When the node has a key of its own --
+C<api_key_ref> through the key broker, else C<api_key_env> -- it replaces C<Authorization> and
+C<x-api-key> is dropped; otherwise the client's own key goes upstream. An answer that came from a node carries
+C<x-skeid-node> with the node id. Rate-limit headers and C<429>s on every response feed
+L<Langertha::Skeid/observe_response_headers>.
+
+Each admitted request gets its C<request.finish> on every path and one usage event, failures
+included.
+
+=head2 Errors
+
+A request no node may serve for this key is C<403 permission_error>; a model no healthy node
+serves is C<503 model_not_found>; eligible nodes that stay full past the wait are
+C<429 rate_limit_error>; an upstream failure is its status (or C<502>) with type
+C<upstream_error>. The body is shaped for the face that was called: OpenAI's
+C<{error: {message, type}}>, Anthropic's envelope
+(L<Langertha::Skeid::Protocol::Anthropic/error_body>) on C</v1/messages>, and Ollama's
+C<{error: "..."}> on C</api/*>. A stream that fails after it opened ends with the face's in-band
+error event where it has one.
+
+=head1 METHODS
+
+=method build_app
+
+  my $app = Langertha::Skeid::Proxy->build_app(%options);
+
+Builds the L<Mojolicious> application. Options:
+
+=over 4
+
+=item * C<config_file> -- the config to build a L<Langertha::Skeid> from.
+
+=item * C<skeid> -- an existing L<Langertha::Skeid> to serve instead; C<config_file> and the
+OpenBao detection below are then not used.
+
+=item * C<admin_api_key> -- sets L<Langertha::Skeid/admin_api_key> after the config is loaded.
+The next changed config sets it from the config again.
+
+=item * C<worker_count> -- how many prefork workers share the nodes (L<Langertha::Skeid/worker_count>),
+set before any admission or probe timer reads it.
+
+=back
+
+With both C<OPENBAO_ROLE_ID> and C<OPENBAO_SECRET_ID> set, a
+L<Langertha::Skeid::KeyBroker::OpenBao> at C<OPENBAO_ADDR> (default C<http://127.0.0.1:8200>)
+becomes the key broker; if its login fails the proxy warns and runs without one. A broker that
+can renew its token starts renewing on a timer. The capacity probes of every node are started
+and restarted whenever the probed part of the inventory changes.
+
+Upstream connections time out after 10s to connect and 300s per request, and at most
+C<SKEID_UPSTREAM_POOL> (default 100) are kept. The app has a C<skeid> helper returning the
+control plane.
+
+=cut
+
 sub build_app {
   my ($class, %opts) = @_;
 
@@ -1437,5 +1574,22 @@ sub _duration_ms {
   my ($started) = @_;
   return int((time - $started) * 1000);
 }
+
+=seealso
+
+=over 4
+
+=item * L<Langertha::Skeid> -- the control plane and its configuration
+
+=item * L<skeid> -- the command that runs this app
+
+=item * L<Langertha::Skeid::Protocol::Anthropic>, L<Langertha::Skeid::Protocol::Ollama> -- the
+translated faces
+
+=item * L<Langertha::Skeid::KeyBroker::OpenBao> -- upstream keys from OpenBao
+
+=back
+
+=cut
 
 1;

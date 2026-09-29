@@ -59,7 +59,7 @@ tenant billing from one consistent ledger.
 C<nodes[].engine> uses lowercased engine class names from L<Langertha>.
 Examples: C<OpenAI =E<gt> openai>, C<OpenAIBase =E<gt> openaibase>,
 C<vLLM =E<gt> vllm>. Legacy aliases like C<openai-compatible> are intentionally
-rejected.
+rejected. A node without C<engine> is C<openaibase>. See L</normalize_engine_id>.
 
 =head2 Pluggable Usage Storage
 
@@ -100,7 +100,7 @@ B<Constructor callbacks> (custom backend, no subclassing):
     },
   );
 
-B<Option 2 – Subclass override>:
+B<Subclass override>:
 
   package MyApp::Skeid;
   use Moo;
@@ -125,9 +125,11 @@ there. It is an observation, not a billing quantity: Skeid never derives token c
 or cost from it. The DBI stores keep it in a nullable C<content_bytes> column (C<NULL>
 for a non-streamed or pre-existing row); C<jsonlog> writes it as part of the event.
 
-When a callback or override is provided, the DBI default is bypassed entirely
-and no database connection is created.  DBI and DBD::SQLite are C<recommends>
-dependencies — they are not required when usage is handled externally.
+When a callback or override is provided, the configured store is bypassed entirely
+and no database connection is created.  DBI, DBD::SQLite and DBD::Pg are C<recommends>
+dependencies — they are not required for C<jsonlog> or when usage is handled externally.
+With no sink at all, L</record_usage> builds no event and answers
+C<< { ok => 0, error => 'usage_store not configured' } >>.
 
 =head2 Per-Key Routing Policy
 
@@ -163,10 +165,11 @@ Identity comes from the API key the caller presented — see L</key_id_for_key>.
 
 =head2 Admin API Key
 
-C<admin.api_key> (or C<admin_api_key>) controls access to proxy admin routes.
-If empty, admin routes are effectively disabled by returning C<404>. If set,
-the proxy expects C<Authorization: Bearer ...>. This value can be changed
-through dynamic config reload.
+C<admin.api_key> (or C<admin_api_key>) controls access to proxy admin routes; C<admin.api_key_env>
+(or C<admin_api_key_env>) names an environment variable to read it from instead, so the key need
+not be written into a mounted file. If empty, admin routes are effectively disabled by returning
+C<404>. If set, the proxy expects C<Authorization: Bearer ...>. This value can be changed
+through dynamic config reload. See L</admin> for the precedence.
 
 =head2 Provider Manifest
 
@@ -215,6 +218,218 @@ reloads the config itself; the request paths that already do pick up a change.
 Without a key the route answers C<401>. Needs a Langertha with L<Langertha::Manifest>; on an
 older one the route answers C<404>. See ADR 0015 in the distribution repository.
 
+=head1 CONFIGURATION
+
+The config is a YAML file (C<config_file>) or the hashref a C<config_loader> returns; both go
+through the same loader. The top-level keys below are every one Skeid reads -- anything else in
+the file is ignored. A reload is all or nothing: a config that fails anywhere leaves the previous
+one in force, and is reported by L</reload_status>.
+
+What a section's B<absence> means differs, and it is not the default value:
+
+=over 4
+
+=item * C<nodes>, C<aliases>, the policy keys (C<policies>, C<default_policy>, C<names>,
+C<keys>) and C<usage_store>: absent leaves the current state untouched; present replaces it.
+
+=item * C<pricing>: merged per model. A model removed from the section keeps its last price
+until the process restarts.
+
+=item * C<routing>: each key that is absent keeps its current value.
+
+=item * The admin key, C<registry> and C<manifest>: absent means off.
+
+=back
+
+Three settings look like config but are not read from it: L</capacity_max_age_ms> and
+L</config_reload_interval> (constructor or environment only) and L</worker_count> (constructor,
+set by C<skeid serve --workers>).
+
+=head2 nodes
+
+  nodes:
+    - id: gpu-1                        # required, unique
+      url: http://gpu-1:8000/v1        # required; /v1 is added when the URL does not end in it
+      model: qwen3-32b                 # default '': matches any requested model
+      engine: vllm                     # default openaibase; see "Engine IDs"
+      weight: 3                        # default 1; round-robin weight, integer, below 1 counts as 1
+      max_conns: 8                     # default 0 = unlimited; admission limit, see worker_max_conns
+      healthy: true                    # default true; operator state, never derived from errors
+      tags: [local, gb10]              # default none; "local, gb10" works too, see normalize_tags
+      metadata: { rack: b2 }           # default {}; kept on the node, never read by routing
+      api_key_ref: secret/skeid/remote/groq   # upstream key, resolved through the key broker
+      api_key_env: GROQ_API_KEY        # upstream key from this variable when the ref resolves none
+      capacity: { probe: prometheus }  # default none: inflight admission, see below
+
+An entry without C<id> or C<url> is skipped; one with an unknown C<engine> fails the load. When
+a node has a key of its own it replaces the client's C<Authorization> upstream (see
+L<Langertha::Skeid::Proxy>); otherwise the client's headers go through. Key references and
+variable names are the only key material a config holds (ADR 0003).
+
+The section replaces the whole inventory when it changed -- nodes added through the admin API are
+lost then -- and keeps the node list as it is when it did not: its inventory generation, its
+running probes and any health set through the admin API.
+
+C<capacity> selects how admission learns a node's real occupancy (ADR 0009). C<probe> (or
+C<type>) is C<inflight> (the default, also C<none>), C<ratelimit>, C<prometheus>, C<registry> or
+C<custom>; C<interval_ms> (default 2000) sets the poll rate. Rate-limit headers are read off every
+upstream response whatever the block says, so C<ratelimit> starts nothing. The keys per probe
+are documented in L<Langertha::Skeid::CapacityProbe/for_node>,
+L<Langertha::Skeid::CapacityProbe::Prometheus> and L<Langertha::Skeid::CapacityProbe::Registry>.
+
+=head2 pricing
+
+  pricing:
+    gpt-4o-mini:
+      input_per_million: 0.15          # default 0
+      output_per_million: 0.60         # default 0
+      cached_input_per_million: 0.075  # optional; prompt-cache reads
+      cache_write_per_million: 0.1875  # optional; prompt-cache writes
+    '*':                               # fallback for every model not listed
+      input_per_million: 0
+      output_per_million: 0
+
+Keyed by the B<served> model -- the name the node is asked for, not an alias. A cache rate must be
+a number C<E<gt>= 0>, or the load fails; on a Langertha that cannot price cache tokens the cache
+rates are dropped with one warning and cached tokens bill at C<input_per_million>. See
+L</set_model_pricing>.
+
+=head2 aliases
+
+  aliases:
+    house-model:
+      tiers:
+        - { tags: [local], model: qwen3-32b, wait_ms: 200 }
+        - { tags: [cloud], model: llama-3.3-70b-versatile }
+
+A client-facing model name as an ordered plan of tiers (ADR 0008). Per tier: C<tags>, C<model>
+(default: the alias name), C<engine> and C<wait_ms> (default 0). C<tiers> may be given as a bare
+list. See L</set_model_alias>.
+
+=head2 policies, default_policy, names, keys
+
+Who may reach what; see L</Per-Key Routing Policy>. A policy is C<models> (or C<aliases>: the
+requested names the key may use; absent or C<'*'> means all) and C<deny_tags> (nodes the key must
+never reach). C<default_policy> names the policy of every unlisted key; unset, an unlisted key is
+unrestricted. C<names> maps a readable name to a key id from C<skeid keyid>.
+
+A C<keys> entry is keyed by a key id or a C<names> name and is either a policy name or a hash:
+
+  keys:
+    alice: burstable
+    bigcorp:
+      policy: standard          # default: default_policy
+      models: [house-model]     # sparse overrides: an absent field keeps the policy's value
+      deny_tags: [cloud]
+      manifest: { models: [house-model] }   # see "Provider Manifest"
+
+The override fields may instead sit under an C<overrides> hash. The load fails on a
+C<default_policy> or a C<keys> entry naming an undefined policy, on a C<names> value that is not
+a non-empty string, and on two entries that resolve to one key id -- including a short
+(pre-ADR 0016) id beside the full id it is the prefix of. Short ids still match, with a one-time
+warning.
+
+=head2 routing
+
+  routing:
+    wait_timeout_ms: 2000        # default 2000: the wait of a model that has no alias
+    wait_poll_ms: 25             # default 25, at least 1: how often a waiting request retries
+    trust_key_id_header: false   # default false; see key_id_for_key
+    frontend_count: 1            # default 1, at least 1; see frontend_count
+
+The defaults come from L</ENVIRONMENT> when set there.
+
+=head2 admin
+
+  admin:
+    api_key_env: SKEID_ADMIN_API_KEY   # or api_key: "..."
+
+The key for the C</skeid/*> admin API. The first of C<admin_api_key>, C<admin_api_key_env>,
+C<admin.api_key> and C<admin.api_key_env> that is present decides; none of them disables the
+admin API (C<404>), whatever C<SKEID_ADMIN_API_KEY> says. A variable named here is read when the
+config is applied, so a changed value takes effect with the next changed config.
+
+=head2 registry
+
+Publishes this Skeid's capacity to a fronting Skeid: C<enabled>, C<secret_env>, C<read_key_env>,
+C<ttl_s> (default 10), C<instance_id> (default the hostname) and C<error_window_s> (default 60).
+Documented under L</registry_enabled>.
+
+=head2 manifest
+
+The provider manifest: C<enabled>, C<public_url>, C<provider_id> (default C<skeid>), C<faces>
+(default all three) and C<capabilities>. Documented under L</Provider Manifest>.
+
+=head2 usage_store
+
+  usage_store:
+    backend: jsonlog                 # jsonlog | sqlite | postgresql; inferred when absent
+    path: /var/log/skeid/events/     # jsonlog: log_path or path; mode dir|file (inferred), fsync
+    # sqlite:     sqlite_path (or path, db_path), schema_file, auto_migrate (default on)
+    # postgresql: dsn, or host (127.0.0.1) / port (5432) / dbname or database (skeid);
+    #             user, password or password_env, schema_file, auto_migrate (default on)
+
+Where usage events go; see L<Langertha::Skeid::UsageStore/normalize_config> for the inference and
+the defaults. C<usage_db_path>, a top-level key, is the older spelling of a sqlite store and is
+read only when C<usage_store> is absent.
+
+=head1 ENVIRONMENT
+
+Defaults for the attributes of the same meaning; a value in the config wins. Besides these, the
+config names variables of its own -- C<api_key_env> on a node, C<admin.api_key_env>, a usage
+store's C<password_env>, the registry's C<secret_env> and C<read_key_env> -- so that no secret has
+to be written into it. L<Langertha::Skeid::Proxy/build_app> reads the C<OPENBAO_*> variables and
+C<SKEID_UPSTREAM_POOL>.
+
+=env SKEID_ROUTE_WAIT_TIMEOUT_MS
+
+Default of L</route_wait_timeout_ms> (2000).
+
+=env SKEID_ROUTE_WAIT_POLL_MS
+
+Default of L</route_wait_poll_ms> (25).
+
+=env SKEID_TRUST_KEY_ID_HEADER
+
+Default of L</trust_key_id_header>: C<1>, C<true>, C<yes> or C<on> turn it on.
+
+=env SKEID_FRONTEND_COUNT
+
+Default of L</frontend_count> (1).
+
+=env SKEID_ADMIN_API_KEY
+
+Default of L</admin_api_key>. Only in effect without a config source: a config that names no
+admin key disables the admin API.
+
+=env SKEID_USAGE_DB
+
+Default of L</usage_db_path>: a SQLite usage store at this path when no C<usage_store> is given,
+and the path of a C<sqlite> store that names none.
+
+=env SKEID_CAPACITY_MAX_AGE_MS
+
+Default of L</capacity_max_age_ms> (5000).
+
+=env SKEID_CONFIG_RELOAD_INTERVAL
+
+Default of L</config_reload_interval> (1 second).
+
+=cut
+
+=head1 ATTRIBUTES
+
+Every attribute can be passed to C<new>. Those a config sets are overwritten by the next changed
+config (see L</CONFIGURATION>).
+
+=attr nodes
+
+The node inventory: an arrayref of node hashrefs, in the shape of the config's C<nodes> entries
+after L</add_node> normalized them (default empty). Change it through L</add_node>,
+L</remove_node> and L</set_node_health>, or assign a whole new list: routing caches what it
+derives from the inventory, and only those paths invalidate the cache. Editing a node hash in
+place does not.
+
 =cut
 
 has nodes => (
@@ -226,25 +441,60 @@ has nodes => (
   trigger => sub { $_[0]->_bump_inventory },
 );
 
+=attr model_pricing
+
+Served model name to pricing rule, C<'*'> as the fallback (default empty). Written by
+L</set_model_pricing>; read through L</pricing_for_model>.
+
+=cut
+
 has model_pricing => (
   is      => 'rw',
   default => sub { {} },
 );
+
+=attr model_aliases
+
+Alias name to C<< { tiers => [...] } >>, normalized (default empty). Written by
+L</set_model_alias>.
+
+=cut
 
 has model_aliases => (
   is      => 'rw',
   default => sub { {} },
 );
 
+=attr policies
+
+Policy name to resolved policy (see L</resolve_policy>), from the config's C<policies> or
+L</set_policy> (default empty).
+
+=cut
+
 has policies => (
   is      => 'rw',
   default => sub { {} },
 );
 
+=attr default_policy
+
+The resolved policy an unlisted key routes under -- the policy object, not its name -- or undef,
+which leaves unlisted keys unrestricted (default undef).
+
+=cut
+
 has default_policy => (
   is      => 'rw',
   default => sub { undef },
 );
+
+=attr key_policies
+
+Customer key id to resolved policy, built at config load (default empty). Keys that take the
+default policy are not in it; see L</policy_for_key>.
+
+=cut
 
 # Key id -> resolved policy. Identical resolutions share one object, and a key that takes the
 # default is not listed at all, so ten thousand identical customers cost nothing here.
@@ -252,6 +502,13 @@ has key_policies => (
   is      => 'rw',
   default => sub { {} },
 );
+
+=attr key_names
+
+Readable name to customer key id, from the config's C<names> section (default empty). See
+L</key_id_for_name>.
+
+=cut
 
 # Readable name -> customer key id, from the config `names:` section. A config-authoring
 # convenience only: it lets `keys:` entries be written by name and localises key rotation to
@@ -261,6 +518,22 @@ has key_names => (
   is      => 'rw',
   default => sub { {} },
 );
+
+=attr manifest_enabled
+
+Whether the config enables the provider manifest (default 0).
+
+=attr manifest_available
+
+Whether the installed Langertha has L<Langertha::Manifest>; with it missing an enabled manifest
+answers C<404> instead of failing the config (default 0).
+
+=attr key_manifests
+
+Customer key id to the canonical JSON of that key's manifest, built at config load (default
+empty). Read through L</manifest_for_key>.
+
+=cut
 
 # /.well-known/langertha.json (skeid #29, ADR 0015). Off until the config enables it.
 has manifest_enabled => (
@@ -283,6 +556,15 @@ has key_manifests => (
   default => sub { {} },
 );
 
+=attr trust_key_id_header
+
+Whether a client's C<x-skeid-key-id> (or C<x-api-key-id>) header names the customer key id
+instead of the key it presented (default off, or C<SKEID_TRUST_KEY_ID_HEADER>; config
+C<routing.trust_key_id_header>). Turn it on only behind a gateway that authenticates the caller
+and sets that header itself: the key id selects both the routing policy and the bill.
+
+=cut
+
 # Whether x-skeid-key-id / x-api-key-id from the client may name the customer. Off by default:
 # once a policy hangs off the key id, believing that header lets any client pick its own
 # permissions in one line. Turn it on only when something in front of Skeid authenticates the
@@ -295,6 +577,14 @@ has trust_key_id_header => (
   },
 );
 
+=attr route_wait_timeout_ms
+
+How long, in milliseconds, a request for a model without an alias waits for a free node before
+it is answered C<429> (default 2000, or C<SKEID_ROUTE_WAIT_TIMEOUT_MS>; config
+C<routing.wait_timeout_ms>). An alias tier waits its own C<wait_ms> instead.
+
+=cut
+
 has route_wait_timeout_ms => (
   is      => 'rw',
   default => sub {
@@ -304,6 +594,14 @@ has route_wait_timeout_ms => (
   },
 );
 
+=attr route_wait_poll_ms
+
+How often, in milliseconds, a waiting request tries again (default 25, or
+C<SKEID_ROUTE_WAIT_POLL_MS>; config C<routing.wait_poll_ms>, at least 1). The wait is a
+L<Mojo::IOLoop> timer, never a sleep.
+
+=cut
+
 has route_wait_poll_ms => (
   is      => 'rw',
   default => sub {
@@ -312,6 +610,15 @@ has route_wait_poll_ms => (
       : 25;
   },
 );
+
+=attr usage_db_path
+
+A SQLite usage database path (default C<SKEID_USAGE_DB>, else unset). At construction it
+configures a SQLite store when C<usage_store> is not given; it is also the path of a C<sqlite>
+store config that names none. Kept in step with the store: set to a SQLite store's path, cleared
+for PostgreSQL. C<has_usage_db_path> and C<clear_usage_db_path> are its predicate and clearer.
+
+=cut
 
 has usage_db_path => (
   is        => 'rw',
@@ -324,20 +631,56 @@ has usage_db_path => (
   },
 );
 
+=attr usage_store
+
+The usage store config (default empty: no store). Passed to C<new> it is a raw C<usage_store>
+config; afterwards it holds the normalized form (see
+L<Langertha::Skeid::UsageStore/normalize_config>). Change it through
+L</configure_usage_store>.
+
+=cut
+
 has usage_store => (
   is      => 'rw',
   default => sub { {} },
 );
+
+=attr store_usage_event
+
+  store_usage_event => sub { my ($skeid, $event) = @_; ...; return { ok => 1 } },
+
+Optional code ref that receives every usage event instead of the configured store
+(C<has_store_usage_event> is its predicate). See L</Pluggable Usage Storage>.
+
+=cut
 
 has store_usage_event => (
   is        => 'ro',
   predicate => 'has_store_usage_event',
 );
 
+=attr query_usage_report
+
+  query_usage_report => sub { my ($skeid, $filters) = @_; ...; return { ok => 1, ... } },
+
+Optional code ref that answers L</usage_report> instead of the configured store
+(C<has_query_usage_report> is its predicate). It gets C<since>, C<api_key_id>, C<model> and
+C<limit>.
+
+=cut
+
 has query_usage_report => (
   is        => 'ro',
   predicate => 'has_query_usage_report',
 );
+
+=attr admin_api_key
+
+The bearer token of the C</skeid/*> admin API; empty disables it, which the proxy answers with
+C<404> (default C<SKEID_ADMIN_API_KEY>, else empty). Set from the config -- see L</admin> --
+whenever a config is applied.
+
+=cut
 
 has admin_api_key => (
   is      => 'rw',
@@ -348,7 +691,23 @@ has admin_api_key => (
   },
 );
 
+=attr key_broker
+
+Optional L<Langertha::Skeid::KeyBroker> that resolves a node's C<api_key_ref> per request
+(C<has_key_broker> is its predicate). L<Langertha::Skeid::Proxy/build_app> passes a
+L<Langertha::Skeid::KeyBroker::OpenBao> when the C<OPENBAO_*> variables are set.
+
+=cut
+
 has key_broker => (is => 'ro', predicate => 'has_key_broker');
+
+=attr config_file
+
+Path of a YAML config (see L</CONFIGURATION>; C<has_config_file> is its predicate). Read at
+construction and again whenever its mtime moves. Give either this or L</config_loader>, not
+both.
+
+=cut
 
 has config_file => (
   is        => 'ro',
@@ -659,6 +1018,21 @@ sub BUILD {
   }
 }
 
+=head1 METHODS
+
+=method add_node
+
+  $skeid->add_node(id => 'gpu-1', url => 'http://gpu-1:8000/v1', model => 'qwen3-32b',
+    tags => ['local'], max_conns => 8);
+
+Adds a node, replacing any node with the same id. Takes the fields of a config C<nodes> entry
+and fills in their defaults (see L</nodes>). Returns 1. Croaks without C<id> or C<url>, on an
+unknown C<engine>, and on a C<registry> capacity block that
+L<Langertha::Skeid::CapacityProbe::Registry/validate_config> rejects. The C<nodes.add> function
+and C<POST /skeid/nodes> call it.
+
+=cut
+
 sub add_node {
   my ($self, %node) = @_;
   my $id  = $node{id}  // croak 'node id required';
@@ -696,6 +1070,15 @@ sub add_node {
   $self->_bump_inventory;
   return 1;
 }
+
+=method remove_node
+
+  my $removed = $skeid->remove_node('gpu-1');
+
+Removes a node, and with it its capacity reading and failure history, so a node later added
+under the same id starts clean. Returns 1 when a node was removed, else 0.
+
+=cut
 
 sub remove_node {
   my ($self, $id) = @_;
@@ -778,10 +1161,28 @@ sub normalize_tags {
   return \@tags;
 }
 
+=method list_nodes
+
+  my $nodes = $skeid->list_nodes;
+
+The inventory as an arrayref of shallow copies of the node hashes.
+
+=cut
+
 sub list_nodes {
   my ($self) = @_;
   return [ map { +{%$_} } @{$self->nodes} ];
 }
+
+=method set_node_health
+
+  $skeid->set_node_health('gpu-1', 0);   # take it out of rotation
+
+Sets the operator health flag. An unhealthy node is not eligible for routing. Health is operator
+state: no error, timeout or C<429> ever sets it. Returns 1 when the node exists, else 0. Setting
+the value it already has changes nothing, round-robin position included.
+
+=cut
 
 sub set_node_health {
   my ($self, $id, $healthy) = @_;
@@ -815,6 +1216,22 @@ my $cache_rates_unsupported_warned;
 # dropped at config load, so a rule prices exactly as a rule without them.
 sub _core_prices_cache { Langertha::Cost->can('cache_read_usd') ? 1 : 0 }
 
+=method set_model_pricing
+
+  $skeid->set_model_pricing('gpt-4o-mini', {
+    input_per_million        => 0.15,
+    output_per_million       => 0.60,
+    cached_input_per_million => 0.075,   # optional
+    cache_write_per_million  => 0.1875,  # optional
+  });
+
+Sets the pricing rule for one served model (C<'*'> is the fallback) and returns it as stored.
+Absent input and output rates are 0. Croaks without a model or a pricing hash, and on a cache
+rate that is not a number C<E<gt>= 0>. On a Langertha that cannot price prompt-cache tokens the
+cache rates are dropped, with one warning per process.
+
+=cut
+
 sub set_model_pricing {
   my ($self, $model, $pricing) = @_;
   croak 'model required' unless defined $model && length $model;
@@ -841,6 +1258,14 @@ sub set_model_pricing {
   return $self->model_pricing->{$model};
 }
 
+=method pricing_for_model
+
+  my $rule = $skeid->pricing_for_model('gpt-4o-mini');
+
+The rule for a model, else the C<'*'> rule, else a rule that prices everything at 0.
+
+=cut
+
 sub pricing_for_model {
   my ($self, $model) = @_;
   return $self->model_pricing->{$model}
@@ -858,6 +1283,18 @@ my @CONFIG_STATE = qw(
   manifest_enabled manifest_available key_manifests
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
+
+=method reload_config
+
+  my $config = $skeid->reload_config;
+
+Reads the config source and applies it, returning the config hashref. A config whose fingerprint
+matches the one last applied changes nothing. Dies when the source cannot be read or the config
+does not apply; the previous config then stays in force and L</reload_status> reports the
+failure. The C<config.reload> function calls it; the request path uses
+L</maybe_reload_config>, which never dies.
+
+=cut
 
 sub reload_config {
   my ($self) = @_;
@@ -1508,6 +1945,17 @@ sub manifest_for_key {
   return defined($id) ? $self->key_manifests->{$id} : undef;
 }
 
+=method configure_usage_store
+
+  $skeid->configure_usage_store({ backend => 'jsonlog', path => '/var/log/skeid/events/' });
+
+Normalizes a C<usage_store> config and, when it differs from the current one, prepares the new
+store before disconnecting the old. Returns the normalized config. Croaks on a config
+L<Langertha::Skeid::UsageStore/normalize_config> rejects and on a store that fails to prepare,
+leaving the old store in place. The C<usage.configure> function calls it.
+
+=cut
+
 sub configure_usage_store {
   my ($self, $cfg) = @_;
   return $self->_configure_usage_store($cfg);
@@ -1588,11 +2036,30 @@ sub _discover_engine_ids {
   return \%ids;
 }
 
+=method supported_engine_ids
+
+  my $ids = $skeid->supported_engine_ids;   # [ 'aki', 'akiopenai', 'anthropic', ... ]
+
+The engine ids a node may name, sorted: a built-in list, plus whatever
+C<< Langertha->available_engine_ids >> reports when the installed Langertha has it.
+
+=cut
+
 sub supported_engine_ids {
   my ($self) = @_;
   my $ids = _discover_engine_ids();
   return [ sort keys %$ids ];
 }
+
+=method normalize_engine_id
+
+  my $id = $skeid->normalize_engine_id('Langertha::Engine::vLLM');   # 'vllm'
+
+Lowercases an engine name and strips a C<Langertha::Engine::> or C<LangerthaX::Engine::>
+prefix. Returns the empty string for an empty value and croaks on an id that is not in
+L</supported_engine_ids>.
+
+=cut
 
 sub normalize_engine_id {
   my ($self, $value) = @_;
@@ -1613,6 +2080,30 @@ sub normalize_engine_id {
   my $known = join(', ', sort keys %$ids);
   croak "unknown engine '$raw' (expected one of: $known)";
 }
+
+=method record_usage
+
+  my $res = $skeid->record_usage(
+    api_key_id => $key_id, model => 'qwen3-32b', requested_model => 'house-model',
+    node_id => 'gpu-1', status_code => 200, ok => 1, duration_ms => 840,
+    metrics => $normalized,   # from normalize_metrics
+  );
+
+Builds one usage event and hands it to the sink: the L</store_usage_event> callback, a subclass's
+C<_store_usage_event>, or the configured store. Returns the sink's answer, or
+C<< { ok => 0, error => 'usage_store not configured' } >> without building an event when there
+is no sink.
+
+The event carries C<created_at>, C<request_id>, C<api_format>, C<endpoint>, C<api_key_id>,
+C<provider>, C<engine>, C<model> (served), C<requested_model> (default C<model>), C<node_id>,
+C<route_url>, C<status_code>, C<ok>, C<duration_ms>, C<error_type>, C<error_message>, and from
+C<metrics> the token counts (C<input_tokens>, C<output_tokens>, C<total_tokens>,
+C<cached_tokens>, C<cache_write_tokens>), C<tool_calls> and the costs (C<cost_input_usd>,
+C<cost_output_usd>, C<cost_total_usd>, C<cost_cache_read_usd>, C<cost_cache_write_usd>). Costs
+arrive already priced; nothing is priced here. C<content_bytes> is set only when given. The
+C<usage.record> function calls it.
+
+=cut
 
 sub record_usage {
   my ($self, %args) = @_;
@@ -1712,6 +2203,19 @@ sub _has_usage_sink {
   return 0;
 }
 
+=method usage_report
+
+  my $report = $skeid->usage_report(since => '2026-09-01T00:00:00Z', api_key_id => $id,
+    model => 'qwen3-32b', limit => 50);
+
+Asks the L</query_usage_report> callback, a subclass's C<_query_usage_report> or the configured
+store for a report (its shape: L<Langertha::Skeid::UsageStore>). Empty filters are dropped;
+C<limit> defaults to 20 and is capped at 500. Without a store it returns
+C<< { ok => 0, enabled => 0, error => 'usage_store not configured' } >>. The C<usage.report>
+function, C<GET /skeid/usage> and C<skeid usage> call it.
+
+=cut
+
 sub usage_report {
   my ($self, %args) = @_;
 
@@ -1742,6 +2246,17 @@ sub _usage_object {
   return Langertha::Usage->from_response($args{response});
 }
 
+=method estimate_cost
+
+  my $cost = $skeid->estimate_cost(model => 'gpt-4o-mini',
+    usage => { prompt_tokens => 1000, completion_tokens => 200 });
+
+Prices a usage with the model's rule (L</pricing_for_model>) or an explicit C<pricing> rule, and
+returns the hash form of the L<Langertha::Cost>. The usage is a hash, a L<Langertha::Usage>, or
+read from a C<response>. The C<metrics.estimate_cost> function calls it.
+
+=cut
+
 sub estimate_cost {
   my ($self, %args) = @_;
   my $model = $args{model} // '';
@@ -1750,6 +2265,20 @@ sub estimate_cost {
   my $pricing = Langertha::Pricing->new( default_rule => $rule );
   return $pricing->cost_for( $usage, undef )->to_hash;
 }
+
+=method normalize_metrics
+
+  my $metrics = $skeid->normalize_metrics(model => 'gpt-4o-mini', response => $upstream_body,
+    tool_calls => \@calls, duration_ms => 840, engine => 'openaibase', route => '/v1/chat/completions');
+
+What a usage event is built from: the usage (as for L</estimate_cost>) priced into a
+L<Langertha::UsageRecord>, returned as its hash, with C<tool_calls> counted by name. Adds
+C<cached_tokens> and C<cache_write_tokens> when the installed L<Langertha::Usage> reads them.
+Optional C<provider>, C<started_at>, C<finished_at> and C<pricing_version> are carried into the
+record. The C<metrics.normalize> function calls it; the proxy runs it on every upstream answer,
+streamed or not.
+
+=cut
 
 sub normalize_metrics {
   my ($self, %args) = @_;
@@ -2305,7 +2834,7 @@ sub key_id_for_key {
 
 =method policy_for_key
 
-  my $policy = $skeid->policy_for_key('alice');
+  my $policy = $skeid->policy_for_key($key_id);   # k_5f0e...
 
 The policy a customer key routes under. Unlisted keys take the default policy, which is what
 makes a deployment with ten thousand identically-configured customers a config with zero key
@@ -2339,7 +2868,7 @@ sub key_id_for_name {
 
 =method route_plan
 
-  my $plan = $skeid->route_plan(model => 'our-fast-model', api_key_id => 'alice');
+  my $plan = $skeid->route_plan(model => 'our-fast-model', api_key_id => $key_id);
   # { tiers => [...], permitted => 1, reason => '' }
 
 The ordered tiers to try for a requested model, under the policy of the key that asked. A model
@@ -2399,6 +2928,8 @@ sub route_plan {
 
 Nodes carrying every listed tag, as copies. No tags selects everything. Selection is by tag,
 never by node id, so a config can talk about C<local> or C<cloud> without naming machines.
+C<deny_tags> drops every node carrying any of those tags. Health is not considered. The
+C<nodes.select> function calls it.
 
 =cut
 
@@ -2412,6 +2943,18 @@ sub select_nodes {
     @{$self->nodes || []}
   ];
 }
+
+=method pick_node
+
+  my $node = $skeid->pick_node(model => 'qwen3-32b', tags => ['local'], deny_tags => ['cloud']);
+
+The next node for a selection by weighted round-robin (over the eligible nodes, ordered by id),
+skipping every node admission would refuse right now. Returns a copy of the node with
+C<inflight> and C<route_key> added, or nothing. Picking does not admit: the caller still has to
+L</start_request>, which can refuse when another request took the slot in between. The
+C<route.next> function calls it.
+
+=cut
 
 sub pick_node {
   my ($self, %args) = @_;
@@ -2465,6 +3008,18 @@ sub pick_node {
   return;
 }
 
+=method route_state
+
+  my $state = $skeid->route_state(model => 'qwen3-32b', tags => ['local']);
+  # { model, engine, tags, deny_tags, eligible_count, available_count,
+  #   has_eligible, has_available }
+
+How many nodes a selection matches (eligible) and how many of those admission would take now
+(available). No eligible node is a C<503>; eligible but none available is worth waiting for. The
+C<route.state> function calls it.
+
+=cut
+
 sub route_state {
   my ($self, %args) = @_;
   my $engine = $self->normalize_engine_id($args{engine} // '');
@@ -2498,7 +3053,8 @@ something it cannot turn into a ceiling, so it does not constrain admission.
 
 =item * C<retry_after_ms> — do not send anything here until it elapses. What a C<429> means.
 
-=item * C<source> — which probe, for reports. Never consulted by admission.
+=item * C<source> — which probe, for reports. Never consulted by admission. C<quota> -- which of
+a provider's quotas (C<requests>, C<tokens>) the reading is about -- likewise.
 
 =item * C<at> — when the reading was taken (default now), and C<expires_at> — an absolute
 moment after which it is dropped even inside L</capacity_max_age_ms>. The registry probe uses
@@ -2777,6 +3333,17 @@ sub observe_response_headers {
   return $self->set_capacity_reading($node_id, %reading);
 }
 
+=method start_request
+
+  $skeid->start_request('gpu-1') or ...;   # refused
+
+Admits one request to a node and counts it in C<inflight>. Returns 1 when admitted, 0 when the
+node is unknown, unhealthy or full. B<Every> 1 must be paired with a L</finish_request> on every
+path -- errors, timeouts, client aborts -- or the node loses that slot until restart. The
+C<request.start> function calls it.
+
+=cut
+
 sub start_request {
   my ($self, $node_id) = @_;
   croak 'node_id required' unless defined $node_id && length $node_id;
@@ -2787,6 +3354,16 @@ sub start_request {
   $self->_stats->{$node_id}{started} = 1 + ($self->_stats->{$node_id}{started} // 0);
   return 1;
 }
+
+=method finish_request
+
+  $skeid->finish_request('gpu-1', ok => 1, duration_ms => 840);
+
+Releases the slot L</start_request> took and counts the outcome for L</node_metrics>; a request
+that is not C<ok> also counts toward the registry snapshot's C<errors_in_window>. Never touches
+C<healthy>. Returns 1. The C<request.finish> function calls it.
+
+=cut
 
 sub finish_request {
   my ($self, $node_id, %args) = @_;
@@ -2891,6 +3468,17 @@ sub registry_snapshot {
   };
 }
 
+=method node_metrics
+
+  my $one = $skeid->node_metrics('gpu-1');
+  my $all = $skeid->node_metrics;
+
+Volatile per-process counters for operations, never billed: C<node_id>, C<inflight>,
+C<started>, C<ok>, C<error>, C<duration_ms_total>, and C<capacity> while a current reading
+exists. With no id, an arrayref with one entry per node. Served by C<GET /skeid/metrics/nodes>.
+
+=cut
+
 sub node_metrics {
   my ($self, $node_id) = @_;
   if (defined $node_id && length $node_id) {
@@ -2915,6 +3503,47 @@ sub node_metrics {
   }
   return \@rows;
 }
+
+=method call_function
+
+  my $result = $skeid->call_function('route.plan', { model => 'house-model', api_key_id => $id });
+
+The command surface the proxy drives Skeid through. Every call first runs
+L</maybe_reload_config>. Croaks on an unknown name, on args that are not a hashref, and where a
+function names a required argument.
+
+  function            args                                  returns
+  metrics.estimate_cost  as estimate_cost                   estimate_cost
+  metrics.normalize   as normalize_metrics                  normalize_metrics
+  pricing.set         model, pricing                        the stored rule
+  nodes.add           a node                                { ok }
+  nodes.remove        id                                    { ok }
+  nodes.list                                                { nodes }
+  nodes.select        tags, deny_tags                       { nodes } (select_nodes)
+  nodes.set_health    id, healthy                           { ok }
+  nodes.metrics       id (optional)                         { metrics }
+  alias.set           name, alias (or the tiers inline)     { ok }
+  policy.set          name, policy (or the spec inline)     { ok }
+  policy.for_key      api_key_id                            { policy }
+  route.plan          model, engine, api_key_id             route_plan
+  route.next          model, engine, tags, deny_tags        { node } (pick_node)
+  route.state         model, engine, tags, deny_tags        route_state
+  capacity.set        id, and the reading                   { capacity }
+  capacity.get        id                                    { capacity }
+  capacity.observe    id, headers, status                   { capacity }
+  capacity.forget     id (optional)                         { ok }
+  request.start       id                                    { ok }
+  request.finish      id, ok, duration_ms                   { ok }
+  config.reload                                             { config } (dies on failure)
+  config.status                                             reload_status
+  usage.record        as record_usage                       record_usage
+  usage.report        since, api_key_id, model, limit       usage_report
+  usage.configure     usage_store (or the config inline)    { usage_store }
+  engines.list                                              { engines }
+
+Add a function here rather than reaching into the object from the app.
+
+=cut
 
 sub call_function {
   my ($self, $name, $args) = @_;
@@ -3050,5 +3679,27 @@ sub _disconnect_usage_store {
   $self->_usage_store_obj(undef);
   return;
 }
+
+=seealso
+
+=over 4
+
+=item * L<Langertha::Skeid::Proxy> -- the HTTP application on top of this control plane, and its routes
+
+=item * L<skeid> -- C<serve>, C<usage> and C<keyid>
+
+=item * L<Langertha::Skeid::CapacityProbe> -- node capacity probes
+
+=item * L<Langertha::Skeid::UsageStore> -- where usage events go
+
+=item * L<Langertha::Skeid::KeyBroker> -- resolving a node's C<api_key_ref>
+
+=item * L<Langertha::Skeid::Registry> -- the signed Skeid-to-Skeid snapshot
+
+=item * L<Langertha> -- engines, usage, pricing
+
+=back
+
+=cut
 
 1;
