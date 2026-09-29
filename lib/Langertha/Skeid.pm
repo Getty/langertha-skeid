@@ -170,8 +170,10 @@ Identity comes from the API key the caller presented — see L</key_id_for_key>.
 C<admin.api_key> (or C<admin_api_key>) controls access to proxy admin routes; C<admin.api_key_env>
 (or C<admin_api_key_env>) names an environment variable to read it from instead, so the key need
 not be written into a mounted file. If empty, admin routes are effectively disabled by returning
-C<404>. If set, the proxy expects C<Authorization: Bearer ...>. This value can be changed
-through dynamic config reload. See L</admin> for the precedence.
+C<404>. If set, the proxy expects C<Authorization: Bearer ...>. An explicit key
+(C<skeid serve --admin-api-key>, L</set_admin_api_key>) outranks the config, and
+C<SKEID_ADMIN_API_KEY> stands in when the config names none; a reload re-applies that order.
+See L</admin>.
 
 =head2 Provider Manifest
 
@@ -232,19 +234,28 @@ would:
 
 =over 4
 
-=item * C<nodes>, C<aliases>, the policy keys (C<policies>, C<default_policy>, C<names>,
-C<keys>) and C<usage_store>: absent leaves the current state untouched; present replaces it.
+=item * C<nodes>, C<pricing>, C<aliases>, the policy keys (C<policies>, C<default_policy>,
+C<names>, C<keys>) and C<usage_store>: present, the section replaces what is loaded -- C<pricing>
+too, so a model removed from it loses its price. Removed from the file, the section goes back
+to empty with the next reload: no nodes, no prices, no aliases, no policies.
 
-=item * C<pricing>: merged per model. A model removed from the section keeps its last price
-until the process restarts.
-
-=item * C<routing>: each key that is absent keeps its current value.
+=item * C<routing>: each key present sets its value; a key removed from the file goes back to
+the value it had before any config was applied -- passed to C<new>, else from
+L</ENVIRONMENT>, else built in.
 
 =item * The admin key: absent falls back to C<SKEID_ADMIN_API_KEY>, else off -- see L</admin>.
 
 =item * C<registry> and C<manifest>: absent means off.
 
 =back
+
+Two exceptions. A section no applied config has declared belongs to whoever set it: nodes added
+through the admin API or L</add_node>, prices from L</set_model_pricing>, values passed to
+C<new> -- a config without that section leaves them alone. And the usage store is not removed by
+a reload: a C<usage_store> taken out of the file keeps the running store in force until restart,
+with one warning (C<usage_store was removed from the config ...>), because a reload that stopped
+recording usage events would lose billing data silently (ADR 0004). A I<changed> C<usage_store>
+is swapped at once, the new store prepared before the old one is let go.
 
 Three settings look like config but are not read from it: L</capacity_max_age_ms> and
 L</config_reload_interval> (constructor or environment only) and L</worker_count> (constructor,
@@ -273,7 +284,8 @@ variable names are the only key material a config holds (ADR 0003).
 
 The section replaces the whole inventory when it changed -- nodes added through the admin API are
 lost then -- and keeps the node list as it is when it did not: its inventory generation, its
-running probes and any health set through the admin API.
+running probes and any health set through the admin API. Removing the section empties the
+inventory.
 
 C<capacity> selects how admission learns a node's real occupancy (ADR 0009). C<probe> (or
 C<type>) is C<inflight> (the default, also C<none>), C<ratelimit>, C<prometheus>, C<registry> or
@@ -294,7 +306,8 @@ L<Langertha::Skeid::CapacityProbe::Prometheus> and L<Langertha::Skeid::CapacityP
       input_per_million: 0
       output_per_million: 0
 
-Keyed by the B<served> model -- the name the node is asked for, not an alias. A cache rate must be
+Keyed by the B<served> model -- the name the node is asked for, not an alias. The section is the
+whole price list: a reload replaces it, it is not merged. A cache rate must be
 a number C<E<gt>= 0>, or the load fails; on a Langertha that cannot price cache tokens the cache
 rates are dropped with one warning and cached tokens bill at C<input_per_million>. See
 L</set_model_pricing>.
@@ -392,7 +405,8 @@ The provider manifest: C<enabled>, C<public_url>, C<provider_id> (default C<skei
 
 Where usage events go; see L<Langertha::Skeid::UsageStore/normalize_config> for the inference and
 the defaults. C<usage_db_path>, a top-level key, is the older spelling of a sqlite store and is
-read only when C<usage_store> is absent.
+read only when C<usage_store> is absent. A changed store is swapped on reload; a removed one stays
+in force until restart, with a warning -- see L</CONFIGURATION>.
 
 =head1 ENVIRONMENT
 
@@ -592,11 +606,13 @@ and sets that header itself: the key id selects both the routing policy and the 
 # caller and sets the header itself.
 has trust_key_id_header => (
   is      => 'rw',
-  default => sub {
-    return (defined($ENV{SKEID_TRUST_KEY_ID_HEADER}) && $ENV{SKEID_TRUST_KEY_ID_HEADER} =~ /^(1|true|yes|on)$/i)
-      ? 1 : 0;
-  },
+  builder => '_build_trust_key_id_header',
 );
+
+sub _build_trust_key_id_header {
+  return (defined($ENV{SKEID_TRUST_KEY_ID_HEADER}) && $ENV{SKEID_TRUST_KEY_ID_HEADER} =~ /^(1|true|yes|on)$/i)
+    ? 1 : 0;
+}
 
 =attr route_wait_timeout_ms
 
@@ -608,12 +624,14 @@ C<routing.wait_timeout_ms>). An alias tier waits its own C<wait_ms> instead.
 
 has route_wait_timeout_ms => (
   is      => 'rw',
-  default => sub {
-    return (defined($ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}) && length($ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}))
-      ? 0 + $ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}
-      : 2000;
-  },
+  builder => '_build_route_wait_timeout_ms',
 );
+
+sub _build_route_wait_timeout_ms {
+  return (defined($ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}) && length($ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}))
+    ? 0 + $ENV{SKEID_ROUTE_WAIT_TIMEOUT_MS}
+    : 2000;
+}
 
 =attr route_wait_poll_ms
 
@@ -625,12 +643,14 @@ L<Mojo::IOLoop> timer, never a sleep.
 
 has route_wait_poll_ms => (
   is      => 'rw',
-  default => sub {
-    return (defined($ENV{SKEID_ROUTE_WAIT_POLL_MS}) && length($ENV{SKEID_ROUTE_WAIT_POLL_MS}))
-      ? 0 + $ENV{SKEID_ROUTE_WAIT_POLL_MS}
-      : 25;
-  },
+  builder => '_build_route_wait_poll_ms',
 );
+
+sub _build_route_wait_poll_ms {
+  return (defined($ENV{SKEID_ROUTE_WAIT_POLL_MS}) && length($ENV{SKEID_ROUTE_WAIT_POLL_MS}))
+    ? 0 + $ENV{SKEID_ROUTE_WAIT_POLL_MS}
+    : 25;
+}
 
 =attr usage_db_path
 
@@ -863,6 +883,20 @@ has _failed_fingerprint => (
   default => sub { undef },
 );
 
+# The routing attributes as they were before any config was applied (see BUILD).
+has _routing_baseline => (
+  is       => 'rw',
+  init_arg => undef,
+  default  => sub { {} },
+);
+
+# The sections the last applied config declared (see _apply_config). A section that was declared
+# and is gone from the next config goes back to its default; one never declared is left alone.
+has _config_declared => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
 # Digest of the nodes section the node list was last built from. An unchanged section keeps
 # the node list -- and with it the inventory generation, the running probes and any health an
 # admin set -- even when another section of the config changed.
@@ -966,12 +1000,14 @@ exactly the failure this field exists to prevent.
 
 has frontend_count => (
   is      => 'rw',
-  default => sub {
-    return (defined($ENV{SKEID_FRONTEND_COUNT}) && length($ENV{SKEID_FRONTEND_COUNT}))
-      ? 0 + $ENV{SKEID_FRONTEND_COUNT}
-      : 1;
-  },
+  builder => '_build_frontend_count',
 );
+
+sub _build_frontend_count {
+  return (defined($ENV{SKEID_FRONTEND_COUNT}) && length($ENV{SKEID_FRONTEND_COUNT}))
+    ? 0 + $ENV{SKEID_FRONTEND_COUNT}
+    : 1;
+}
 
 =attr registry_enabled
 
@@ -1055,11 +1091,27 @@ my %FALLBACK_ENGINE_IDS = map { $_ => 1 } qw(
   whisper
 );
 
+# How a routing key of the config sets its attribute. A key removed from the config sets it back
+# to its value before any config was applied (_routing_baseline, skeid k65).
+my %ROUTING_SETTINGS = (
+  wait_timeout_ms     => [ route_wait_timeout_ms => sub { 0 + $_[0] } ],
+  wait_poll_ms        => [ route_wait_poll_ms    => sub { my $poll = 0 + $_[0]; $poll < 1 ? 1 : $poll } ],
+  trust_key_id_header => [ trust_key_id_header   => sub { $_[0] =~ /^(1|true|yes|on)$/i ? 1 : 0 } ],
+  # How many Skeid hosts share the nodes. Only the config knows it -- there is nothing to
+  # detect -- and forgetting it over-admits every node by that factor (ADR 0012). Floor at one,
+  # so a stray 0 falls back to today's single-frontend behaviour instead of dividing max_conns
+  # to nothing.
+  frontend_count      => [ frontend_count        => sub { my $n = int(0 + $_[0]); $n < 1 ? 1 : $n } ],
+);
+
 sub BUILD {
   my ($self, $args) = @_;
   # A key handed to new() is explicit: the config applied next must not replace it.
   $self->_explicit_admin_api_key("$args->{admin_api_key}")
     if defined($args->{admin_api_key}) && length($args->{admin_api_key});
+  # What the routing attributes are without a config -- passed to new(), else from the
+  # environment, else built in: a routing key removed from the config goes back to this.
+  $self->_routing_baseline({ map { my $attr = $_->[0]; ($attr => $self->$attr) } values %ROUTING_SETTINGS });
   if ($self->has_config_loader || $self->has_config_file) {
     $self->reload_config;
   }
@@ -1384,12 +1436,14 @@ sub reload_config {
   my ($generation, $route_cache, $probe_key_cache, $rr_cursor)
     = ($self->_inventory_generation, $self->_route_cache, $self->_probe_key_cache, $self->_rr_cursor);
 
-  my $nodes_print;
-  if (eval { $nodes_print = $self->_apply_config($cfg); 1 }) {
+  my ($nodes_print, $declared, $notices);
+  if (eval { ($nodes_print, $declared, $notices) = $self->_apply_config($cfg); 1 }) {
     $self->_forget_departed_nodes;
     $self->_config_fingerprint($fingerprint);
     $self->_nodes_fingerprint($nodes_print);
+    $self->_config_declared($declared);
     $self->_clear_reload_failure;
+    warn 'skeid: ' . $_ . "\n" for @$notices;
     return $cfg;
   }
 
@@ -1546,66 +1600,81 @@ sub _config_digest {
 
 # Applies a config to $self, section by section; reload_config undoes it on a croak. The usage
 # store goes last and swaps only once the new store is prepared, so nothing after it can fail.
-# Returns the fingerprint of the nodes section the node list now stands for.
+#
+# A section the config declares replaces what is loaded: the file is the declared state. A
+# section the previously applied config declared and this one does not goes back to what a
+# restart with this config would give (skeid k65) -- except the usage store, see below. A
+# section no applied config ever declared is left to whoever set it: nodes pushed through the
+# admin API, prices set through pricing.set.
+#
+# Returns the fingerprint of the nodes section the node list now stands for (undef when the
+# config declares none), the sections this config declares, and notices to log once it applied.
 sub _apply_config {
   my ($self, $cfg) = @_;
+  my $before = $self->_config_declared;
+  my (%declared, @notices);
 
-  if (ref($cfg->{pricing}) eq 'HASH') {
-    for my $model (keys %{$cfg->{pricing}}) {
-      my $p = $cfg->{pricing}{$model};
+  if (exists $cfg->{pricing}) {
+    $declared{pricing} = 1;
+    # Replaced wholesale, not merged: a model removed from the section loses its price.
+    $self->model_pricing({});
+    my $pricing = ref($cfg->{pricing}) eq 'HASH' ? $cfg->{pricing} : {};
+    for my $model (keys %$pricing) {
+      my $p = $pricing->{$model};
       next unless ref($p) eq 'HASH';
       $self->set_model_pricing($model, $p);
     }
+  } elsif ($before->{pricing}) {
+    $self->model_pricing({});
   }
 
-  if (ref($cfg->{policies}) eq 'HASH' || exists $cfg->{default_policy}
-      || ref($cfg->{keys}) eq 'HASH' || ref($cfg->{names}) eq 'HASH') {
+  if (grep { exists $cfg->{$_} } qw( policies default_policy names keys )) {
+    $declared{policies} = 1;
     $self->_load_policies($cfg);
+  } elsif ($before->{policies}) {
+    $self->_load_policies({});
   }
 
-  if (ref($cfg->{aliases}) eq 'HASH') {
+  if (exists $cfg->{aliases}) {
+    $declared{aliases} = 1;
     # Replaced wholesale, like nodes: the file is the declared state.
     $self->model_aliases({});
-    for my $name (keys %{$cfg->{aliases}}) {
-      $self->set_model_alias($name, $cfg->{aliases}{$name});
+    my $aliases = ref($cfg->{aliases}) eq 'HASH' ? $cfg->{aliases} : {};
+    for my $name (keys %$aliases) {
+      $self->set_model_alias($name, $aliases->{$name});
     }
+  } elsif ($before->{aliases}) {
+    $self->model_aliases({});
   }
 
-  my $nodes_print = $self->_nodes_fingerprint // '';
-  if (ref($cfg->{nodes}) eq 'ARRAY') {
+  my $nodes_print = $self->_nodes_fingerprint;
+  if (exists $cfg->{nodes}) {
+    $declared{nodes} = 1;
+    my $nodes = ref($cfg->{nodes}) eq 'ARRAY' ? $cfg->{nodes} : [];
     # An unchanged nodes section keeps the node list as it is (skeid #38).
-    my $print = _config_digest($cfg->{nodes});
-    if ($print ne $nodes_print) {
+    my $print = _config_digest($nodes);
+    if (!defined($nodes_print) || $print ne $nodes_print) {
       $self->nodes([]);
-      for my $n (@{$cfg->{nodes}}) {
+      for my $n (@$nodes) {
         next unless ref($n) eq 'HASH';
         next unless defined $n->{id} && defined $n->{url};
         $self->add_node(%$n);
       }
       $nodes_print = $print;
     }
+  } elsif ($before->{nodes}) {
+    $self->nodes([]);
+    $nodes_print = undef;
   }
 
-  if (ref($cfg->{routing}) eq 'HASH') {
-    if (defined $cfg->{routing}{wait_timeout_ms}) {
-      $self->route_wait_timeout_ms(0 + $cfg->{routing}{wait_timeout_ms});
-    }
-    if (defined $cfg->{routing}{wait_poll_ms}) {
-      my $poll = 0 + $cfg->{routing}{wait_poll_ms};
-      $poll = 1 if $poll < 1;
-      $self->route_wait_poll_ms($poll);
-    }
-    if (defined $cfg->{routing}{trust_key_id_header}) {
-      $self->trust_key_id_header($cfg->{routing}{trust_key_id_header} =~ /^(1|true|yes|on)$/i ? 1 : 0);
-    }
-    if (defined $cfg->{routing}{frontend_count}) {
-      # How many Skeid hosts share the nodes. Only the config knows it -- there is nothing to
-      # detect -- and forgetting it over-admits every node by that factor (ADR 0012). Floor at
-      # one, so a stray 0 falls back to today's single-frontend behaviour instead of dividing
-      # max_conns to nothing.
-      my $frontends = int(0 + $cfg->{routing}{frontend_count});
-      $frontends = 1 if $frontends < 1;
-      $self->frontend_count($frontends);
+  my $routing = ref($cfg->{routing}) eq 'HASH' ? $cfg->{routing} : {};
+  for my $key (sort keys %ROUTING_SETTINGS) {
+    my ($attr, $convert) = @{ $ROUTING_SETTINGS{$key} };
+    if (defined $routing->{$key}) {
+      $declared{'routing.' . $key} = 1;
+      $self->$attr($convert->($routing->{$key}));
+    } elsif ($before->{'routing.' . $key}) {
+      $self->$attr($self->_routing_baseline->{$attr});
     }
   }
 
@@ -1617,17 +1686,27 @@ sub _apply_config {
   # Last: a key's manifest is checked against its routing policy and the aliases.
   $self->_load_manifest($cfg);
 
+  # A changed usage store is swapped here, the new one prepared before the old one goes. A
+  # removed one is not: the removal names no destination, so honouring it would stop recording
+  # usage events -- billing data (ADR 0004) -- on a reload, silently. The running store stays
+  # until a restart, and the reload says so once (skeid k65).
   my $usage_cfg = $cfg->{usage_store};
   if (ref($usage_cfg) eq 'HASH') {
+    $declared{usage_store} = 1;
     $self->_configure_usage_store($usage_cfg);
   } elsif (exists $cfg->{usage_db_path}) {
+    $declared{usage_store} = 1;
     $self->_configure_usage_store({
       backend     => 'sqlite',
       sqlite_path => $cfg->{usage_db_path},
     });
+  } elsif ($before->{usage_store}) {
+    my $backend = (ref($self->usage_store) eq 'HASH' && $self->usage_store->{backend}) || 'no';
+    push @notices, 'usage_store was removed from the config; the running ' . $backend
+      . ' store stays in force until restart (usage events are billing data, ADR 0004)';
   }
 
-  return $nodes_print;
+  return ($nodes_print, \%declared, \@notices);
 }
 
 # The admin API key a config names (skeid k64). It may be named directly or handed over by

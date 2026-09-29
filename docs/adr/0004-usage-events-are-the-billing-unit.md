@@ -63,3 +63,13 @@ observation of what crossed the wire, not a substitute for them. It is not a bil
 Skeid derives no token count and no cost from it, because a byte-to-token ratio is model- and
 language-specific and an invented estimate on the billing unit would be worse than a recorded
 zero next to an honest byte count.
+
+## Update (skeid k65, 2026-09-29): a reload never removes the usage store
+
+A reload makes the running config equal to the file: a section removed from it is cleared. The
+usage store is the one exception. A *changed* `usage_store` is swapped on reload, the new store
+prepared before the old one is let go, so events keep flowing to a named destination. A
+*removed* one names no destination: honouring it would stop recording usage events on a reload,
+with every later request unbilled and nothing but the missing rows to show for it. So the
+running store stays in force until restart, and the reload logs once that it was removed. A
+restart applies the absence — at start-up, where it is visible, not in the middle of traffic.

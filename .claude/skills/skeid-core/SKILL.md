@@ -266,7 +266,7 @@ Construction and explicit `config.reload` still die.
 
 ```yaml
 nodes:      [ … ]                # replaces the whole inventory on reload
-pricing:    { model: {…} }       # merged per model; optional cached_input_per_million / cache_write_per_million
+pricing:    { model: {…} }       # replaced wholesale; optional cached_input_per_million / cache_write_per_million
 aliases:    { name: {tiers: […]} }   # replaced wholesale on reload
 policies:   { name: {…} }        # with default_policy:, names: and keys:
 routing:    { wait_timeout_ms: 2000, wait_poll_ms: 25, trust_key_id_header: false, frontend_count: 1 }
@@ -281,10 +281,16 @@ The admin key is resolved on every applied config as explicit (`serve --admin-ap
 four spellings present; empty disables) > `SKEID_ADMIN_API_KEY` > off (skeid k64). Off means
 `/skeid/*` answers 404, not 401 — absence of the feature, not a failed login.
 
-Nodes are replaced
-wholesale when the `nodes:` section changes: anything pushed through the admin API is lost
-then. That is deliberate — the file is the declared state. An unchanged `nodes:` section keeps
-the list, its inventory generation (so probes keep running) and admin-set health.
+A reload makes the running config equal to the file (skeid k65): a declared section replaces
+what is loaded, a section the last applied config declared and this one drops goes back to its
+default (`_config_declared` tracks which), a `routing` key likewise. A section no applied config
+declared is left to the API that set it (admin-pushed nodes, `pricing.set`). The exception is
+`usage_store`: a removal keeps the running store until restart and warns once — stopping
+billing on a reload would be silent data loss (ADR 0004); a *changed* store swaps live.
+Nodes are replaced wholesale when the `nodes:` section changes: anything pushed through the
+admin API is lost then. That is deliberate — the file is the declared state. An unchanged
+`nodes:` section keeps the list, its inventory generation (so probes keep running) and
+admin-set health.
 
 ENV defaults: `SKEID_ROUTE_WAIT_TIMEOUT_MS`, `SKEID_ROUTE_WAIT_POLL_MS`, `SKEID_USAGE_DB`,
 `SKEID_ADMIN_API_KEY`, `SKEID_TRUST_KEY_ID_HEADER`, `SKEID_CAPACITY_MAX_AGE_MS`,

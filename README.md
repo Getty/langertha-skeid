@@ -126,10 +126,15 @@ applies a changed file in full or not at all:
 - `nodes` is replaced wholesale when that section changes, so nodes added through the admin
   API are lost; an unchanged `nodes` section keeps the node list, its probes and any health
   set through the admin API.
-- Only the sections present are applied. Removing a whole section (`aliases`, `policies`,
-  `nodes`, `usage_store`) keeps what was loaded before until restart; write it empty
-  (`aliases: {}`) to clear it. `pricing` entries are merged per model and are only removed by
-  a restart.
+- The running config becomes what the file says, as a restart with that file would. A section
+  present replaces what is loaded — `pricing` too, so a model removed from it loses its price.
+  A section removed from the file (`nodes`, `pricing`, `aliases`, the policy sections) is
+  cleared, and a `routing` key removed from it goes back to its default.
+- Removing `usage_store` is the exception: the running store stays until restart and the
+  reload logs a warning, because a reload must not silently stop recording billing data. A
+  changed `usage_store` is swapped at once.
+- A section the file has never had is left alone, so nodes added only through the admin API
+  survive reloads of a file without `nodes`.
 
 ### Nodes
 
@@ -732,8 +737,8 @@ configured they answer `404`, with a wrong one `401`.
 | `GET /skeid/config` | last reload result: error, `failed_at`, consecutive failures |
 | `GET /skeid/registry/snapshot` | the signed registry snapshot; also takes the registry read key |
 
-Changes made here live in memory: they are lost on restart and on the next change to the
-config's `nodes:` section, and reach only one worker under `--workers`.
+Changes made here live in memory: they are lost on restart and on the next change to (or
+removal of) the config's `nodes:` section, and reach only one worker under `--workers`.
 
 ## CLI
 

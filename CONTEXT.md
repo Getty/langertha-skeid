@@ -279,7 +279,9 @@ _Avoid_: API, RPC, tool call (that means an LLM tool call here).
 **Config reload**:
 The YAML config (or a `config_loader`) is re-read on function dispatch when its mtime changed
 or the loader is due; an unchanged result is a no-op. A reload is all or nothing: a failing one
-keeps the previous config in force and is retried with a back-off. Node inventory is live
+keeps the previous config in force and is retried with a back-off. A successful one leaves the
+running config equal to the file — a section removed from it is cleared — except that a
+removed usage store stays in force until restart (ADR 0004). Node inventory is live
 state; the file is one of its sources, the admin API is the other — and a changed `nodes:`
 section replaces whatever the admin API pushed.
 _Avoid_: hot reload, restart, refresh.
