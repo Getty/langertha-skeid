@@ -359,6 +359,15 @@ Revision history for Langertha-Skeid
       healthy flag: rate-limited is busy, not broken
     - Add bench/: a C fake-LLM server with configurable TTFT and token rate,
       plus a measuring client for TTFT and throughput distributions
+    - The examples/service compose stack works as written: init-skeid.sh runs
+      in the OpenBao image with the bao CLI (no curl or psql needed), grants
+      the AppRole policy on the KV v2 paths so key reads are no longer denied,
+      stores SKEID_GROQ_KEY for the sample node and no longer writes customer
+      keys nothing reads; usage_schema.sql is gone, Skeid creates the
+      usage_events table from share/sql on start. The skeid image tag is
+      SKEID_IMAGE (default latest), SKEID_REMOTE_KEY_REF and the SQLite-only
+      SKEID_USAGE_DB are dropped from the stack, and vast-start.sh prints the
+      right base URL
 
 0.003     2026-05-16 17:10:00Z
 

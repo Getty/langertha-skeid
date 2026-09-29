@@ -186,4 +186,5 @@ with vLLM behind Skeid. Rented instances cost money until destroyed.
 The OpenBao + PostgreSQL + Skeid compose stack. Setup, caveats and the KeyBroker are in the
 main README, section "Service stack (OpenBao + PostgreSQL)". Files: `docker-compose.yml`,
 `skeid.yaml` (with commented examples for aliases, policies and probes), `init-skeid.sh`
-(one-shot AppRole and schema setup), `usage_schema.sql`, `.env.example`.
+(one-shot AppRole, policy and provider-key setup, run in the OpenBao image), `.env.example`.
+The usage table comes from `share/sql/` — Skeid applies it on start.

@@ -1,168 +1,90 @@
-#!/bin/bash
-set -e
+#!/bin/sh
+# One-shot setup for the example stack. Runs in the openbao image (see docker-compose.yml), so
+# the only tool it needs is the bao CLI that image ships. POSIX sh: the image has no bash.
+#
+# Needs BAO_ADDR and BAO_TOKEN (the dev root token). Writes into OpenBao:
+#   - the AppRole skeid-service and the policy skeid-keys (read secret/skeid/*)
+#   - provider keys from SKEID_GROQ_KEY / SKEID_OPENAI_KEY / SKEID_ANTHROPIC_KEY, when set,
+#     at secret/skeid/remote/<provider> -- where a node's api_key_ref points
+# It creates no usage table (Skeid applies share/sql/usage_events.postgresql.sql itself on
+# start) and stores no customer keys (Skeid never looks one up).
+set -eu
 
-echo "=== Skeid Init Script ==="
+ROLE_NAME=skeid-service
+POLICY_NAME=skeid-keys
 
-OPENBAO_ADDR=${OPENBAO_ADDR:-http://openbao:8200}
+echo "=== Skeid init ==="
 
-# Wait for OpenBao to be ready
-echo "Waiting for OpenBao at $OPENBAO_ADDR..."
-until curl -sf "${OPENBAO_ADDR}/v1/sys/health" > /dev/null 2>&1; do
+# depends_on already waits for a healthy openbao; this only bounds a slow start.
+tries=0
+until bao status > /dev/null 2>&1; do
+  tries=$((tries + 1))
+  if [ "$tries" -ge 30 ]; then
+    echo "OpenBao at ${BAO_ADDR} did not answer after 60s -- giving up" >&2
+    exit 1
+  fi
   sleep 2
 done
-echo "OpenBao is ready"
+echo "OpenBao at ${BAO_ADDR} is up"
 
-# Use root token for setup
-export BAO_TOKEN="${OPENBAO_ROOT_TOKEN}"
+echo "=== Policy and AppRole ==="
 
-echo "=== Setting up AppRole for Skeid ==="
-
-# Enable AppRole auth method
-curl -sf -X POST \
-  -H "X-Vault-Token: $BAO_TOKEN" \
-  -H "Content-Type: application/json" \
-  "${OPENBAO_ADDR}/v1/sys/auth/approle" \
-  -d '{"type": "approle"}' || true
-
-# Create AppRole for Skeid
-ROLE_NAME="skeid-service"
-curl -sf -X POST \
-  -H "X-Vault-Token: $BAO_TOKEN" \
-  -H "Content-Type: application/json" \
-  "${OPENBAO_ADDR}/v1/auth/approle/role/${ROLE_NAME}" \
-  -d '{
-    "token_ttl": "1h",
-    "token_max_ttl": "24h",
-    "token_policies": ["skeid-keys"]
-  }' || true
-
-# Get Role ID - use perl for JSON parsing
-ROLE_ID=$(curl -sf -X GET \
-  -H "X-Vault-Token: $BAO_TOKEN" \
-  "${OPENBAO_ADDR}/v1/auth/approle/role/${ROLE_NAME}/role-id" \
-  | perl -MMojo::JSON -le 'my $j = Mojo::JSON->decode(<STDIN>); print $j->{data}{role_id} // "";')
-
-# Generate new Secret ID (this is the one-time use credential)
-SECRET_ID=$(curl -sf -X POST \
-  -H "X-Vault-Token: $BAO_TOKEN" \
-  "${OPENBAO_ADDR}/v1/auth/approle/role/${ROLE_NAME}/secret-id" \
-  | perl -MMojo::JSON -le 'my $j = Mojo::JSON->decode(<STDIN>); print $j->{data}{secret_id} // "";')
-
-echo "Role ID: $ROLE_ID"
-echo "Secret ID: $SECRET_ID (save this - only shown once!)"
-echo ""
-echo "Add these to your docker-compose.yml or .env:"
-echo "OPENBAO_ROLE_ID=$ROLE_ID"
-echo "OPENBAO_SECRET_ID=$SECRET_ID"
-
-# Save credentials to a file for docker to pick up
-mkdir -p /run/secrets
-echo "$ROLE_ID" > /run/secrets/OPENBAO_ROLE_ID
-echo "$SECRET_ID" > /run/secrets/OPENBAO_SECRET_ID
-
-# Create policy for Skeid to read keys
-cat > /tmp/skeid-policy.hcl << 'POLICY'
-path "secret/skeid/*" {
-  capabilities = ["read", "list"]
+# KV v2: reads go to secret/data/..., listing to secret/metadata/...
+bao policy write "$POLICY_NAME" - << 'POLICY'
+path "secret/data/skeid/*" {
+  capabilities = ["read"]
+}
+path "secret/metadata/skeid/*" {
+  capabilities = ["list"]
 }
 POLICY
 
-curl -sf -X PUT \
-  -H "X-Vault-Token: $BAO_TOKEN" \
-  -H "Content-Type: application/json" \
-  "${OPENBAO_ADDR}/v1/sys/policies/acl/skeid-keys" \
-  -d "{\"policy\": $(cat /tmp/skeid-policy.hcl | perl -pe 's/"/\\"/g; s/\n/\\n/g; s/^/"/; s/$/"/'))}" || true
-
-echo "=== Storing LLM Provider Keys ==="
-
-# Store OpenAI key if provided
-if [ -n "$SKEID_OPENAI_KEY" ]; then
-  curl -sf -X POST \
-    -H "X-Vault-Token: $BAO_TOKEN" \
-    -H "Content-Type: application/json" \
-    "${OPENBAO_ADDR}/v1/secret/data/skeid/remote/openai" \
-    -d "{\"data\": {\"api_key\": \"$SKEID_OPENAI_KEY\"}}"
-  echo "Stored OpenAI key"
-fi
-
-# Store Anthropic key if provided
-if [ -n "$SKEID_ANTHROPIC_KEY" ]; then
-  curl -sf -X POST \
-    -H "X-Vault-Token: $BAO_TOKEN" \
-    -H "Content-Type: application/json" \
-    "${OPENBAO_ADDR}/v1/secret/data/skeid/remote/anthropic" \
-    -d "{\"data\": {\"api_key\": \"$SKEID_ANTHROPIC_KEY\"}}"
-  echo "Stored Anthropic key"
-fi
-
-echo "=== Creating Customer Key Entries ==="
-
-# Create some example customer keys
-for customer in alice bob charlie testuser123; do
-  curl -sf -X POST \
-    -H "X-Vault-Token: $BAO_TOKEN" \
-    -H "Content-Type: application/json" \
-    "${OPENBAO_ADDR}/v1/secret/data/skeid/customer/${customer}" \
-    -d "{\"data\": {\"api_key\": \"sk-${customer}-secret-key\", \"active\": true}}"
-  echo "Created key for $customer"
-done
-
-echo "=== Setting up PostgreSQL Schema ==="
-
-# Wait for postgres
-echo "Waiting for PostgreSQL..."
-until PGPASSWORD=skeid_password_change_me psql -h postgres -U skeid -d skeid -c "SELECT 1" > /dev/null 2>&1; do
-  sleep 2
-done
-
-# Create schema from file
-if [ -f /etc/skeid/usage_schema.sql ]; then
-  PGPASSWORD=skeid_password_change_me psql -h postgres -U skeid -d skeid -f /etc/skeid/usage_schema.sql
+if bao auth list | grep -q '^approle/'; then
+  echo "approle auth already enabled"
 else
-  # Inline schema creation
-  PGPASSWORD=skeid_password_change_me psql -h postgres -U skeid -d skeid << 'SQL'
-CREATE TABLE IF NOT EXISTS usage_events (
-  id BIGSERIAL PRIMARY KEY,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  request_id TEXT NOT NULL DEFAULT '',
-  api_format TEXT NOT NULL DEFAULT '',
-  endpoint TEXT NOT NULL DEFAULT '',
-  api_key_id TEXT NOT NULL DEFAULT '',
-  provider TEXT NOT NULL DEFAULT '',
-  engine TEXT NOT NULL DEFAULT '',
-  model TEXT NOT NULL DEFAULT '',
-  node_id TEXT NOT NULL DEFAULT '',
-  route_url TEXT NOT NULL DEFAULT '',
-  status_code INTEGER NOT NULL DEFAULT 0,
-  ok BOOLEAN NOT NULL DEFAULT FALSE,
-  duration_ms INTEGER NOT NULL DEFAULT 0,
-  input_tokens INTEGER NOT NULL DEFAULT 0,
-  output_tokens INTEGER NOT NULL DEFAULT 0,
-  total_tokens INTEGER NOT NULL DEFAULT 0,
-  tool_calls INTEGER NOT NULL DEFAULT 0,
-  cost_input_usd NUMERIC(12, 6) NOT NULL DEFAULT 0,
-  cost_output_usd NUMERIC(12, 6) NOT NULL DEFAULT 0,
-  cost_total_usd NUMERIC(12, 6) NOT NULL DEFAULT 0,
-  error_type TEXT NOT NULL DEFAULT '',
-  error_message TEXT NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS idx_usage_events_created_at ON usage_events(created_at);
-CREATE INDEX IF NOT EXISTS idx_usage_events_api_key_id ON usage_events(api_key_id);
-CREATE INDEX IF NOT EXISTS idx_usage_events_model ON usage_events(model);
-SQL
-  echo "PostgreSQL schema created"
+  bao auth enable approle
 fi
 
+# token_max_ttl: renewal stops there, Skeid exits and its restart logs in again with the same
+# secret_id. The secret_id gets no use limit and no TTL -- a dev convenience; a production role
+# limits both and hands every start a fresh one.
+bao write "auth/approle/role/${ROLE_NAME}" \
+  token_ttl=1h \
+  token_max_ttl=24h \
+  token_policies="$POLICY_NAME"
+
+ROLE_ID=$(bao read -field=role_id "auth/approle/role/${ROLE_NAME}/role-id")
+SECRET_ID=$(bao write -f -field=secret_id "auth/approle/role/${ROLE_NAME}/secret-id")
+
+echo "=== Provider keys ==="
+
+# The key goes in on stdin (api_key=-), so it is never in a process argument list.
+store_key() {
+  provider=$1
+  key=$2
+  if [ -n "$key" ]; then
+    printf '%s' "$key" | bao kv put "secret/skeid/remote/${provider}" api_key=- > /dev/null
+    echo "stored secret/skeid/remote/${provider}"
+  else
+    echo "skipped secret/skeid/remote/${provider} (no key given)"
+  fi
+}
+
+store_key groq      "${SKEID_GROQ_KEY:-}"
+store_key openai    "${SKEID_OPENAI_KEY:-}"
+store_key anthropic "${SKEID_ANTHROPIC_KEY:-}"
+
 echo ""
-echo "=== Init Complete ==="
+echo "=== Done ==="
 echo ""
-echo "Next steps:"
-echo "1. Copy the OPENBAO_ROLE_ID and OPENBAO_SECRET_ID from above"
-echo "2. Add them to your docker-compose.yml or .env file"
-echo "3. Restart skeid with the AppRole credentials"
-echo "4. Test with: curl -H 'Authorization: Bearer sk-alice-secret-key' http://localhost:8090/v1/chat/completions ..."
+echo "Put these two lines into .env, then: docker compose up -d skeid"
 echo ""
-echo "The key id a customer routes and bills under is derived from their key:"
-echo "  skeid keyid sk-alice-secret-key"
-echo "That is the name a policy entry in skeid.yaml uses -- the config never holds the key itself."
+echo "OPENBAO_ROLE_ID=${ROLE_ID}"
+echo "OPENBAO_SECRET_ID=${SECRET_ID}"
+echo ""
+echo "OpenBao runs in dev mode and keeps everything in memory: after any restart of the openbao"
+echo "container, run this job again and replace both lines."
+echo ""
+echo "Customer keys are not stored anywhere. Skeid takes any bearer key and routes and bills it"
+echo "under its key id; that id (never the key) is what skeid.yaml's names:/keys: hold:"
+echo "  echo sk-alice-secret-key | docker run --rm -i raudssus/langertha-skeid keyid"

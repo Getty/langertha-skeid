@@ -535,38 +535,31 @@ client ──(Authorization: Bearer <customer key>)──> skeid :5591
       openbao :5501 (upstream keys)      postgres :5533 (usage)     LLM nodes
 ```
 
-1. `cd examples/service && cp .env.example .env`
-2. The `skeid` service runs the image tag `raudssus/langertha-skeid:test` and the init job
-   `:latest`: build them from the repository root
-   (`docker build -t raudssus/langertha-skeid:test -t raudssus/langertha-skeid:latest .`) or
-   change the tags.
+1. `cd examples/service && cp .env.example .env`, and set `SKEID_GROQ_KEY` there for the
+   sample node (`groq-main`, `api_key_ref: secret/skeid/remote/groq`). `SKEID_OPENAI_KEY` and
+   `SKEID_ANTHROPIC_KEY` are stored the same way at `secret/skeid/remote/openai` and
+   `.../anthropic`, for nodes you add.
+2. The `skeid` service runs `raudssus/langertha-skeid:latest`. For a local build, build it
+   from the repository root and set `SKEID_IMAGE` in `.env` to its tag.
 3. `docker compose up -d openbao postgres`
-4. `docker compose run --rm skeid-init` (the service is in the `init` profile). It enables
-   AppRole, creates the `skeid-service` role and a `skeid-keys` policy reading `secret/skeid/*`,
-   prints `OPENBAO_ROLE_ID` and `OPENBAO_SECRET_ID` (put both into `.env`), stores
-   `SKEID_OPENAI_KEY` / `SKEID_ANTHROPIC_KEY` from `.env` at `secret/skeid/remote/openai` and
-   `.../anthropic` when they are set, writes example entries under `secret/skeid/customer/`,
-   and finally applies `usage_schema.sql` with `psql`.
-5. Store the key the sample node refers to (`api_key_ref: secret/skeid/remote/groq`; the init
-   job does not write it), with the OpenBao root token:
-   ```bash
-   docker exec -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=<root token> \
-     skeid-openbao bao kv put secret/skeid/remote/groq api_key=gsk_...
-   ```
-6. `docker compose up -d skeid`, then
+4. `docker compose run --rm skeid-init` (the service is in the `init` profile and runs in the
+   OpenBao image with its `bao` CLI). It writes a `skeid-keys` policy reading
+   `secret/skeid/*`, enables AppRole, creates the `skeid-service` role, stores each provider
+   key that is set, and prints `OPENBAO_ROLE_ID` and `OPENBAO_SECRET_ID`: put both into
+   `.env`. Keys go into `bao kv put` on stdin, never as an argument.
+5. `docker compose up -d skeid`, then
    `curl -s http://localhost:5591/v1/chat/completions -H 'Authorization: Bearer sk-alice-secret-key' ...`
 
-Caveats of the example as it stands:
+Skeid creates the `usage_events` table in PostgreSQL itself on start, from
+`share/sql/usage_events.postgresql.sql` (`auto_migrate`); the init job touches no database.
+Customer keys are stored nowhere: any bearer key is accepted and routed and billed under its
+key id (see [Customer key ids](#customer-key-ids-and-per-key-policy)). Policies in
+`skeid.yaml` name that id. `docker run --rm -i raudssus/langertha-skeid keyid` prints it for
+a key typed or piped on stdin.
 
-- The Skeid image installs neither `curl` nor `psql` explicitly (`libpq-dev` is not the
-  PostgreSQL client). Where they are missing, the init job's last step waits for `psql`
-  forever and the `skeid` healthcheck fails. The AppRole ids are printed before that step,
-  and Skeid creates and migrates the usage table itself on start (`auto_migrate`), so the
-  init job can be stopped once the ids are out.
-- The `secret/skeid/customer/` entries are never read by Skeid: customer keys are not checked
-  (see [Customer key ids](#customer-key-ids-and-per-key-policy)). `SKEID_REMOTE_KEY_REF` in
-  the compose file is not read by Skeid either; the node's `api_key_ref` is what counts.
-- OpenBao runs in dev mode. Do not use this stack as it is for production.
+OpenBao runs in dev mode: in memory, root token from `.env`. Every restart of the `openbao`
+container loses the AppRole and the stored keys, so run `skeid-init` again and replace both ids
+in `.env`. Do not use this stack as it is for production.
 
 `examples/service/skeid.yaml` carries commented examples for aliases, policies and probes.
 

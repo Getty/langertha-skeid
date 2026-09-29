@@ -6,21 +6,29 @@ pricing:
     input_per_million: 0.10
     output_per_million: 0.40
 
-# Example nodes - keys are resolved via OpenBao KeyBroker
+# Nodes. api_key_ref is a key reference: the OpenBao KeyBroker reads the api_key field of the
+# KV v2 secret it names, per request, into memory only. skeid-init stores SKEID_GROQ_KEY there.
 nodes:
   - id: groq-main
     url: https://api.groq.com/openai/v1
     model: llama-3.3-70b-versatile
     engine: openai
-    # api_key_ref resolved via KeyBroker -> OpenBao secret/skeid/remote/groq
     api_key_ref: secret/skeid/remote/groq
+  # skeid-init stores SKEID_OPENAI_KEY where this node looks for it:
+  # - id: openai-main
+  #   url: https://api.openai.com/v1
+  #   model: gpt-4o-mini
+  #   engine: openai
+  #   api_key_ref: secret/skeid/remote/openai
 
 # Usage storage via PostgreSQL.
 # This stack chooses postgresql over the (faster, simpler) jsonlog dir mode on
 # purpose: it is a multi-frontend deployment that wants one queryable billing
 # store with real SQL reports across every worker and container. A single-node
 # quick start is better served by `backend: jsonlog, path: /var/log/skeid/events/`
-# (see the README "Traffic / event logging" section) -- no database to run.
+# (see the README "Usage and billing" section) -- no database to run.
+# Skeid creates the usage_events table itself on start (auto_migrate, from
+# share/sql/usage_events.postgresql.sql) and adds any column an older table lacks.
 usage_store:
   backend: postgresql
   dsn: "dbi:Pg:dbname=skeid;host=postgres;port=5432"

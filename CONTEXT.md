@@ -153,7 +153,7 @@ _Avoid_: adapter, shim, conversion layer.
 
 **Upstream**:
 The node side of a request. The client side is the *client* or *caller* — never "backend".
-_Avoid_: backend, origin, remote (except in `SKEID_REMOTE_KEY_REF`, kept for compatibility).
+_Avoid_: backend, origin, remote.
 
 **SSE relay**:
 On the OpenAI **API format** streaming responses pass through byte-for-byte; Skeid parses the

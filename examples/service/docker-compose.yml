@@ -4,11 +4,10 @@ services:
     container_name: skeid-openbao
     restart: unless-stopped
     environment:
-      # Dev mode - single server with file backend.
-      # skeid-init authenticates with this same token; keep the two in sync via .env.
-      BAO_DEV_ROOT_TOKEN: ${OPENBAO_ROOT_TOKEN:-skeid-dev-root-token}
-    volumes:
-      - openbao-data:/opt/openbao/file
+      # The image's default command is `server -dev`: in-memory storage, unsealed, KV v2 at
+      # secret/. Everything written into it is gone after a restart -- run skeid-init again.
+      # skeid-init authenticates with this same token; both read it from .env.
+      BAO_DEV_ROOT_TOKEN_ID: ${OPENBAO_ROOT_TOKEN:-skeid-dev-root-token}
     ports:
       - "5501:8200"
     healthcheck:
@@ -25,8 +24,7 @@ services:
     environment:
       POSTGRES_DB: skeid
       POSTGRES_USER: skeid
-      # Password via env - in prod use docker secret
-      POSTGRES_PASSWORD: skeid_password_change_me
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-skeid_password_change_me}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
@@ -37,33 +35,29 @@ services:
       timeout: 5s
       retries: 5
 
+  # One-shot: AppRole, policy and provider keys. Runs in the openbao image because all it
+  # needs is the bao CLI. `docker compose run --rm skeid-init`
   skeid-init:
-    image: raudssus/langertha-skeid:latest
-    container_name: skeid-init
+    image: openbao/openbao:latest
     restart: "no"
     depends_on:
       openbao:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
     environment:
-      OPENBAO_ADDR: http://openbao:8200
-      OPENBAO_ROOT_TOKEN: ${OPENBAO_ROOT_TOKEN:-skeid-dev-root-token}
-      # These are written to OpenBao KV - secrets for app to use
-      # In prod: use docker secret or external init
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${OPENBAO_ROOT_TOKEN:-skeid-dev-root-token}
+      SKEID_GROQ_KEY: ${SKEID_GROQ_KEY:-}
       SKEID_OPENAI_KEY: ${SKEID_OPENAI_KEY:-}
       SKEID_ANTHROPIC_KEY: ${SKEID_ANTHROPIC_KEY:-}
     volumes:
-      - ./skeid.yaml:/etc/skeid/skeid.yaml:ro
-      - ./init-skeid.sh:/usr/local/bin/init-skeid.sh:ro
-      - ./usage_schema.sql:/etc/skeid/usage_schema.sql:ro
-    entrypoint: ["/usr/local/bin/init-skeid.sh"]
-    # Only run once - disable after
+      - ./init-skeid.sh:/init-skeid.sh:ro
+    entrypoint: ["/bin/sh", "/init-skeid.sh"]
     profiles:
       - init
 
   skeid:
-    image: raudssus/langertha-skeid:test
+    # The published image; set SKEID_IMAGE in .env to run a local build instead.
+    image: ${SKEID_IMAGE:-raudssus/langertha-skeid:latest}
     container_name: skeid-proxy
     restart: unless-stopped
     depends_on:
@@ -74,32 +68,24 @@ services:
     ports:
       - "5591:8090"
     environment:
-      # OpenBao connection (AppRole auth - token in memory only)
-      # Internal port 8200, exposed as 5501 on host
+      # AppRole credentials printed by skeid-init. Both set => the OpenBao KeyBroker is wired;
+      # its token lives in memory only.
       OPENBAO_ADDR: http://openbao:8200
-      OPENBAO_ROLE_ID: ${OPENBAO_ROLE_ID}
-      OPENBAO_SECRET_ID: ${OPENBAO_SECRET_ID}
+      OPENBAO_ROLE_ID: ${OPENBAO_ROLE_ID:-}
+      OPENBAO_SECRET_ID: ${OPENBAO_SECRET_ID:-}
 
-      # Admin API for /skeid/* routes
+      # Named by skeid.yaml (admin.api_key_env, usage_store.password_env).
       SKEID_ADMIN_API_KEY: ${SKEID_ADMIN_API_KEY:-change-me-in-prod}
-
-      # PostgreSQL usage store
-      SKEID_USAGE_DB: "dbi:Pg:dbname=skeid;host=postgres;port=5432"
-      SKEID_USAGE_DB_PASSWORD: skeid_password_change_me
-
-      # Remote LLM key - path in OpenBao
-      SKEID_REMOTE_KEY_REF: ${SKEID_REMOTE_KEY_REF:-secret/skeid/remote/groq}
+      SKEID_USAGE_DB_PASSWORD: ${POSTGRES_PASSWORD:-skeid_password_change_me}
     volumes:
       - ./skeid.yaml:/etc/skeid/skeid.yaml:ro
-      - skeid-usage:/data/skeid
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8090/health || exit 1"]
+      # perl and HTTP::Tiny (core) are in the image; curl is not guaranteed to be.
+      test: ["CMD", "perl", "-MHTTP::Tiny", "-e", "exit(HTTP::Tiny->new(timeout => 5)->get(q{http://127.0.0.1:8090/health})->{success} ? 0 : 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
 volumes:
-  openbao-data:
   postgres-data:
-  skeid-usage:
