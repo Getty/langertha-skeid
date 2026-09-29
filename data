@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-09-29T17:35:15Z
+claimed_by: skeid-worker-cli
+class: standard
+completed: 2026-09-29T17:33:46Z
+created: 2026-09-29T17:15:09Z
+id: 70
+priority: high
+started: 2026-09-29T17:15:44Z
+status: done
+tags:
+- bug
+- usage
+- billing
+title: DBI usage write failures are logged at debug only -- lost billing events are
+  invisible
+updated: 2026-09-29T17:35:15Z
+---
+
+Found by the k59 POD audit: UsageStore::DBI dies when a statement fails; the proxy catches it but logs only at debug level, so at the default log level a lost usage event (the billing unit, ADR 0004) leaves no trace. Log at error (or warn) with the event id and the store, never the key; test that a failing store produces a visible log line and the response still completes.
+
+2026-09-29 17:17 Cause: Proxy::_record_usage_event logs a thrown store error at debug and ignores a store's { ok => 0 } answer entirely (JsonLog's documented failure path) -- both lose the billing event silently at warn/info. Failing test t/58-usage-store-failure.t (sqlite DROP TABLE, jsonlog dir replaced by a file, streamed + non-streamed).
+
+2026-09-29 17:27 Done. Proxy::_record_usage_event now logs a lost event at error level: 'usage event lost: request_id=... store=<backend|store_usage_event|custom> api_key_id=... model=... status=...: <reason>' -- for a thrown error AND for a store's { ok => 0 } answer (JsonLog failures were not logged at all before). No sink at all answers { ok=>0, enabled=>0 } from record_usage/_store_usage_event and is not logged. UsageStore::DBI store() and report() no longer die on a failing statement: reported as { ok => 0, error }, with password=/pwd= from a DSN masked (_error_text). POD: Skeid.pm (usage sink section, record_usage), UsageStore contract, DBI store/report, JsonLog store. README usage section. Test t/59-usage-lost-event.t (sqlite DROP TABLE non-streamed, jsonlog dir->file streamed, no-store case, DSN password mask); red at HEAD verified. Full suite: Files=61, Tests=3192, PASS. Also found: (1) a Pg connection that drops stays cached in the DBI store, so every later event is lost until restart -- store should drop _dbh after a failed statement when !ping (separate card?); (2) ADR 0004 could get an update line 'a lost event is logged at error, never thrown' -- not appended because another worker is editing ADR 0004 right now.
+
+2026-09-29 17:33 Committed as 990c6a5
+
+2026-09-29 17:35 Correction: the commit is 04919ae (first commit was redone; ignore 990c6a5)
