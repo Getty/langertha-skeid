@@ -1,0 +1,23 @@
+---
+claimed_at: 2026-09-29T17:10:06Z
+claimed_by: skeid-worker-knarr
+class: standard
+completed: 2026-09-29T17:10:06Z
+created: 2026-09-29T17:06:24Z
+id: 62
+priority: low
+started: 2026-09-29T17:07:41Z
+status: done
+tags:
+- docker
+- release
+- cleanup
+title: Drop Langertha::Knarr leftovers from Docker build and dist.ini release notes
+updated: 2026-09-29T17:10:06Z
+---
+
+Skeid no longer depends on Langertha::Knarr, but Dockerfile and examples/Dockerfile.vast still take ARG KNARR_SRC and cpanm it, and the dist.ini comment block documents SKEID_DOCKER_BUILD_ARGS with KNARR_SRC and Langertha 0.307 (cpanfile pins 0.503). Remove the Knarr arg/install, update the dist.ini comment to current reality. Found by the k61 audit.
+
+2026-09-29 17:08 Done: removed ARG KNARR_SRC and its cpanm line from Dockerfile and examples/Dockerfile.vast; LANGERTHA_SRC path untouched. No examples/*.sh passed KNARR_SRC (build-vast-image.sh passes no build args), so no script changed. dist.ini SKEID_DOCKER_BUILD_ARGS comment rewritten: single LANGERTHA_SRC example as CPAN author path GETTY/Langertha-0.503.tar.gz (matches cpanfile pin). The GitHub release-asset URL pattern was dropped: Getty/langertha has GitHub releases only up to 0.307 (gh release view 0.502 -> not found), and its dist.ini uploads no assets. Verified: grep -rni knarr Dockerfile examples dist.ini -> empty; Config::INI::Reader parses dist.ini; bash -n examples/build-vast-image.sh ok. No docker build (shared box). Also found: .claude/skills/skeid-service-stack/SKILL.md:161-162 still calls the dist.ini KNARR_SRC example a leftover (now stale), and .claude/agents/skeid-release-manager.md:37 lists Langertha::Knarr as a Getty-authored pin to check; both are outside this card's scope.
+
+2026-09-29 17:10 Committed 2b9dbec
