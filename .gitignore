@@ -10,6 +10,8 @@
 !.claude/agents/**
 !.claude/skills/
 !.claude/skills/**
+!.claude/rules/
+!.claude/rules/**
 !.claude/hooks/
 !.claude/hooks/**
 
@@ -34,6 +36,8 @@ Langertha-Skeid-*
 !.claude/agents/
 !.claude/skills/
 !.claude/hooks/
+!.claude/skilletor.json
+!.claude/.gitignore
 
 # karr materialized task view -- never commit
 tasks/

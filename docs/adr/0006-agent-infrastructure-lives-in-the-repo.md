@@ -1,6 +1,6 @@
 # ADR 0006 — Agent, skill and rule infrastructure lives in the repo
 
-- Status: accepted
+- Status: accepted — shared-skill distribution amended by ADR 0018 (skilletor)
 - Date: 2026-08-08
 - Tags: tooling, skills, agents, conventions
 

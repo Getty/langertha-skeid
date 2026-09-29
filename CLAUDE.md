@@ -4,9 +4,11 @@ Canonical instruction file for the Skeid repo. Skeid is the LLM routing service:
 Mojolicious process that fronts many LLM nodes, speaks three client protocols, meters what it
 forwards, and never keeps a key on disk.
 
-This distribution ships its own agent skills (`.claude/skills/`), agents (`.claude/agents/`),
-and house rules (`.claude/rules/`); every `skeid-*` skill and `skeid-*` agent named here refers
-to those. The discipline, event-loop, secrets, benchmark and release rules live in
+This distribution ships its own agent skills (`.claude/skills/skeid-*`), agents
+(`.claude/agents/`), and house rules (`.claude/rules/`); every `skeid-*` skill and `skeid-*`
+agent named here refers to those. Shared skills (`getty-*`, `perl-*`, the karr skills) are
+installed by skilletor from `.claude/skilletor.json` and gitignored — change them in their
+source, then `skilletor sync` (ADR 0018). The discipline, event-loop, secrets, benchmark and release rules live in
 `.claude/rules/skeid-rules.md` — loaded automatically by Claude Code, for the main agent and
 all subagents. The domain vocabulary is `CONTEXT.md`; use its words in code, tickets and ADRs.
 
@@ -24,7 +26,8 @@ principle and lane are in `.claude/rules/skeid-rules.md`. Agents in this repo:
 | Commits, `Changes`, card → done, pre-release audit | `skeid-release-manager` |
 
 The agents carry their skills via `briefing.skills` (see `.claude/agents/`); the main agent
-delegates rather than loading them. Skill sources live under `.claude/skills/`.
+delegates rather than loading them. Repo-owned skill sources live under
+`.claude/skills/skeid-*`.
 
 ## Repo map
 
