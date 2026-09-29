@@ -2,6 +2,9 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Docker images no longer take a KNARR_SRC build argument; Skeid does not
+      depend on Langertha::Knarr. LANGERTHA_SRC still installs a specific
+      Langertha before the cpanfile
     - Ollama streaming (/api/chat) now carries tool calls: fragmented
       arguments, parallel calls and Unicode are accumulated through
       Langertha's stream parser and rendered as message.tool_calls on the
