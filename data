@@ -1,0 +1,36 @@
+---
+claimed_at: 2026-09-29T17:10:17Z
+claimed_by: skeid-worker-readme
+class: standard
+completed: 2026-09-29T17:10:17Z
+created: 2026-09-29T16:54:04Z
+id: 60
+priority: medium
+started: 2026-09-29T16:54:22Z
+status: done
+tags:
+- docs
+- readme
+title: 'Docs: README.md is accurate, complete and consistent'
+updated: 2026-09-29T17:10:17Z
+---
+
+README.md (hand-maintained, GitHub-only) vs the code: every config key, ENV var, endpoint, CLI option and default it states must be true; missing features (registry, manifest, capacity probes, key policies, aliases, workers/frontends, Ollama/Anthropic faces, usage CLI) covered. Mixed German/English sections -> English. Lab recipes (Avatar, Vast, one-box flush) move out of the README into examples/README.md with a pointer. Stale sections (e.g. 'Temporary CPAN Indexer Bypass') verified or removed.
+
+2026-09-29 16:55 Started: auditing README.md against Skeid.pm, Proxy.pm, bin/skeid, examples/.
+
+2026-09-29 16:59 Audit findings (code side, NOT fixed - outside README scope, for the dispatcher to route):
+1) SECURITY: examples/service/.env is still git-tracked (holds an OpenBao root token s.KeOz... and AppRole role/secret ids). Commit 78bff8d 'Stop tracking examples/service/.env' modified the file instead of removing it from the index; needs git rm --cached + credential rotation if ever real.
+2) bin/skeid serve --admin-api-key is lost on the first applied config change when a config file is used: _apply_config sets admin_api_key('') in config-managed mode. Same reason SKEID_ADMIN_API_KEY alone does nothing once a config file is loaded (verified with a scratch script). Either the flag/env should survive reload or usage text should say so.
+3) Reload applies only sections present: removing pricing/aliases/policies/nodes/usage_store from the file keeps the old values until restart; pricing entries can never be removed without restart (merged per model).
+4) examples/service: skeid service uses image :test, init uses :latest; SKEID_USAGE_DB is set to a dbi:Pg DSN although it is a SQLite path env (harmless, config wins); SKEID_REMOTE_KEY_REF is read by nothing; init-skeid.sh writes openai/anthropic keys but the sample node refs secret/skeid/remote/groq which nothing writes; customer entries under secret/skeid/customer/* are never read by Skeid.
+5) Dockerfile/Dockerfile.vast/dist.ini still carry KNARR_SRC and 0.307/0.007 comments though Knarr was dropped in 0.002. Main Dockerfile installs requires only (cpm default without recommends) + DBI/DBD::Pg, so DBD::SQLite is likely absent from the image (not built to confirm).
+6) CONTEXT.md says the Key broker is consulted per request for a Customer key ID; the code never validates customer keys - any presented key derives an id (CONTEXT owner's call).
+7) vast-start.sh prints http://0.0.0.0:${SKEID_LISTEN}/v1 -> 'http://0.0.0.0:0.0.0.0:8090/v1' (cosmetic).
+8) /v1/models and /api/tags list node models only, never alias names.
+
+2026-09-29 17:07 More findings: 9) cpanfile requires Langertha 0.503, but the code needs Langertha::Tool->classify (Protocol/Anthropic.pm), which the released 0.503 in ~/perl5 lacks: every /v1/messages request with tools dies -> 400. prove -lr t/ against installed 0.503 FAILS (t/20-proxy-mapping.t no plan, t/37-anthropic-builtin-tools.t 10 failed, t/56-ollama-stream-tools.t 3 failed); against -I ~/dev/langertha/lib all 55 files / 3052 tests PASS. The pin should name the Langertha release that carries classify/Manifest/cache Cost (sibling tree still says $VERSION 0.503 - release-manager's call). 10) Unverified: compose uses BAO_DEV_ROOT_TOKEN; OpenBao's dev variable is likely BAO_DEV_ROOT_TOKEN_ID, which would explain the random s.* root token in the tracked .env. 11) init-skeid.sh and the skeid healthcheck use curl/psql; the Dockerfile installs neither explicitly (libpq-dev has no psql) - init's final psql loop would spin forever. README documents this as a caveat.
+
+2026-09-29 17:07 Done: README.md rewritten in English and re-verified against Skeid.pm, Proxy.pm, Protocol/*, UsageStore/*, CapacityProbe/*, KeyBroker/OpenBao.pm, bin/skeid, Dockerfile, dist.ini and examples/. New examples/README.md documents every examples/ script with the options/env it really has; the Avatar/one-box/Vast recipes moved there. Corrected: Docker run commands (ENTRYPOINT already runs bin/skeid), SQLite-in-Docker (image lacks DBD::SQLite -> jsonlog), admin key env/CLI caveat, customer keys are not authenticated, engine matrix replaced by the runtime list, stale avatar yaml refs, Vast script actions, Knarr build arg, usage event field list, OpenAI streams need include_usage for token counts. Added: aliases/tiers, policies/names/key ids, pricing incl. cache rates, manifest, protocol faces with streaming/tools/images/errors, workers/frontends, probes incl. always-on rate-limit headers, admin API table, ENV table, CLI, ADR links. Code/infra findings are in the earlier notes (tracked .env with root token, --admin-api-key lost on reload, Langertha 0.503 pin lacks classify -> prove -lr t/ fails on installed 0.503 but 55 files/3052 tests pass with -I ~/dev/langertha/lib, compose stack gaps). Docs only; no code touched.
+
+2026-09-29 17:10 Committed a2492c2
