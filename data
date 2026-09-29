@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-09-29T17:37:04Z
+claimed_by: skeid-worker-reload
+class: standard
+completed: 2026-09-29T17:37:00Z
+created: 2026-09-29T17:08:50Z
+id: 64
+priority: medium
+started: 2026-09-29T17:15:23Z
+status: done
+tags:
+- bug
+- admin
+- config-reload
+title: --admin-api-key CLI flag is lost on the next config reload
+updated: 2026-09-29T17:37:04Z
+---
+
+Found by the k60 README audit (verified with a scratch script by the worker): bin/skeid serve --admin-api-key sets the admin key, but the next config reload replaces it with the file's value (or none). Also SKEID_ADMIN_API_KEY has no effect once a config file is loaded. Decide the precedence (CLI > file > ENV?) and make reload keep it; test it.
+
+2026-09-29 17:19 Reproduced in t/58-admin-key-precedence.t: build_app(admin_api_key) lost on the first changed config (404), config key replaces it. Plan: precedence explicit (new/build_app/serve --admin-api-key, via new set_admin_api_key) > config (4 spellings, first present decides) > SKEID_ADMIN_API_KEY > off; _apply_config re-resolves it on every reload. No ADR/CONTEXT says otherwise (skeid-core skill + POD documented the old 'config-managed = file only' rule; updating those).
+
+2026-09-29 17:20 Fixed: Skeid.pm set_admin_api_key + _explicit_admin_api_key/_config_admin_api_key, _admin_api_key_from_config/_apply_admin_api_key in _apply_config; BUILD takes new(admin_api_key) as explicit; build_app passes it into new() and calls set_admin_api_key. t/58 passes (19), t/21 and t/57 still pass. Docs: Skeid.pm POD (Admin API Key, CONFIGURATION absence list, admin, admin_api_key attr, SKEID_ADMIN_API_KEY env), Proxy.pm build_app POD, bin/skeid --admin-api-key, README Admin API key + env table.
+
+2026-09-29 17:29 Done. Cause: _apply_config wrote admin_api_key from the file on every applied config and set it to '' in config-managed mode when absent; build_app set the CLI key through the plain accessor after construction, so the next changed config overwrote it. Fix: order explicit (new(admin_api_key), build_app/serve --admin-api-key, new set_admin_api_key) > config (first of 4 spellings present; empty = off) > SKEID_ADMIN_API_KEY > off, re-resolved on every apply (_explicit_admin_api_key, _config_admin_api_key in rollback state). build_app passes the key into new() so a registry block sees it on the first load. Test: t/58-admin-key-precedence.t (19, failed before the fix). Docs: Skeid.pm POD, Proxy.pm build_app POD, bin/skeid --admin-api-key, README Admin API key + env table, skeid-core and skeid-service-stack skills. prove -lr: Files=61, Tests=3192, PASS.
+
+2026-09-29 17:37 Committed as e9b1e24
