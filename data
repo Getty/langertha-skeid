@@ -1,0 +1,24 @@
+---
+claimed_at: 2026-09-29T17:37:23Z
+claimed_by: skeid-worker-reload
+class: standard
+completed: 2026-09-29T17:37:18Z
+created: 2026-09-29T17:08:55Z
+id: 65
+priority: medium
+started: 2026-09-29T17:15:28Z
+status: done
+tags:
+- bug
+- config-reload
+title: Config reload keeps sections that were removed from the file
+updated: 2026-09-29T17:37:23Z
+---
+
+Found by the k60 README audit: deleting aliases, the policy sections, nodes or usage_store from the config file keeps the old values until restart; pricing entries can only be removed by a restart. A reload should make the running config equal to the file (all-or-nothing, as CONTEXT.md describes). Reproduce with a test first.
+
+2026-09-29 17:21 Reproduced in t/59-config-reload-removed-sections.t (14 of 30 fail on the old code): removed pricing entries/section, aliases, policy sections, nodes, routing keys all stay. Decision: a section the last applied config declared and the new one does not goes back to what a restart with the new file gives; a section the file never declared is left to the API (admin-pushed nodes, pricing.set) as before. usage_store: live swap on change is supported (prepared before the old one is dropped), but removal is kept deliberately and warned once (a removal names no destination, so honouring it on reload silently stops billing, ADR 0004); a restart applies it. Routing keys follow the same rule (were in scope of 'running config equal to the file').
+
+2026-09-29 17:29 Done. Cause: _apply_config only touched sections present in the config, and pricing was merged per model. Fix: _config_declared records the sections the last applied config declared; a declared section replaces (pricing too, wholesale), a previously declared one that is gone is cleared (nodes/pricing/aliases/policy group), a routing key reverts to its pre-config baseline (new() arg, else ENV, else built in); never-declared sections stay with the API (admin-pushed nodes, pricing.set). usage_store: a changed store still swaps live, a removed one stays until restart and warns once (ADR 0004 update section added). Test: t/59-config-reload-removed-sections.t (32; 14 failed before the fix). Docs: Skeid.pm CONFIGURATION/nodes/pricing/usage_store/ATTRIBUTES POD, README Configuration bullets + Admin API note, CONTEXT.md Config reload, ADR 0004 update, skeid-core skill. prove -lr: Files=61, Tests=3192, PASS.
+
+2026-09-29 17:37 Committed as a851ff0
