@@ -34,9 +34,11 @@ Audit:
    `File::ShareDir`, `HTTP::Tiny`, `YAML::PP`, `Mojolicious`, `JSON::MaybeXS`, `Moo` and
    anything newly added. Grep the `use` statements in `lib/` and `bin/` and diff against the
    cpanfile rather than trusting it.
-2. **cpanfile pins.** Every Getty-authored dependency (`Langertha`, `Langertha::Knarr`, …)
-   pinned to its **latest released CPAN version**, verified with `cpanm --info`. Never copy a
-   `$VERSION` out of a sibling working repo — those carry the next *unreleased* version.
+2. **cpanfile pins.** A Getty-authored dependency (`Langertha`, …) is pinned to the version
+   Skeid actually needs. When Skeid uses API that only the sibling's working tree has, the pin
+   is the `$VERSION` in that sibling's files — its next release — and that pin is the whole
+   dependency statement: no card waits for the sibling release. Report (don't block) when the
+   pinned version is not on CPAN yet (`cpanm --info`), because the release must follow it.
 3. **`$VERSION` consistency** across `lib/**/*.pm` and against `Changes`.
 4. **`Changes`** has a real entry for the pending version — not just `{{$NEXT}}`.
 5. **dist.ini**: `[@Author::GETTY]` options intact, `copyright_year`, and the

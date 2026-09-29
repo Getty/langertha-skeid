@@ -158,7 +158,7 @@ column on `prepare`, so the init step is a convenience, not a requirement. Repor
 Built and pushed by `dzil release` via `run_after_release` (see the release rule — never run
 that yourself). Tags: `raudssus/langertha-skeid:<version>`, `:<major>`, `:latest`. Source
 overrides for an unreleased Langertha go through `SKEID_DOCKER_BUILD_ARGS`
-(`--build-arg LANGERTHA_SRC=…`), documented at the top of `dist.ini`; its `KNARR_SRC` example is
-a leftover — Skeid no longer depends on Knarr. For a local test image:
+(`--build-arg LANGERTHA_SRC=…`, a CPAN author path or tarball URL), documented at the top of
+`dist.ini`. For a local test image:
 `docker build -t raudssus/langertha-skeid:test .` — which is the tag the compose file's `skeid`
 service actually references.
