@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-09-29T17:33:22Z
+claimed_by: skeid-protocol-worker-tags
+class: standard
+completed: 2026-09-29T17:33:18Z
+created: 2026-09-29T17:14:21Z
+id: 67
+priority: low
+started: 2026-09-29T17:15:50Z
+status: done
+tags:
+- bug
+- ollama
+- protocols
+title: Ollama /api/tags lists a node without a model under an empty name
+updated: 2026-09-29T17:33:22Z
+---
+
+Found by the k59 POD audit (verified): a node configured without a model shows up in /api/tags with name "" instead of its id. Test first.
+
+2026-09-29 17:16 Cause: add_node normalises an absent model to '' (Skeid.pm add_node), so Protocol::Ollama->tags_from_nodes' `model // id` fallback never fires and the node lists as name ''. /v1/models already skips empty models. Routing: a model-less node is a wildcard -- eligible for every requested name, forwarded under that name; no name routes to it specifically (its id is not a routing key). Decision: a model-less node contributes nothing to /api/tags, like /v1/models; /api/tags also de-duplicates by model so both lists hold the same set of names.
+
+2026-09-29 17:19 Done. Protocol::Ollama->tags_from_nodes now lists each distinct non-empty node model once (family from the first node) and skips model-less nodes, matching /v1/models; model-less nodes are wildcards with no name of their own, id is not a routing key. /v1/models code unchanged, /api/ps unchanged (stub). Aliases still not listed (k66). New t/58-model-lists.t (red before: nameless entry, duplicates, mismatch with /v1/models, bare inventory; green after). POD in Proxy.pm route list + Protocol::Ollama tags_from_nodes, README routing bullet + Client protocols row. Full suite: Files=57, Tests=3087, Result: PASS (prove -lr -I../langertha/lib t/).
+
+2026-09-29 17:33 Committed as 536f28a
