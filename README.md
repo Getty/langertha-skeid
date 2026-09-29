@@ -78,7 +78,9 @@ bin/skeid usage --config skeid.yaml
 The image `raudssus/langertha-skeid` has `ENTRYPOINT ["perl", "-Ilib", "bin/skeid"]` and by
 default runs `serve --listen 0.0.0.0:8090 --config /etc/skeid/skeid.yaml`. Arguments after the
 image name replace the default command, so they start with the subcommand (`serve`, `usage`,
-`keyid`), not with `bin/skeid`.
+`keyid`), not with `bin/skeid`. The default command needs a config mounted at
+`/etc/skeid/skeid.yaml` and exits with `config file not found` without one; to start without a
+config, run `serve --listen 0.0.0.0:8090`.
 
 ```bash
 mkdir -p skeid-config skeid-events
@@ -736,8 +738,11 @@ skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
 skeid keyid [KEY ...]
 ```
 
-- `serve` (the default subcommand): `--listen` defaults to `127.0.0.1:8090`, `--config` to
-  `skeid.yaml` (ignored if the file does not exist), `--workers` to 1.
+- `serve` (the default subcommand): `--listen` defaults to `127.0.0.1:8090`, `--workers` to
+  1. A `--config` that is not an existing file is an error (exit 2), not an empty config;
+  without `--config`, `./skeid.yaml` is read when it exists, and Skeid otherwise starts with
+  no config and no nodes. A config file that disappears while Skeid runs keeps the config in
+  force and is warned about once.
 - `usage` prints a report from the configured usage store; the `--backend`/`--db`/`--dsn`
   options override it (`--db` implies sqlite, `--dsn` postgresql).
 - `keyid` prints the customer key id for each key, or for each line of stdin.

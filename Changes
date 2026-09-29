@@ -378,6 +378,15 @@ Revision history for Langertha-Skeid
       level; the response still completes. The DBI store reports a failing
       insert or report query as { ok => 0, error } instead of dying, with a
       password= from its DSN masked in the error text
+    - skeid serve and skeid usage stop with "ERROR: config file not found:
+      PATH" and exit code 2 when --config names a file that does not exist,
+      instead of starting with no config and no nodes; the library croaks the
+      same way for a missing config_file at construction and on config.reload.
+      Without --config, ./skeid.yaml is still used when present. A config
+      file that disappears while Skeid runs keeps the config in force and is
+      warned about once. The Docker image's default command passes --config
+      /etc/skeid/skeid.yaml, so the image now exits when no config is mounted
+      there instead of starting empty
 
 0.003     2026-05-16 17:10:00Z
 

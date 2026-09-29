@@ -28,7 +28,7 @@ if ($cmd ne 'serve') {
 }
 
 my $listen = '127.0.0.1:8090';
-my $config = 'skeid.yaml';
+my $config;
 my $admin_api_key = '';
 my $workers = 1;
 
@@ -42,7 +42,8 @@ GetOptions(
 $workers = 1 if !$workers || $workers < 1;
 
 my %opts;
-$opts{config_file} = $config if defined($config) && -f $config;
+my $config_file = _config_file($config);
+$opts{config_file} = $config_file if defined $config_file;
 $opts{admin_api_key} = $admin_api_key if defined($admin_api_key) && length($admin_api_key);
 # Set before build_app so the first probe interval and the first admission decision already
 # know how many processes are sharing the node (ADR 0010).
@@ -77,7 +78,7 @@ if ($workers > 1) {
 sub _run_usage {
   my (@argv) = @_;
 
-  my $config = 'skeid.yaml';
+  my $config;
   my $since  = '';
   my $limit  = 20;
   my $as_json = 0;
@@ -107,7 +108,8 @@ sub _run_usage {
   ) or die _usage_text();
 
   my %skeid_opts;
-  $skeid_opts{config_file} = $config if defined($config) && -f $config;
+  my $config_file = _config_file($config);
+  $skeid_opts{config_file} = $config_file if defined $config_file;
 
   my $skeid = Langertha::Skeid->new(%skeid_opts);
 
@@ -208,6 +210,18 @@ sub _run_usage {
   return 0;
 }
 
+# The config file to load. Without --config, ./skeid.yaml is used when it exists and Skeid runs
+# without a config when it does not. A --config that names no file ends the program: the
+# operator asked for that config, and starting without it would serve no nodes (skeid k68).
+sub _config_file {
+  my ($config) = @_;
+  return (-f 'skeid.yaml' ? 'skeid.yaml' : undef) unless defined $config;
+  return $config if -f $config;
+  print STDERR 'ERROR: config file not found: ' . $config
+    . (-e $config ? ' (not a regular file)' : '') . "\n";
+  exit 2;
+}
+
 # Prints the key id a customer key routes and bills under. Needed because a config names
 # customers in keys:, and must be able to do that without holding their keys.
 sub _run_keyid {
@@ -275,8 +289,12 @@ C<host:port> to listen on (default C<127.0.0.1:8090>).
 
 =opt --config, -c
 
-The YAML config (default C<skeid.yaml>). A path that is not an existing file is ignored, and
-Skeid starts without a config -- with no nodes.
+The YAML config. A path given here that is not an existing file ends the command with
+C<ERROR: config file not found: ...> on standard error and exit code 2 -- Skeid does not start
+without the config it was told to use. Without C<--config>, F<skeid.yaml> in the working
+directory is used when it exists; when it does not, Skeid starts without a config, with no
+nodes (the admin API can add them). A config file that disappears while Skeid runs keeps the
+config in force and is warned about once (L<Langertha::Skeid/maybe_reload_config>).
 
 =opt --admin-api-key
 
@@ -299,11 +317,12 @@ Prints a usage report: totals, per API key id, per model, and the newest events.
 the config's C<usage_store>; any of C<--backend>, C<--db>, C<--dsn>, C<--db-user>, C<--db-pass>
 or C<--db-pass-env> replaces it with a store built from those options alone, so a C<jsonlog> store
 is read through the config. Exits 0, or 2 after printing C<ERROR: ...> when the report fails (no
-store configured, say).
+store configured, say) or C<--config> names no file.
 
 =opt --config, -c
 
-As for C<serve> (default C<skeid.yaml>).
+As for C<serve>: a missing file is an error; without the option, F<skeid.yaml> is read when it
+exists.
 
 =opt --since
 

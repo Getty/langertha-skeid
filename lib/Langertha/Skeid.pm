@@ -707,7 +707,8 @@ has key_broker => (is => 'ro', predicate => 'has_key_broker');
 
 Path of a YAML config (see L</CONFIGURATION>; C<has_config_file> is its predicate). Read at
 construction and again whenever its mtime moves. Give either this or L</config_loader>, not
-both.
+both. A path that is not an existing file dies at construction (C<config file not found: ...>);
+a file that disappears later keeps the config in force (see L</maybe_reload_config>).
 
 =cut
 
@@ -759,6 +760,12 @@ has _config_file_failed_mtime => (
 has _config_file_retry_at => (
   is      => 'rw',
   default => sub { undef },
+);
+
+# Set while config_file is missing after a good load, so the loss is warned once.
+has _config_file_missing => (
+  is      => 'rw',
+  default => sub { 0 },
 );
 
 =attr config_reload_interval
@@ -1433,16 +1440,18 @@ sub _read_config {
     $version = $loader_version;
   } elsif ($self->has_config_file) {
     my $file = $self->config_file;
-    if (-f $file) {
-      # Record the version observed before parsing. The file may be atomically replaced after
-      # load_file has read its bytes; recording a later stat would mark that unread replacement
-      # as applied and prevent the next dispatch from loading it.
-      my $read_mtime = (stat($file))[9];
-      my $ypp = YAML::PP->new;
-      my $loaded = $ypp->load_file($file);
-      $cfg = $loaded if ref($loaded) eq 'HASH';
-      $self->_config_mtime($read_mtime) if defined $read_mtime;
-    }
+    # A named config that is not there is an operator error, not an empty config: starting
+    # with no nodes would answer every request 503 with nothing saying why (skeid k68). A file
+    # that vanishes after a good load never gets here -- maybe_reload_config keeps the config.
+    croak 'config file not found: ' . $file unless -f $file;
+    # Record the version observed before parsing. The file may be atomically replaced after
+    # load_file has read its bytes; recording a later stat would mark that unread replacement
+    # as applied and prevent the next dispatch from loading it.
+    my $read_mtime = (stat($file))[9];
+    my $ypp = YAML::PP->new;
+    my $loaded = $ypp->load_file($file);
+    $cfg = $loaded if ref($loaded) eq 'HASH';
+    $self->_config_mtime($read_mtime) if defined $read_mtime;
   }
 
   my $fingerprint = defined($version) && !ref($version)
@@ -1603,8 +1612,9 @@ logged, recorded in L</reload_status>, and the request goes on under the config 
 force before (the reload is all or nothing). A failing source is then retried with a back-off --
 the interval doubling per failure, from at least a second up to a minute. A loader that keeps
 returning the same broken config is not applied again; a changed config-file mtime bypasses the
-failed version's retry window. Only construction and an explicit C<config.reload> still die on
-a bad config.
+failed version's retry window. A config file that has disappeared is not a reload at all: the
+config in force stays, and the loss is warned once until the file is back. Only construction
+and an explicit C<config.reload> still die on a bad or missing config.
 
 =cut
 
@@ -1625,7 +1635,15 @@ sub maybe_reload_config {
 
   return 0 unless $self->has_config_file;
   my $file = $self->config_file;
-  return 0 unless -f $file;
+  unless (-f $file) {
+    # Gone after a good load (a botched deploy, a volume that went away): the config in force
+    # stays, as it would for a file that fails to parse -- but said once, not silently.
+    warn 'skeid: config file ' . $file . " is gone, keeping the previous config\n"
+      unless $self->_config_file_missing;
+    $self->_config_file_missing(1);
+    return 0;
+  }
+  $self->_config_file_missing(0);
 
   my $mtime = (stat($file))[9] || 0;
   my $last  = $self->_config_mtime;
