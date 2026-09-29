@@ -34,19 +34,26 @@ delegates rather than loading them. Repo-owned skill sources live under
 ```
 lib/Langertha/Skeid.pm            control plane: config, nodes, routing, admission, usage, pricing
 lib/Langertha/Skeid/Proxy.pm      Mojolicious app: routes, auth, protocol handlers, upstream I/O
-lib/Langertha/Skeid/Protocol/     wire-format translation (Anthropic, Ollama <-> OpenAI)
-lib/Langertha/Skeid/UsageStore/   usage backends: JsonLog, DBI (sqlite/postgresql)
+lib/Langertha/Skeid/Proxy/        RelayContent: upstream body relayed as raw bytes
+lib/Langertha/Skeid/Protocol.pm   shared translation helpers, OpenAI manifest face
+lib/Langertha/Skeid/Protocol/     wire-format translation (Anthropic, Ollama <-> OpenAI, + ::Stream)
+lib/Langertha/Skeid/UsageStore*   usage store factory; backends JsonLog, DBI (sqlite/postgresql)
+lib/Langertha/Skeid/CapacityProbe*  capacity probes: Prometheus, Registry, Custom
+lib/Langertha/Skeid/Registry.pm   signed Skeid-to-Skeid snapshot (ADR 0017)
+lib/Langertha/Skeid/Secret.pm     constant-time compare for keys, tokens, signatures
 lib/Langertha/Skeid/KeyBroker.pm  key resolution contract; ::OpenBao is the implementation
-bin/skeid                         `serve` and `usage` CLI
+bin/skeid                         `serve`, `usage` and `keyid` CLI
 share/sql/                        usage_events schema per backend
 examples/service/                 OpenBao + PostgreSQL + Skeid compose stack
 bench/                            C fake-LLM server + measuring client (not shipped to CPAN)
 docs/adr/                         architecture decision records
+docs/bench/                       benchmark reports
 ```
 
-Which skill covers what: `skeid-core` (routing, config, usage, admin API), `skeid-protocols`
-(the three client formats, streaming, Langertha engine IDs), `skeid-service-stack` (OpenBao,
-compose, ENV, deployment), `skeid-benchmark` (`bench/`, TTFT methodology, comparisons). Do NOT
+Which skill covers what: `skeid-core` (routing, admission, capacity probes, config, usage,
+admin API), `skeid-protocols` (the three client formats, streaming, Langertha engine IDs),
+`skeid-service-stack` (OpenBao, compose, ENV, deployment), `skeid-benchmark` (`bench/`, TTFT
+methodology, comparisons), `skeid-profiling` (Devel::NYTProf on a running server). Do NOT
 duplicate skill content here — reference it.
 
 ## Build specifics

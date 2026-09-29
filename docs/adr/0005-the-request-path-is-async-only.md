@@ -1,6 +1,6 @@
 # ADR 0005 — The request path is async-only; no synchronous twins
 
-- Status: accepted
+- Status: accepted — the KeyBroker blocking spot is gone (skeid #3, see Update)
 - Date: 2026-08-08
 - Tags: performance, mojolicious, event-loop, ttft
 
@@ -48,3 +48,12 @@ Regressions here are proven with `bench/` (ADR 0007), not argued from the code.
 - A single process still has a single CPU. This ADR removes *stalls*, not the need to run
   multiple workers when throughput demands it; that is a deployment decision, and one the
   benchmark harness exists to inform.
+
+## Update (skeid #3): key resolution is off the event loop
+
+Of the two blocking spots named above, the KeyBroker round-trip is resolved: the request path
+calls `KeyBroker->key_async`, which answers from an in-memory cache, coalesces concurrent misses
+for one reference, and reaches `KeyBroker::OpenBao->resolve_key_async` on `Mojo::UserAgent`;
+the token is renewed on a timer (`start_renewal`). `t/27-keybroker-nonblocking.t` guards it.
+DBI usage writes remain synchronous, and `jsonlog` stays the recommended default for that
+reason. Multiple workers exist since ADR 0010 (`serve --workers N`).

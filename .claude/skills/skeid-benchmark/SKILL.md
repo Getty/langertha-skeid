@@ -46,9 +46,11 @@ Neither program is shipped to CPAN (`gather_exclude_match` in `dist.ini`).
 
 - **Overhead at c=1** is Skeid's serial cost per request: routing, admission, header
   forwarding, the upstream transaction, the usage write.
-- **Throughput ceiling at high concurrency** is one process on one CPU. A ceiling is not the
-  same finding as a stall: a *blocked* event loop shows up as p99 far above p50 and requests
-  serialised behind whole upstream responses. A CPU ceiling raises everything together.
+- **Throughput ceiling at high concurrency** is one event loop per CPU — one process unless
+  `serve --workers N` (see `docs/bench/2026-08-09-prefork-workers.md`); `run-bench.sh` starts
+  a single worker. A ceiling is not the same finding as a stall: a *blocked* event loop shows
+  up as p99 far above p50 and requests serialised behind whole upstream responses. A CPU
+  ceiling raises everything together.
 - **Streaming vs JSON** differ because the relay spreads work across the response while the
   JSON path decodes and re-encodes one lump at the end.
 - **A number without a baseline is an anecdote.** Do not quote one.

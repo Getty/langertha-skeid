@@ -1,6 +1,6 @@
 # ADR 0015 — The provider manifest is per key, opt-in, and resolved at config load
 
-- Status: accepted — implemented (skeid #29)
+- Status: accepted — implemented (skeid #29); Ollama face carries `format` since skeid #46 (see Update)
 - Date: 2026-09-25
 - Tags: manifest, provider-discovery, policy, config, security
 
@@ -95,3 +95,11 @@ keys:
   narrower key's manifest never names the richer key's models. It also proves the leak
   checks (no node URL, id or key reference in the body) and the load errors. Serving the
   wrong key's cached entry was verified to fail it.
+
+## Update (skeid #42, #46): what the faces carry now
+
+`/api/chat` and `/api/generate` no longer drop `format`: it goes upstream as `response_format`,
+so the Ollama face publishes `response_format_json_object` and `response_format_json_schema`.
+Every face may publish `image_input` since images are translated on the Anthropic and Ollama
+faces. `options.seed` is still not carried. The per-face lists stay in each translator's
+`manifest_endpoint`, as decided.

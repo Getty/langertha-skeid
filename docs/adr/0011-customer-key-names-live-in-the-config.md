@@ -1,6 +1,6 @@
 # ADR 0011 — Customer key names live in the config, keyed by readable name
 
-- Status: accepted — implemented (`names:` registry, `key_id_for_name`)
+- Status: accepted — implemented (skeid #17: `names:` registry, `key_id_for_name`); key id width amended by ADR 0016
 - Date: 2026-09-10
 - Tags: policy, keybroker, config, identity
 

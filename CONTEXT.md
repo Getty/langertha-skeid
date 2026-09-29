@@ -50,8 +50,9 @@ events carry both, and neither may be dropped in favour of "the model".
 _Avoid_: bare "model" anywhere an alias could be in play.
 
 **Route key**:
-The `model|engine` tuple under which one weighted round-robin cursor lives. Two different
-route keys never share a cursor.
+The `model|engine` tuple — extended by the selector's tags and the key's denied tags when there
+are any — under which one weighted round-robin cursor lives. Two different route keys never
+share a cursor.
 _Avoid_: session, channel, pool.
 
 **Routing**:
@@ -60,8 +61,9 @@ Load balancing is one routing strategy, not the concept.
 _Avoid_: load balancing, dispatch, scheduling.
 
 **Eligibility**:
-Static fitness — the node matches the requested model and engine and is flagged healthy. Says
-nothing about whether it can take the request *now*.
+Static fitness — the node matches the requested model and engine, carries every tag of the
+tier's selector and none of the key's **denied tags**, and is flagged healthy. Says nothing
+about whether it can take the request *now*.
 _Avoid_: availability (that is the dynamic half).
 
 **Admission**:
@@ -85,6 +87,12 @@ divisors multiply and the split is static; `max_conns` names what the *node* may
 is what one process may send. A capacity probe reads the node's real occupancy and makes the
 divisor redundant where it exists.
 _Avoid_: quota, limit, per-worker max_conns.
+
+**Shared inflight scoreboard** (proposed, ADR 0014 — not implemented):
+A shared-memory table of each prefork worker's **Inflight** per node, so the workers of one
+host admit against the node's whole `max_conns` instead of a static **Worker share**. Replaces
+only the worker divisor, never the frontend divisor, and never widens what a probe narrows.
+_Avoid_: shared counter (the rejected multi-writer design), lock table.
 
 **Capacity probe**:
 How a node's real occupancy is found: `inflight` (default), `ratelimit` (read off responses
@@ -115,21 +123,26 @@ for a slot would not help. It never touches **Health**.
 _Avoid_: cooldown, circuit breaker, ban.
 
 **Saturation**:
-Every eligible node is at `max_conns`. The client waits up to `route_wait_timeout_ms` for a
-slot and then gets `429 rate_limit_error`. Distinct from *no eligible node*, which is an
-immediate `503 model_not_found`.
+Every eligible node refuses **Admission**. Within a tier the request waits that tier's
+`wait_ms` (an alias-less model: `route_wait_timeout_ms`) and then falls through; once every
+tier is exhausted and one of them had an eligible node, the client gets `429
+rate_limit_error`. Distinct from *no eligible node* in any tier, which is an immediate `503
+model_not_found`.
 _Avoid_: overload, backpressure, queueing.
 
 **Health**:
-An operator-set flag on a node (`set_node_health`, admin API), not a probe result. Skeid does
-not poll upstreams; an unreachable node stays "healthy" until someone says otherwise.
+An operator-set flag on a node (`set_node_health`, admin API), not a probe result. A **capacity
+probe** may poll a node, but only ever for **Admission**; an unreachable node stays "healthy"
+until someone says otherwise.
 _Avoid_: liveness, readiness, up/down.
 
 ### Protocols
 
 **API format** (client protocol):
-The dialect the *client* speaks to Skeid: OpenAI (`/v1/chat/completions`, `/v1/embeddings`),
-Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/tags`). A property of the request.
+The dialect the *client* speaks to Skeid: OpenAI (`/v1/chat/completions`, `/v1/embeddings`,
+`/v1/models`), Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/tags`,
+`/api/ps`). A property of the request. Code, config (`manifest.faces`) and ADRs call one API
+format's set of routes a **face** — "the Anthropic face".
 _Avoid_: engine, provider, frontend API.
 
 **Translation**:
@@ -175,10 +188,18 @@ Volatile, never billed, lost on restart. Not a usage event.
 _Avoid_: usage, stats, telemetry.
 
 **Metrics normalization**:
-Turning whatever token counts an upstream reports into input / output / total. Cost is priced
-from `model_pricing` at record time and stored on the event, so a later price change never
-rewrites history.
+Turning whatever token counts an upstream reports into input / output / total, plus the
+**cached tokens**. Cost is priced from `model_pricing` at record time and stored on the event,
+so a later price change never rewrites history. A stream is normalized from its verbatim
+upstream usage block, the same call as a non-streamed answer.
 _Avoid_: parsing, mapping.
+
+**Cached tokens** (`cached_tokens`, `cache_write_tokens`):
+The input tokens a provider served from, or wrote into, its prompt cache, as it reports them.
+Recorded on the usage event beside the token counts and priced at the model's
+`cached_input_per_million` / `cache_write_per_million` into `cost_cache_read_usd` /
+`cost_cache_write_usd`, both part of `cost_total_usd` (ADR 0013).
+_Avoid_: cache hits, discounted tokens.
 
 ### Keys and identity
 
@@ -193,11 +214,26 @@ log lines may carry a key reference; they may never carry what it resolves to.
 _Avoid_: key path, secret name, key id (that word means the caller).
 
 **Customer key ID** (`api_key_id`):
-The caller's identity, derived from the API key they presented (`skeid keyid` prints it). It
-selects whose usage this is *and* which routing policy applies; it is not itself a credential.
-A client-supplied `x-skeid-key-id` names it only where `trust_key_id_header` says something in
-front of Skeid already authenticated the caller.
+The caller's identity, derived from the API key they presented: `k_` plus the key's full SHA-1
+hex (ADR 0016; `skeid keyid` prints it), or `anonymous`. It selects whose usage this is *and*
+which routing policy applies; it is not itself a credential. A pre-ADR 0016 short id
+(`k_` + 12 hex) in the config still matches by prefix. A client-supplied `x-skeid-key-id` names
+it only where `trust_key_id_header` says something in front of Skeid already authenticated the
+caller.
 _Avoid_: API key, user, tenant, account.
+
+**Customer name** (`names:`):
+A readable label the config maps to a **Customer key ID**, so `keys:` entries can be written as
+`alice` instead of a digest (ADR 0011). Resolved to the id at config load and erased; it is
+never an identity on the request path.
+_Avoid_: username, account name, key alias.
+
+**Provider manifest**:
+The `/.well-known/langertha.json` document telling one customer key which endpoints, faces and
+models it may use (ADR 0015). Opt-in per key (`keys: <id>: {manifest: {models: [...]}}`),
+bounded by that key's **Policy**, resolved at config load; unauthenticated callers get 401,
+never a public catalog.
+_Avoid_: catalog, discovery document, model list.
 
 **Policy**:
 What a customer key may reach: an optional list of models it may ask for, and the node tags it
@@ -241,17 +277,20 @@ Skeid's internal command surface — `route.state`, `route.next`, `request.start
 _Avoid_: API, RPC, tool call (that means an LLM tool call here).
 
 **Config reload**:
-The YAML config is re-read when its mtime changed, on function dispatch. Node inventory is
-live state; the file is one of its sources, the admin API is the other.
+The YAML config (or a `config_loader`) is re-read on function dispatch when its mtime changed
+or the loader is due; an unchanged result is a no-op. A reload is all or nothing: a failing one
+keeps the previous config in force and is retried with a back-off. Node inventory is live
+state; the file is one of its sources, the admin API is the other — and a changed `nodes:`
+section replaces whatever the admin API pushed.
 _Avoid_: hot reload, restart, refresh.
 
 ## Relationships
 
 - A **Node** carries exactly one **Engine ID** and at most one **Model**; **Routing** groups
   nodes by **Route key**, never by node id.
-- **Eligibility** is computed from config state; **Admission** from **Inflight**. A request is
-  routed only when both hold — that is why `route.next` and `request.start` are two calls and
-  the second may fail after the first succeeded.
+- **Eligibility** is computed from config state; **Admission** from **Inflight** and any current
+  **Capacity reading**. A request is routed only when both hold — that is why `route.next` and
+  `request.start` are two calls and the second may fail after the first succeeded.
 - **Saturation** is a property of the eligible set, not of a node: one busy node is not
   saturation if a sibling can take the request.
 - A **Capacity probe** narrows **Admission** and never **Health**. A rate-limited or full node
@@ -261,8 +300,9 @@ _Avoid_: hot reload, restart, refresh.
 - **Node metrics** and **Usage events** count the same requests and are never reconciled: one
   is volatile operations data, the other is durable billing data. Don't derive one from the
   other.
-- The **Key broker** is consulted per request for a **Customer key ID** and per node for an
-  `api_key_ref`. Neither result is cached to disk, and only the **Key reference** — never the
+- The **Key broker** is consulted per request for the chosen node's `api_key_ref`, answering
+  from its in-memory cache when it can. A **Customer key ID** is never looked up: it is a digest
+  of the presented key. Nothing is cached to disk, and only the **Key reference** — never the
   resolved value — appears in config, logs, or usage events.
 - A **Policy** attaches to a **Customer key ID**, and that id is derived from what the caller
   presented. Anything a client can set freely must never name it: the policy would be advice,
@@ -306,5 +346,8 @@ _Avoid_: hot reload, restart, refresh.
   the name a node serves. Where both can appear — usage events, reports, log lines — they are
   **requested model** and **served model**. Bare "model" is only safe where no alias layer is
   involved.
+- **"registry"** names two things: the Skeid-to-Skeid **Registry snapshot** (`registry:` config,
+  `Langertha::Skeid::Registry`, ADR 0017), and — in ADR 0011 and `key_id_for_name` — the
+  `names:` section. The bare word means the snapshot; the other is the **Customer name** map.
 - **"backend"** appears both as the usage-store driver name (`backend: postgresql`, correct)
   and colloquially for an upstream node (wrong). Upstream side is **Node**.

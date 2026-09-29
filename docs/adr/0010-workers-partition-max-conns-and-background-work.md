@@ -1,6 +1,6 @@
 # ADR 0010 — Workers partition max_conns, and everything in the background scales with them
 
-- Status: accepted
+- Status: accepted — implemented (skeid #7); frontend divisor added by ADR 0012; shared same-box admission proposed by ADR 0014
 - Date: 2026-08-09
 - Tags: performance, deployment, admission, prefork
 

@@ -1,6 +1,6 @@
 # ADR 0012 — Frontends partition max_conns too, and compose with workers
 
-- Status: accepted
+- Status: accepted — implemented (skeid #14)
 - Date: 2026-09-15
 - Tags: admission, deployment, partitioning, multi-instance
 

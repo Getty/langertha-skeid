@@ -11,12 +11,18 @@ top of it. Moo, no singletons. Terms below are defined in `CONTEXT.md` — use t
 ## Shape
 
 ```
-Langertha::Skeid          nodes, routing, admission, config, pricing, usage
+Langertha::Skeid          nodes, routing, admission, config, pricing, usage, registry snapshot
   ::Proxy                 Mojolicious app: routes, auth, handlers, upstream I/O
-  ::Protocol::Anthropic   /v1/messages   <-> OpenAI translation
-  ::Protocol::Ollama      /api/chat      <-> OpenAI translation
+  ::Proxy::RelayContent   upstream body always relayed as raw bytes (skeid #30)
+  ::Protocol              shared translation helpers, OpenAI manifest face
+  ::Protocol::Anthropic   /v1/messages <-> OpenAI (+ ::Stream)
+  ::Protocol::Ollama      /api/chat, /api/generate <-> OpenAI (+ ::Stream)
+  ::UsageStore            config normalization + backend factory
   ::UsageStore::JsonLog   append-only JSON events (recommended default)
   ::UsageStore::DBI       sqlite + postgresql
+  ::CapacityProbe         timer-driven probes; ::Prometheus, ::Registry, ::Custom
+  ::Registry              signed Skeid-to-Skeid snapshot: encode, sign, verify (ADR 0017)
+  ::Secret                constant-time compare for keys, tokens, signatures
   ::KeyBroker             resolve($ref) contract; ::OpenBao implements it
 ```
 
@@ -34,6 +40,8 @@ max_conns: 8           # admission limit; <= 0 means unlimited
 healthy: 1             # operator flag, never set by error handling
 tags: [local, gb10]    # grouping for selection; also accepts "local, gb10"
 api_key_ref: secret/…  # key reference resolved through the KeyBroker per request
+api_key_env: VAR       # fallback: key from this environment variable
+capacity: { probe: … } # optional capacity probe, see below
 ```
 
 Mutating helpers: `add_node`, `remove_node`, `list_nodes`, `set_node_health`.
@@ -49,10 +57,12 @@ tiers of ADR 0008 sit on.
 **Derived lists are cached, and the invariant is silent when broken.** Which nodes a selection
 matches, their order and their weights are computed once and reused until
 `_inventory_generation` changes. Anything that touches the inventory must call
-`_bump_inventory` — `add_node` and `set_node_health` do it explicitly, and a `trigger` on the
-`nodes` attribute catches a direct assignment. Miss one and routing keeps sending traffic to a
-node that was drained or removed, with nothing in the logs. `t/24-node-tags.t` is the tripwire;
-it has been verified to fail when the bump is removed.
+`_bump_inventory` — `add_node` and `set_node_health` do it explicitly (a health call that
+changes nothing does not bump), and a `trigger` on the `nodes` attribute catches a direct
+assignment. Miss one and routing keeps sending traffic to a node that was drained or removed,
+with nothing in the logs. `t/24-node-tags.t` is the tripwire; it has been verified to fail when
+the bump is removed. The cache and its round-robin cursors are bounded at 256 route keys per
+generation, FIFO-evicted together (skeid #55), so client-chosen model names cannot grow them.
 
 Note `pick_node` is protected twice — admission re-reads `healthy` from the live node — so a
 stale cache shows up in `route_state`, not there. That matters because `has_eligible` is what
@@ -138,11 +148,13 @@ unless `routing.trust_key_id_header` says a gateway in front of Skeid authentica
 between the two, another request may have taken the last slot.
 
 - **Eligible** = model matches (or node/request model empty) AND engine matches (or either
-  empty) AND `healthy`.
-- **Admitted** = `inflight < max_conns` (or `max_conns <= 0`) **and** the node's capacity
+  empty) AND carries every selector tag AND no denied tag AND `healthy`.
+- **Admitted** = `inflight < worker_max_conns` (or `max_conns <= 0`) **and** the node's capacity
   reading allows it, if there is a current one. See the probe section below.
-- Weighted round-robin walks a per-`route_key` (`model|engine`) cursor over nodes sorted by
-  id, skipping nodes that fail admission; the cursor only advances on a successful pick.
+- Weighted round-robin walks a per-route-key cursor (`model|engine`, plus tags and denied tags
+  when present) over nodes sorted by id, skipping nodes that fail admission — each node is
+  checked at most once per selection, whatever its weight (skeid #56). The cursor only advances
+  on a successful pick.
 - No eligible node → `503 model_not_found` immediately.
 - Eligible but none admitted → wait `route_wait_timeout_ms` (poll `route_wait_poll_ms`), then
   `429 rate_limit_error`. Waiting is `Mojo::IOLoop->timer`, never `usleep`.
@@ -157,14 +169,18 @@ a slot until restart.
 for. Measured: 170.7 req/s at 4 workers vs 128.1 at one, TTFT p50 88ms vs 120ms
 (`docs/bench/2026-08-09-prefork-workers.md`).
 
-**`inflight` and `max_conns` are per-process**, so each worker takes `max_conns / N`
-(`worker_max_conns`, floor 1). Without that, `max_conns: 8` across 4 workers permits 32 —
-silently. A `max_conns` below the worker count cannot be honoured; `worker_share_warnings`
-says so at startup rather than pretending.
+**`inflight` and `max_conns` are per-process**, so each process takes
+`max_conns / (frontend_count × N)` (`worker_max_conns`, floor 1; `routing.frontend_count` is the
+number of Skeid hosts sharing the node, ADR 0012). Without that, `max_conns: 8` across 4 workers
+permits 32 — silently. A `max_conns` below that process count cannot be honoured;
+`worker_share_warnings` says so at startup rather than pretending. A shared scoreboard that would
+replace the worker divisor is designed (ADR 0014) but not implemented.
 
 Anything on a timer runs **once per worker**. Probe intervals are multiplied by the worker
-count (`poll_interval_seconds`) so the node sees the configured rate from the group. Vault
-renewal is deliberately *not* scaled — each process holds its own token and must keep it alive.
+count (`poll_interval_seconds`) so the node sees the configured rate from the group; a probe
+whose scaled interval is not below `capacity_max_age_ms` warns at start. `frontend_count`
+scales no timer. Vault renewal is deliberately *not* scaled — each process holds its own token
+and must keep it alive.
 
 Under prefork the usage store is multi-writer: `jsonlog` (dir mode) and `postgresql` are fine,
 **SQLite is not**. Admin API writes reach one worker only, which makes the config file the
@@ -182,7 +198,7 @@ nodes:
   - id: gpu-1
     max_conns: 32
     capacity:
-      probe: prometheus                 # inflight (default) | ratelimit | prometheus | custom
+      probe: prometheus                 # inflight (default) | ratelimit | prometheus | registry | custom
       url: http://gpu-1:8000/metrics    # or path: /metrics, resolved against the node URL
       interval_ms: 2000
       running: vllm:num_requests_running    # optional; defaults cover vLLM/SGLang/TGI
@@ -194,7 +210,9 @@ nodes:
 | `inflight` | the default; no probe object exists | none |
 | `ratelimit` | `x-ratelimit-*` / `anthropic-ratelimit-*` / `Retry-After` read off responses the proxy already holds | none |
 | | requests **and** tokens are read separately; the tightest quota (as a fraction) decides | |
+| | read for every node; `probe: ratelimit` starts nothing | |
 | `prometheus` | poll a metrics endpoint on a timer | one request per node per interval |
+| `registry` | poll a downstream Skeid's signed snapshot (`secret_env`, `read_key_env` or `admin_key_env`; ADR 0017) | one request per node per interval |
 | `custom` | a `code` callback or a `class` to load | caller's |
 
 **The rule everything rests on: a probe may only narrow what `max_conns` allows, never widen
@@ -202,8 +220,11 @@ it.** `_node_can_take` asks both. A reading that could raise the ceiling would t
 probe into an overload, and for a rented node `max_conns` is a spend limit.
 
 - Readings expire after `capacity_max_age_ms` (5s). Every failure — unreachable endpoint,
-  unrecognised metric names, a probe that dies — calls `forget_capacity` and lets `inflight`
-  decide. Never keep the last reading: unknown is imprecise, stale is confidently wrong.
+  unrecognised metric names, a bad or stale snapshot, a probe that dies — forgets that probe's
+  own reading and lets `inflight` decide. Never keep the last reading: unknown is imprecise,
+  stale is confidently wrong.
+- Two sources on one node: the tighter reading wins while it is current — it carries a pending
+  backoff, or is younger than the longer of the two poll intervals (ADR 0017).
 - `used` for Prometheus is `running + waiting`. A queued request occupies the node.
 - A `429`/`Retry-After` sets a **backoff**, which outlives the age limit (it is a statement
   about the future) and **never touches `healthy`** — busy is not broken, and nothing would
@@ -212,7 +233,9 @@ probe into an overload, and for a rented node `max_conns` is a spend limit.
   reads a response already in hand and issues nothing.
 
 Dispatch: `capacity.set`, `capacity.get`, `capacity.observe`, `capacity.forget`. Probes are
-started by `build_app` and rebuilt when the inventory generation moves.
+started by `build_app` and rebuilt when `_probe_inventory_key` moves (worker count plus id, URL
+and `capacity` block of every probed node) — not on a health flip, which would forget every
+reading (skeid #40).
 
 ## Function dispatch
 
@@ -221,7 +244,8 @@ started by `build_app` and rebuilt when the inventory generation moves.
 
 ```
 nodes.add nodes.remove nodes.list nodes.select nodes.set_health nodes.metrics
-alias.set route.plan route.next route.state request.start request.finish
+alias.set policy.set policy.for_key route.plan route.next route.state
+request.start request.finish capacity.set capacity.get capacity.observe capacity.forget
 usage.record usage.report usage.configure
 pricing.set metrics.estimate_cost metrics.normalize
 engines.list config.reload config.status
@@ -236,17 +260,20 @@ from dispatch at most once per `config_reload_interval` (default 1s). A load who
 (the loader's optional second return value, else a canonical digest of the structure) matches
 the last applied one is a no-op (skeid #38). A reload triggered from dispatch never dies
 (skeid #39): the failure is logged and kept in `reload_status`, the request runs under the kept
-config, a failing loader backs off (interval doubling from >=1s, capped at 60s) and the same
-broken result is not applied twice. Construction and explicit `config.reload` still die.
+config, a failing loader or broken file backs off (interval doubling from >=1s, capped at 60s;
+skeid #54 — a new file mtime is read at once) and the same broken result is not applied twice.
+Construction and explicit `config.reload` still die.
 
 ```yaml
 nodes:      [ … ]                # replaces the whole inventory on reload
 pricing:    { model: {…} }       # merged per model; optional cached_input_per_million / cache_write_per_million
 aliases:    { name: {tiers: […]} }   # replaced wholesale on reload
-policies:   { name: {…} }        # with default_policy: and keys:
-routing:    { wait_timeout_ms: 2000, wait_poll_ms: 25, trust_key_id_header: false }
-admin_api_key: "…"               # or admin: { api_key: … }
+policies:   { name: {…} }        # with default_policy:, names: and keys:
+routing:    { wait_timeout_ms: 2000, wait_poll_ms: 25, trust_key_id_header: false, frontend_count: 1 }
+admin_api_key: "…"               # or admin_api_key_env:, or admin: { api_key | api_key_env }
 usage_store: { backend: …, … }
+manifest:   { enabled, public_url, … }   # provider manifest, per-key grants in keys: (ADR 0015)
+registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
 ```
 
 In config-managed mode an absent `admin_api_key` **disables** the admin API (`/skeid/*` then
@@ -257,7 +284,7 @@ the list, its inventory generation (so probes keep running) and admin-set health
 
 ENV defaults: `SKEID_ROUTE_WAIT_TIMEOUT_MS`, `SKEID_ROUTE_WAIT_POLL_MS`, `SKEID_USAGE_DB`,
 `SKEID_ADMIN_API_KEY`, `SKEID_TRUST_KEY_ID_HEADER`, `SKEID_CAPACITY_MAX_AGE_MS`,
-`SKEID_CONFIG_RELOAD_INTERVAL`.
+`SKEID_CONFIG_RELOAD_INTERVAL`, `SKEID_FRONTEND_COUNT`.
 
 ## Usage
 
@@ -270,7 +297,7 @@ upstream's usage block verbatim (frames merged key by key, later wins — counts
 totals, never summed) and prices it through the same `metrics.normalize` call as a
 non-streamed answer, on every face (skeid #41).
 
-Backend selection in `_configure_usage_store` is inference-first: explicit `backend` wins,
+Backend selection in `UsageStore->normalize_config` is inference-first: explicit `backend` wins,
 otherwise `sqlite_path`/`path`/`db_path` → sqlite, `dbi:Pg:` dsn → postgresql, `log_path` →
 jsonlog. `password_env` reads the password from the environment so it stays out of the file.
 Schema is applied from `share/sql/usage_events.<backend>.sql` when `auto_migrate` (default on).
@@ -283,11 +310,13 @@ never blocks the event loop on a database.
 
 ## Admin API
 
-`/skeid/*` under bearer auth against `admin_api_key`:
+`/skeid/*` under bearer auth against `admin_api_key` (constant-time, `Skeid::Secret`):
 `GET /skeid/nodes`, `POST /skeid/nodes`, `POST /skeid/nodes/:id/health`,
 `GET /skeid/metrics/nodes`, `GET /skeid/usage`, `GET /skeid/config` (`reload_status`: last
-reload error, `failed_at`, `failures`). Public `GET /health` carries `config_reload` without the
-message and stays `status: ok` while a reload fails.
+reload error, `failed_at`, `failures`). `GET /skeid/registry/snapshot` sits outside that block:
+it takes the registry read key or the admin key and answers 404 unless `registry.enabled`.
+Public `GET /health` carries `config_reload` without the message and stays `status: ok` while a
+reload fails.
 
 ## Traps
 

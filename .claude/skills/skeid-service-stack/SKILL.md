@@ -13,7 +13,9 @@ lifecycle**) is in `CONTEXT.md`.
 
 The container boots with an AppRole `role_id` + `secret_id` in its environment, logs into
 OpenBao, keeps the resulting token **in memory only**, and renews it on a timer. Provider keys
-and customer keys are read from OpenBao per use and never persisted. If renewal fails the
+are read from OpenBao when a node needs one, cached in memory only, and never persisted.
+Customer keys are never looked up at all: a caller's identity is the digest of the key it
+presented (`skeid keyid`). If renewal fails the
 process dies and the orchestrator restarts it, which forces a fresh login. Nothing here is an
 optimisation target: a disk cache of the token, a key written to a config file, or a "reuse
 the old token if renewal fails" fallback each destroy the property the design exists for.
@@ -89,13 +91,15 @@ docker compose exec openbao bao status
 
 `init-skeid.sh` (root token, one shot): enables `approle`, creates role `skeid-service`, prints
 `role_id` + `secret_id`, writes the read policy for `secret/skeid/*`, stores provider keys from
-`SKEID_OPENAI_KEY` / `SKEID_ANTHROPIC_KEY`, seeds demo **Customer key IDs** (`alice`, `bob`,
-`charlie`, `testuser123`), and applies `usage_schema.sql`.
+`SKEID_OPENAI_KEY` / `SKEID_ANTHROPIC_KEY`, seeds demo customer keys under
+`secret/skeid/customer/{alice,bob,charlie,testuser123}` (Skeid itself never reads these), and
+applies `usage_schema.sql`.
 
 The printed `role_id`/`secret_id` go into a **local, untracked** `.env`; only `.env.example`
-is committed. The dev root token, the Postgres password and the demo customer keys in the
-compose file and init script are placeholders — a real deployment overrides every one of them
-and does not run OpenBao in dev mode.
+may be committed — `git ls-files examples/service/.env` must print nothing (ADR 0003). The dev
+root token, the Postgres password and the demo customer keys in the compose file and init script
+are placeholders — a real deployment overrides every one of them and does not run OpenBao in dev
+mode.
 
 ## ENV surface
 
@@ -105,12 +109,19 @@ and does not run OpenBao in dev mode.
 | `OPENBAO_ROLE_ID` / `OPENBAO_SECRET_ID` | broker | AppRole credentials; both present ⇒ broker is wired |
 | `OPENBAO_VERIFY_SSL` | broker | `0` disables TLS verification — dev vault only |
 | `SKEID_ADMIN_API_KEY` | control plane | bearer token for `/skeid/*` |
-| `SKEID_USAGE_DB` | control plane | sqlite path / DSN for the usage store |
-| `SKEID_USAGE_DB_PASSWORD` | usage store | target of `password_env` in the YAML |
-| `SKEID_REMOTE_KEY_REF` | deployment | key reference a node config points at |
+| `SKEID_USAGE_DB` | control plane | sqlite path for the usage store |
+| `SKEID_USAGE_DB_PASSWORD` | example stack | what its `usage_store.password_env` names |
+| `SKEID_REMOTE_KEY_REF` | example stack | key reference a node config points at |
 | `SKEID_ROUTE_WAIT_TIMEOUT_MS` / `SKEID_ROUTE_WAIT_POLL_MS` | routing | saturation wait defaults |
+| `SKEID_FRONTEND_COUNT` | routing | Skeid hosts sharing the nodes (ADR 0012), default 1 |
+| `SKEID_CAPACITY_MAX_AGE_MS` | admission | capacity reading lifetime, default 5000 |
+| `SKEID_CONFIG_RELOAD_INTERVAL` | control plane | `config_loader` re-run interval in seconds, default 1 |
 | `SKEID_TRUST_KEY_ID_HEADER` | proxy | believe the client's `x-skeid-key-id` — only behind an authenticating gateway |
 | `SKEID_UPSTREAM_POOL` | proxy | upstream connection pool size (default 100) |
+
+Secrets the config needs are named, never written: a node's `api_key_env`,
+`admin.api_key_env`, a usage store's `password_env`, and the registry's `secret_env` /
+`read_key_env`.
 
 **Precedence trap:** an ENV default only survives while no config file sets the same thing.
 `reload_config` rewrites `admin_api_key` from the file on every reload, and in config-managed
@@ -135,15 +146,19 @@ nodes:
 
 ## Usage schema
 
-`share/sql/usage_events.postgresql.sql` and `usage_events.sqlite.sql` are the shipped schemas;
-`examples/service/usage_schema.sql` is the copy the init container applies. `auto_migrate`
-(default on) applies the shipped file at configure time, so the init step is a convenience,
-not a requirement. Reports: `bin/skeid usage --json`, or `GET /skeid/usage`.
+`share/sql/usage_events.postgresql.sql` and `usage_events.sqlite.sql` are the shipped schemas.
+`examples/service/usage_schema.sql`, which the init container applies, is an older variant with
+report views and without the later columns (`requested_model`, the cache counts and costs,
+`content_bytes`). `auto_migrate` (default on) applies the shipped file and adds any missing
+column on `prepare`, so the init step is a convenience, not a requirement. Reports:
+`bin/skeid usage --json`, or `GET /skeid/usage`.
 
 ## Docker image
 
 Built and pushed by `dzil release` via `run_after_release` (see the release rule — never run
 that yourself). Tags: `raudssus/langertha-skeid:<version>`, `:<major>`, `:latest`. Source
-overrides for unreleased Langertha/Knarr go through `SKEID_DOCKER_BUILD_ARGS`, documented at
-the top of `dist.ini`. For a local test image: `docker build -t raudssus/langertha-skeid:test .`
-— which is the tag the compose file's `skeid` service actually references.
+overrides for an unreleased Langertha go through `SKEID_DOCKER_BUILD_ARGS`
+(`--build-arg LANGERTHA_SRC=…`), documented at the top of `dist.ini`; its `KNARR_SRC` example is
+a leftover — Skeid no longer depends on Knarr. For a local test image:
+`docker build -t raudssus/langertha-skeid:test .` — which is the tag the compose file's `skeid`
+service actually references.

@@ -50,3 +50,9 @@ above.
   added.
 - Skill content is now duplicated nowhere, which means a wrong skill is wrong everywhere. That
   is the trade being made: one place to fix instead of three places to disagree.
+
+## Update: agents and repo skills since
+
+The release checker became `skeid-release-manager`, which also owns commits, `Changes` and moving
+cards to done; workers leave a commit-ready tree. A fifth repo skill, `skeid-profiling`
+(Devel::NYTProf), sits beside the four above. How shared skills arrive is ADR 0018.

@@ -1,6 +1,6 @@
 # ADR 0001 — One upstream call shape; all client formats are translated
 
-- Status: accepted
+- Status: accepted — error translation extended to the Ollama face (skeid #47, see Update)
 - Date: 2026-08-08
 - Tags: protocols, translation, routing, backfill
 
@@ -70,3 +70,12 @@ A translated stream fails in one of two places, and each has its own form:
 The in-band frame is presentation and belongs to the face. The failure itself is not: a cut
 stream is `ok = 0` on the usage event and on `request.finish` whichever face the client called
 (ADR 0004). The OpenAI pass-through and the Ollama stream get no in-band error frame yet.
+
+## Update (skeid #47, #57): the Ollama face translates errors too
+
+The k224 update above left the Ollama face on the OpenAI error envelope and its stream without
+an in-band error. Both changed: every error on `/api/*` is rendered as Ollama's
+`{"error": "<message>"}` with the failure's HTTP status
+(`Langertha::Skeid::Protocol::Ollama->error_body`), and a translated Ollama stream that fails
+after it opened ends with an Ollama error line and no `done: true` line. Only the OpenAI
+pass-through still has no in-band error frame.

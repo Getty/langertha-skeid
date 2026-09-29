@@ -1,6 +1,6 @@
 # ADR 0002 — Eligibility and admission are two decisions, with two failure codes
 
-- Status: accepted
+- Status: accepted — capacity signal widened by ADR 0009; per-tier waits and 403 refusals by ADR 0008 (see Update)
 - Date: 2026-08-08
 - Tags: routing, admission, capacity, backfill
 
@@ -52,3 +52,14 @@ The failures map to different responses:
   failures would make a transient full queue look like an outage with nothing to flip it back.
   Whether an error-driven demotion should exist is deliberately left open, and needs its own
   ADR before any error handler writes to the health flag.
+
+## Update: what later ADRs changed
+
+- `inflight` is no longer the only capacity signal. ADR 0009 adds capacity probes, which may
+  only narrow what `max_conns` allows; admission is `inflight < worker share` **and** any
+  current capacity reading (`_node_can_take`). Skeid can now learn real upstream capacity where
+  a node publishes it.
+- With aliases (ADR 0008) the wait is per tier (`wait_ms`, default 0; an alias-less model keeps
+  `route_wait_timeout_ms`). `503` means no tier had an eligible node, `429` that some tier did
+  and none admitted. A key's policy adds a third answer, `403 permission_error`, which is not a
+  capacity code.

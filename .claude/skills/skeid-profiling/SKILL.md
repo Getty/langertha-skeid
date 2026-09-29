@@ -9,6 +9,12 @@ allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 questions and the second one is only worth asking once the first has found something: profile
 after a benchmark has shown a path is expensive, not instead of one.
 
+**`bench/nytprof-digest.pl` is not in the tree.** It was never committed; it survives only in
+the stash (`git show 'stash@{0}^3:bench/nytprof-digest.pl'`), as do the 2026-08-15 reports this
+skill quotes. Restore it to `bench/` before following the digest steps below; without it, read
+the profile with `nytprofcsv` / `nytprofhtml` and set the event loop and compile time aside by
+hand.
+
 ## Profiling a server, not a script
 
 NYTProf profiles a process from start to exit. A server does not exit, so three things have to
@@ -91,7 +97,7 @@ thousands of times. Skeid's own hottest code is the upstream chunk handler in
 **The conclusion to draw from a result like that is not "optimise Skeid's translator".** It is
 that the remaining cost lives in per-chunk framework work, and the only lever that moves it is
 doing fewer, larger writes — which trades against inter-token latency, a number `llmbench`
-already reports. Measure both sides before touching it.
+does not report yet (only TTFT and total). Measure both sides before touching it.
 
 ## Reading patterns — what each shape means
 

@@ -1,6 +1,6 @@
 # ADR 0009 — Node capacity is probed, not only counted
 
-- Status: accepted — implemented (`inflight`, `ratelimit`, `prometheus`, `custom`)
+- Status: accepted — implemented (skeid #13: `inflight`, `ratelimit`, `prometheus`, `custom`); `registry` probe and multi-source readings added by ADR 0017
 - Date: 2026-08-08
 - Tags: admission, capacity, observability, multi-instance
 
@@ -126,3 +126,10 @@ while it carries a pending backoff or is younger than the longer of the two sour
 intervals. A
 probe that fails or stops forgets only its own reading, so a `429` backoff recorded from a
 response outlives it. See ADR 0017, "Staleness and combining with other readings".
+
+## Update: probe names
+
+The probe the Decision table calls `ratelimit_headers` is named `ratelimit`, and it needs no
+configuration: the proxy reads rate-limit headers off every node's responses, and
+`capacity.probe: ratelimit` starts nothing. ADR 0017 adds a fifth probe, `registry`, which reads
+a downstream Skeid's signed snapshot.

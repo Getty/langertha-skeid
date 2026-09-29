@@ -51,3 +51,8 @@ Rules that make the numbers mean something:
   critical path, where overhead is visible instead of hidden under generation time.
 - The harness can saturate a shared machine. Its resource discipline is a house rule, not a
   suggestion in a README.
+
+## Update: what `llmbench` reports
+
+`llmbench` reports TTFT and total latency as p50/p95/p99, plus requests/s and tokens/s. It does
+not measure inter-token latency; a report that needs it has to derive or add it.

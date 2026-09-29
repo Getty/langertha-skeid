@@ -1,6 +1,6 @@
 # ADR 0008 — Routing policy is per key, resolved at config load
 
-- Status: accepted — implemented (node tags, aliases and tiers, per-key policy assignment)
+- Status: accepted — implemented (skeid #12: node tags, aliases and tiers, per-key policy assignment); key id width amended by ADR 0016
 - Date: 2026-08-08
 - Tags: routing, policy, config, tiers, aliases
 

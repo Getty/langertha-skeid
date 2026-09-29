@@ -41,20 +41,34 @@ usage frame goes through `metrics.normalize`, skeid #41); images are translated 
 
 `Langertha::Skeid::Protocol::Anthropic`
 - request → OpenAI: `system` (string or block array) becomes a leading system message; content
-  blocks fold to text; `tool_use` blocks become `tool_calls` on an assistant message;
-  `tool_result` blocks become their own `role => 'tool'` message with `tool_call_id`; `tools`
-  and `tool_choice` go through `Langertha::Tool->from_list` / `Langertha::ToolChoice->from_hash`
-  and out via `->to_openai`.
+  blocks fold to text, except that `image` blocks (base64 or url source) make an OpenAI content
+  array with `image_url` parts in client order — a Files API image is a `400`; `tool_use`
+  blocks become `tool_calls` on an assistant message; `tool_result` blocks become their own
+  `role => 'tool'` message with `tool_call_id`, their images lifted into one user message after
+  the tool messages; `tools` and `tool_choice` go through `Langertha::Tool->from_list` /
+  `Langertha::ToolChoice->from_hash` and out via `->to_openai`. A provider built-in tool
+  (`web_search_*`, `bash_*`, …) is a `400`, never forwarded.
 - response → Anthropic: content becomes a `text` block, tool calls become `tool_use` blocks via
-  `Langertha::ToolCall->to_anthropic_block`, `finish_reason` maps
-  `tool_calls → tool_use`, `length → max_tokens`, everything else → `end_turn`, usage becomes
-  `input_tokens` / `output_tokens`.
+  `Langertha::ToolCall->to_anthropic_block`, `finish_reason` maps `tool_calls → tool_use` (also
+  `stop` when tool calls are present), `length → max_tokens`, everything else → `end_turn`,
+  usage becomes `input_tokens` / `output_tokens`.
 
 `Langertha::Skeid::Protocol::Ollama`
+- request → OpenAI: `options.temperature` / `options.num_predict` lift to `temperature` /
+  `max_tokens`; `format` becomes `response_format` (`json_object`, or `json_schema` named
+  `ollama_format`); a message's raw base64 `images` become `data:` `image_url` parts typed by
+  magic bytes; tool round-trips are translated to OpenAI shape. `/api/generate`
+  (`generate_request_to_openai`) turns `system` + `prompt` into one chat conversation.
 - response → Ollama: `message.content`, optional `message.tool_calls` via `->to_ollama`,
-  `done: 1`, `done_reason` from `finish_reason`, token counts as `prompt_eval_count` /
-  `eval_count`.
+  `done` as JSON `true` (not `1`, which typed clients reject), `done_reason` from
+  `finish_reason`, token counts as `prompt_eval_count` / `eval_count`; `/api/generate` answers
+  in generate's shape (`response`, …).
 - `/api/tags` synthesises a model list from the node inventory; `/api/ps` is a stub `[]`.
+
+Errors take the client's shape too: `_render_error` reads the stash key `skeid.error_format`
+(set by the `/v1/messages` route and the `/api` block) and renders the Anthropic envelope, the
+Ollama `{"error": "<string>"}`, or the OpenAI error object. Each face's manifest capability list
+lives with its translator (`manifest_endpoint`; OpenAI's in `Langertha::Skeid::Protocol`).
 
 **Tool calls are Langertha's job, not Skeid's.** `Langertha::Tool`, `Langertha::ToolCall`,
 `Langertha::ToolChoice` own every format's tool shape, including recovering Hermes-style
@@ -67,11 +81,13 @@ instead, and pin the new `Langertha` version in `cpanfile`.
 `_endpoint_url_for_node($base, $path)` — appends `/v1` unless the node url already ends in
 `/v1`. A node url is a base, never a full endpoint.
 
-`_forward_headers` passes the client's headers through minus `host`, `content-length`,
-`transfer-encoding`, `accept-encoding`. `_inject_node_auth` then overrides `Authorization`:
+`_forward_headers` passes the client's headers through minus the hop-by-hop set
+(`connection`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `te`, `trailer`,
+`transfer-encoding`, `upgrade`) and `host`, `content-length`, `accept-encoding`.
+`_inject_node_auth_async` then overrides `Authorization`:
 
-1. **KeyBroker**, if the node has `api_key_ref` — resolved per request, in memory
-   (`refresh` first when `needs_refresh`).
+1. **KeyBroker**, if the node has `api_key_ref` — resolved per request through `key_async`
+   (in-memory cache, coalesced misses; never `resolve_key` on the request path).
 2. **`api_key_env`** fallback — key from that environment variable.
 3. Neither → the client's own `Authorization` survives (pass-through deployments).
 
@@ -81,9 +97,10 @@ the reference or the key into the message.
 
 ## Caller identity
 
-The **Customer key ID** is derived from the key the caller presented: `k_<12 hex>` from a SHA-1
-of it (`Langertha::Skeid->key_id_for_key`), or `anonymous`. The raw key is never stored,
-logged, or reported — the hash exists precisely so metering works without keeping it.
+The **Customer key ID** is derived from the key the caller presented (`Authorization` bearer,
+else `x-api-key`): `k_` plus its full SHA-1 hex (`Langertha::Skeid->key_id_for_key`, ADR 0016),
+or `anonymous`. A legacy 12-hex id in the config still matches by prefix. The raw key is never
+stored, logged, or reported — the hash exists precisely so metering works without keeping it.
 
 `x-skeid-key-id` (or `x-api-key-id`) overrides that **only** when
 `routing.trust_key_id_header` is set, for deployments that authenticate callers before Skeid
@@ -93,21 +110,29 @@ suggestion. `t/26-key-policies.t` fails if that check goes away.
 
 `x-request-id` is honoured if present, otherwise a `req_<ms>_<rand>` id is generated.
 
-## Streaming mechanics (OpenAI only)
+## Streaming mechanics
 
-`_proxy_openai_stream` writes upstream bytes straight through. It parses `data: {…}` lines
-only to accumulate `choices[0].delta.content` size and any `usage` object, then writes one
-usage event on completion. Rules:
+`_proxy_openai_stream` serves every face. The upstream body is read raw
+(`Proxy::RelayContent`, so an unchunked `text/event-stream` is not swallowed by Mojolicious's
+own SSE parser); `data: {…}` lines are parsed — across read boundaries — for content size and
+the verbatim `usage` block, then one usage event is written on completion. Without a
+translator the bytes are relayed as they came; with one (`Protocol::*::Stream`) each parsed
+chunk goes through `->delta` and the client gets the translator's framing and content type.
+Rules:
 
-- Never rewrite a chunk. The relay is byte-transparent; anything else breaks client parsers
-  and makes TTFT unmeasurable.
+- Never rewrite a chunk on the OpenAI face. The relay is byte-transparent; anything else breaks
+  client parsers and makes TTFT unmeasurable.
 - `content-length`, `transfer-encoding` and `content-encoding` are stripped from the relayed
-  headers; `x-skeid-node` is added.
-- Headers are sent on the first chunk. After that an upstream error can no longer become a
-  JSON error body — it can only truncate the stream. Both paths must still call
-  `request.finish` exactly once.
-- Many upstreams only emit `usage` when asked (`stream_options.include_usage`). Missing usage
-  is expected, not an error: the event is written with zeroed tokens.
+  headers (a translated stream also drops `content-type`); `x-skeid-node` is added.
+- Chunks go out through a drain queue, not one `write_chunk` per read — a dynamic response
+  with no drain callback ends when its queue empties.
+- Headers are sent on the first chunk. On a translated face an upstream error status before
+  that is a plain HTTP error in the client's shape; after it the failure travels in-band (an
+  Anthropic `error` event, an Ollama error line) and the stream is `ok = 0`, as is a body cut
+  short of its own framing. Every path calls `request.finish` exactly once.
+- Anthropic and Ollama streams are sent upstream with `stream_options.include_usage`; the
+  OpenAI face forwards the client's body as is. Missing usage is expected, not an error: the
+  event is written with zeroed tokens.
 
 ## Engine IDs
 
