@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-09-29T17:07:27Z
+claimed_by: skeid-worker-context
+class: standard
+completed: 2026-09-29T17:07:22Z
+created: 2026-09-29T16:54:09Z
+id: 61
+priority: medium
+started: 2026-09-29T16:54:27Z
+status: done
+tags:
+- docs
+- skills
+- adr
+title: 'Docs: CONTEXT.md, ADRs, skeid-* skills and CLAUDE.md repo map match the code'
+updated: 2026-09-29T17:07:27Z
+---
+
+Cross-check CONTEXT.md vocabulary, ADR status lines (implemented? superseded?), the five repo-owned skills (.claude/skills/skeid-*) and the CLAUDE.md repo map against the current code. Fix stale statements; report anything that looks like a real code bug as a note instead of fixing it.
+
+2026-09-29 16:59 Audit done, editing. Findings outside doc scope: (1) examples/service/.env is STILL tracked in HEAD (commit 78bff8d only edited it, never git rm --cached) -- holds OpenBao root token + AppRole role/secret id; contradicts ADR 0003 and .gitignore line 47. Needs git rm --cached by the release manager (+ rotate if those creds were ever real). (2) bench/nytprof-digest.pl, which skeid-profiling is built around, is not in the tree -- only in stash@{0} ('skeid-wip-leiche-2026-09-10', untracked-files commit 0142283) together with the 2026-08-15 docs/bench profiling reports. Decision for perf-tester/dispatcher: restore it or drop the skill's dependence. (3) examples/service/usage_schema.sql lacks requested_model, cached_tokens, cache_write_tokens, content_bytes, cost_cache_*; DBI prepare heals it via _add_missing_columns when auto_migrate is on. (4) Protocol/Anthropic.pm DESCRIPTION still says streamed tool calls are not re-emitted as tool_use blocks; Anthropic::Stream does that since 94d88c1 -- for the POD card k59. (5) Skeid.pm _load_registry has 'require Langertha::Skeid::Registry' inside a method (house rule: use at top).
+
+2026-09-29 17:05 Also found: dist.ini header comment and Dockerfile still carry KNARR_SRC although Skeid dropped Knarr (12e7504) -- skill now calls it a leftover. The example stack seeds customer keys into OpenBao (secret/skeid/customer/*) that no Skeid code reads; any presented key is accepted and routed under default_policy -- by design per ADR 0008, but the example suggests otherwise (examples/ lane).
+
+2026-09-29 17:05 Done, docs only. CONTEXT.md: route key incl. tags/deny tags; eligibility incl. selector/denied tags; saturation per tier; health vs probes; API format adds /v1/models, /api/ps and the word 'face'; new terms Cached tokens, Customer name, Provider manifest, Shared inflight scoreboard (flagged as proposed, ADR 0014); Customer key ID = k_+full SHA-1 (ADR 0016); config reload = loader, no-op, all-or-nothing, back-off; relationship fixed (key broker is never consulted for a customer key id); new ambiguity 'registry'. ADRs: status lines for 0001, 0002, 0005, 0008-0012, 0015 now name the card and the amending ADR; short Update notes on 0001 (Ollama errors, #47), 0002 (probes, tiers, 403), 0005 (KeyBroker off the loop, #3), 0006 (release-manager, skeid-profiling), 0007 (llmbench reports no inter-token latency), 0009 (ratelimit naming, registry), 0015 (format and image_input, #42/#46). 0013, 0014, 0016-0018 and the scoreboard spec checked and left as is. Skills: skeid-core (module map, frontend divisor, cache bound, once-per-selection, registry probe, tighter-wins, probe key restart, dispatch list, config sections, normalize_config, snapshot route, Secret); skeid-protocols (image/tool_result/built-in-tool handling, Ollama request side, done:true, error shapes, hop-by-hop headers, _inject_node_auth_async/key_async, full-digest key id, streaming covers translated faces); skeid-service-stack (customer keys never read, .env check, missing ENV vars, SKEID_USAGE_DB sqlite-only, stale example schema, Knarr leftover); skeid-benchmark (workers); skeid-profiling (digest script missing from tree, llmbench claim). CLAUDE.md: repo map + skill line. Verified: every cited path and sub grep-checked against lib/; no test reads these files; prove -lr t/ refused by loadguard (another worker's run occupies the slot), not needed for a docs-only change.
+
+2026-09-29 17:07 Committed as bb4da62; example .env untracked separately in 66abcc3
