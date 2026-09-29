@@ -138,8 +138,9 @@ Builds the L<Mojolicious> application. Options:
 =item * C<skeid> -- an existing L<Langertha::Skeid> to serve instead; C<config_file> and the
 OpenBao detection below are then not used.
 
-=item * C<admin_api_key> -- sets L<Langertha::Skeid/admin_api_key> after the config is loaded.
-The next changed config sets it from the config again.
+=item * C<admin_api_key> -- the explicit admin API key (L<Langertha::Skeid/set_admin_api_key>):
+it wins over the config's, on every reload. Empty leaves the key to the config and
+C<SKEID_ADMIN_API_KEY>.
 
 =item * C<worker_count> -- how many prefork workers share the nodes (L<Langertha::Skeid/worker_count>),
 set before any admission or probe timer reads it.
@@ -175,10 +176,12 @@ sub build_app {
     warn "Failed to initialize OpenBao KeyBroker: $@" if $@;
   }
 
+  # The explicit admin API key goes into new(), so it is in force for the first config already
+  # (a registry block checks for it); an existing Skeid gets it set (skeid k64).
+  push @skeid_opts, admin_api_key => $opts{admin_api_key}
+    if defined($opts{admin_api_key}) && length($opts{admin_api_key});
   my $skeid = $opts{skeid} || Langertha::Skeid->new(@skeid_opts);
-  if (exists $opts{admin_api_key}) {
-    $skeid->admin_api_key(defined($opts{admin_api_key}) ? $opts{admin_api_key} : '');
-  }
+  $skeid->set_admin_api_key($opts{admin_api_key}) if exists $opts{admin_api_key};
   # How many processes share these nodes. Set before anything reads max_conns or starts a
   # timer, since both are divided by it (ADR 0010).
   if (defined $opts{worker_count} && $opts{worker_count} > 0) {

@@ -293,10 +293,17 @@ admin:
 # admin_api_key: ... / admin_api_key_env: ...   # top-level spellings, same meaning
 ```
 
-With a config file, the admin key comes from the config only: if none of these is set,
-`/skeid/*` answers `404`. The environment variable `SKEID_ADMIN_API_KEY` is used on its own
-only when Skeid runs without a config file, and `serve --admin-api-key` is overwritten by the
-next config change that is applied. Name the variable in the config.
+The admin key comes from the first of these that has one:
+
+1. `serve --admin-api-key` (or `build_app(admin_api_key => ...)`): wins over the config, on
+   every reload.
+2. The config: the first of the four spellings above that is present decides. Set empty, or
+   naming an unset variable, it turns the admin API off.
+3. `SKEID_ADMIN_API_KEY`, when the config names none of them.
+
+With none of them `/skeid/*` answers `404`. Every reload re-applies this order, so removing
+the key from the config falls back to `SKEID_ADMIN_API_KEY`. A key on the command line shows up
+in the process list; in production, name the variable in the config.
 
 ### Environment
 
@@ -308,7 +315,7 @@ next config change that is applied. Name the variable in the config.
 | `SKEID_TRUST_KEY_ID_HEADER` | off | default for `routing.trust_key_id_header` (`1`/`true`/`yes`/`on`) |
 | `SKEID_CAPACITY_MAX_AGE_MS` | `5000` | how long a capacity reading is trusted (`0`: forever) |
 | `SKEID_USAGE_DB` | — | SQLite path used when the config has no `usage_store` |
-| `SKEID_ADMIN_API_KEY` | — | admin key when no config file is used (see above) |
+| `SKEID_ADMIN_API_KEY` | — | admin key when the config names none (see above) |
 | `SKEID_UPSTREAM_POOL` | `100` | upstream connection pool size |
 | `SKEID_CONFIG_RELOAD_INTERVAL` | `1` | seconds between runs of a Perl `config_loader` (not used for files) |
 | `OPENBAO_ADDR` | `http://127.0.0.1:8200` | OpenBao address |

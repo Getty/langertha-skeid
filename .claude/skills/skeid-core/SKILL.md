@@ -276,8 +276,12 @@ manifest:   { enabled, public_url, … }   # provider manifest, per-key grants i
 registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
 ```
 
-In config-managed mode an absent `admin_api_key` **disables** the admin API (`/skeid/*` then
-answers 404, not 401 — absence of the feature, not a failed login). Nodes are replaced
+The admin key is resolved on every applied config as explicit (`serve --admin-api-key`,
+`build_app(admin_api_key)`, `new(admin_api_key)`, `set_admin_api_key`) > config (first of the
+four spellings present; empty disables) > `SKEID_ADMIN_API_KEY` > off (skeid k64). Off means
+`/skeid/*` answers 404, not 401 — absence of the feature, not a failed login.
+
+Nodes are replaced
 wholesale when the `nodes:` section changes: anything pushed through the admin API is lost
 then. That is deliberate — the file is the declared state. An unchanged `nodes:` section keeps
 the list, its inventory generation (so probes keep running) and admin-set health.

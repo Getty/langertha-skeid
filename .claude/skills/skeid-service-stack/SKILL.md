@@ -130,10 +130,9 @@ Secrets the config needs are named, never written: a node's `api_key_env`,
 `admin.api_key_env`, a usage store's `password_env`, and the registry's `secret_env` /
 `read_key_env`.
 
-**Precedence trap:** an ENV default only survives while no config file sets the same thing.
-`reload_config` rewrites `admin_api_key` from the file on every reload, and in config-managed
-mode an absent key means empty — which disables `/skeid/*` (404). ENV plus config file is not
-"whichever is set wins".
+**Precedence:** a value in the config wins over its ENV default. The admin key is resolved on
+every reload as `serve --admin-api-key` > the config's key (any of its four spellings; set empty
+it disables `/skeid/*`, 404) > `SKEID_ADMIN_API_KEY` > off (skeid k64).
 
 ## Node config with keys
 

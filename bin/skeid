@@ -308,9 +308,10 @@ config in force and is warned about once (L<Langertha::Skeid/maybe_reload_config
 
 =opt --admin-api-key
 
-Admin API key, set after the config is loaded. A later change to the config file sets the admin
-key from the config again (absent there: admin API off), so with a config file prefer
-C<admin.api_key_env> in it.
+Admin API key. It wins over any key the config names, on every reload; without it the key comes
+from the config, else from C<SKEID_ADMIN_API_KEY> (see L<Langertha::Skeid/admin>). A key on the
+command line is visible in the process list, so in production prefer C<admin.api_key_env> in
+the config.
 
 =opt --workers, -w
 

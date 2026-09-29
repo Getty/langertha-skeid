@@ -392,6 +392,13 @@ Revision history for Langertha-Skeid
       the log path. New --log-path (alias --jsonlog) builds a jsonlog store
       from the command line, --backend takes jsonlog, and the jsonlog report
       carries log_path
+    - The admin API key now has one order that every config reload re-applies:
+      an explicit key (skeid serve --admin-api-key, build_app admin_api_key,
+      new admin_api_key, the new set_admin_api_key) wins over the config's key
+      (any of its four spellings; empty turns the admin API off), which wins
+      over SKEID_ADMIN_API_KEY; with none the admin API is off. A CLI key is
+      no longer replaced by the next changed config, and SKEID_ADMIN_API_KEY
+      now also works alongside a config file that names no key
 
 0.003     2026-05-16 17:10:00Z
 

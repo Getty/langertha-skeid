@@ -227,7 +227,8 @@ through the same loader. The top-level keys below are every one Skeid reads -- a
 the file is ignored. A reload is all or nothing: a config that fails anywhere leaves the previous
 one in force, and is reported by L</reload_status>.
 
-What a section's B<absence> means differs, and it is not the default value:
+A reload makes the running config equal to the file (skeid k65), as a restart with that file
+would:
 
 =over 4
 
@@ -239,7 +240,9 @@ until the process restarts.
 
 =item * C<routing>: each key that is absent keeps its current value.
 
-=item * The admin key, C<registry> and C<manifest>: absent means off.
+=item * The admin key: absent falls back to C<SKEID_ADMIN_API_KEY>, else off -- see L</admin>.
+
+=item * C<registry> and C<manifest>: absent means off.
 
 =back
 
@@ -346,10 +349,26 @@ The defaults come from L</ENVIRONMENT> when set there.
   admin:
     api_key_env: SKEID_ADMIN_API_KEY   # or api_key: "..."
 
-The key for the C</skeid/*> admin API. The first of C<admin_api_key>, C<admin_api_key_env>,
-C<admin.api_key> and C<admin.api_key_env> that is present decides; none of them disables the
-admin API (C<404>), whatever C<SKEID_ADMIN_API_KEY> says. A variable named here is read when the
-config is applied, so a changed value takes effect with the next changed config.
+The key for the C</skeid/*> admin API. It comes from the first of these that has one
+(skeid k64):
+
+=over 4
+
+=item 1. An explicit key: C<skeid serve --admin-api-key>, C<< build_app(admin_api_key => ...) >>,
+an C<admin_api_key> passed to C<new>, or L</set_admin_api_key>.
+
+=item 2. The config: the first of C<admin_api_key>, C<admin_api_key_env>, C<admin.api_key> and
+C<admin.api_key_env> that is present decides -- set empty, or naming an unset variable, it turns
+the admin API off.
+
+=item 3. C<SKEID_ADMIN_API_KEY>, when the config names none of the four.
+
+=back
+
+With none of them the admin API is off (C<404>). Every applied config re-resolves the key in
+this order, so a reload never replaces an explicit key, and removing the key from the config
+falls back to the variable. A variable is read when the config is applied, so a changed value
+takes effect with the next changed config.
 
 =head2 registry
 
@@ -401,8 +420,7 @@ Default of L</frontend_count> (1).
 
 =env SKEID_ADMIN_API_KEY
 
-Default of L</admin_api_key>. Only in effect without a config source: a config that names no
-admin key disables the admin API.
+The admin API key when neither an explicit key nor the config names one; see L</admin>.
 
 =env SKEID_USAGE_DB
 
@@ -422,7 +440,8 @@ Default of L</config_reload_interval> (1 second).
 =head1 ATTRIBUTES
 
 Every attribute can be passed to C<new>. Those a config sets are overwritten by the next changed
-config (see L</CONFIGURATION>).
+config that sets them (see L</CONFIGURATION>) -- except L</admin_api_key>, which C<new> takes as
+an explicit key that outranks the config.
 
 =attr nodes
 
@@ -678,19 +697,43 @@ has query_usage_report => (
 
 =attr admin_api_key
 
-The bearer token of the C</skeid/*> admin API; empty disables it, which the proxy answers with
-C<404> (default C<SKEID_ADMIN_API_KEY>, else empty). Set from the config -- see L</admin> --
-whenever a config is applied.
+The bearer token of the C</skeid/*> admin API in force; empty disables it, which the proxy
+answers with C<404>. Passed to C<new> it is an explicit key (see L</set_admin_api_key>) that
+wins over the config; otherwise it is resolved from the config and C<SKEID_ADMIN_API_KEY>
+whenever a config is applied -- see L</admin> for the order. Read it here; set it through
+L</set_admin_api_key>, since a value written through this accessor lasts only until the next
+changed config.
 
 =cut
 
 has admin_api_key => (
   is      => 'rw',
-  default => sub {
-    return (defined($ENV{SKEID_ADMIN_API_KEY}) && length($ENV{SKEID_ADMIN_API_KEY}))
-      ? $ENV{SKEID_ADMIN_API_KEY}
-      : '';
-  },
+  builder => '_build_admin_api_key',
+);
+
+sub _build_admin_api_key { $_[0]->_env_admin_api_key }
+
+sub _env_admin_api_key {
+  return (defined($ENV{SKEID_ADMIN_API_KEY}) && length($ENV{SKEID_ADMIN_API_KEY}))
+    ? $ENV{SKEID_ADMIN_API_KEY}
+    : '';
+}
+
+# The admin API key given explicitly -- to new(), to build_app, or by `skeid serve
+# --admin-api-key` (skeid k64). It outranks the config, so a reload re-resolves the key under
+# it instead of overwriting it; empty means none was given.
+has _explicit_admin_api_key => (
+  is       => 'rw',
+  init_arg => undef,
+  default  => sub { '' },
+);
+
+# The admin API key the config (or SKEID_ADMIN_API_KEY under it) resolved to when it was last
+# applied. Kept apart from the explicit key so that clearing that one falls back to it at once.
+has _config_admin_api_key => (
+  is       => 'rw',
+  init_arg => undef,
+  builder  => '_build_admin_api_key',
 );
 
 =attr key_broker
@@ -1013,7 +1056,10 @@ my %FALLBACK_ENGINE_IDS = map { $_ => 1 } qw(
 );
 
 sub BUILD {
-  my ($self) = @_;
+  my ($self, $args) = @_;
+  # A key handed to new() is explicit: the config applied next must not replace it.
+  $self->_explicit_admin_api_key("$args->{admin_api_key}")
+    if defined($args->{admin_api_key}) && length($args->{admin_api_key});
   if ($self->has_config_loader || $self->has_config_file) {
     $self->reload_config;
   }
@@ -1288,7 +1334,8 @@ sub pricing_for_model {
 # from an emptied manifest map while routing already ran on the new policies.
 my @CONFIG_STATE = qw(
   model_aliases policies default_policy key_policies key_names nodes
-  route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count admin_api_key
+  route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
+  admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
@@ -1562,26 +1609,8 @@ sub _apply_config {
     }
   }
 
-  # The admin key may be named directly or handed over by environment variable, the same way
-  # usage_store takes password_env -- a deployment should not have to write the key into a
-  # file that gets mounted into a container.
-  if (exists $cfg->{admin_api_key}) {
-    $self->admin_api_key(defined($cfg->{admin_api_key}) ? "$cfg->{admin_api_key}" : '');
-  } elsif (defined $cfg->{admin_api_key_env}) {
-    $self->admin_api_key($ENV{$cfg->{admin_api_key_env}} // '');
-  } elsif (ref($cfg->{admin}) eq 'HASH') {
-    my $admin = $cfg->{admin};
-    if (exists $admin->{api_key}) {
-      $self->admin_api_key(defined($admin->{api_key}) ? "$admin->{api_key}" : '');
-    } elsif (defined $admin->{api_key_env}) {
-      $self->admin_api_key($ENV{$admin->{api_key_env}} // '');
-    } else {
-      $self->admin_api_key('');
-    }
-  } elsif ($self->has_config_loader || $self->has_config_file) {
-    # Config-managed mode: absent key means admin API is disabled.
-    $self->admin_api_key('');
-  }
+  $self->_config_admin_api_key($self->_admin_api_key_from_config($cfg));
+  $self->_apply_admin_api_key;
 
   $self->_load_registry($cfg);
 
@@ -1599,6 +1628,48 @@ sub _apply_config {
   }
 
   return $nodes_print;
+}
+
+# The admin API key a config names (skeid k64). It may be named directly or handed over by
+# environment variable, the same way usage_store takes password_env -- a deployment should not
+# have to write the key into a file that gets mounted into a container. The first spelling
+# present decides, even when it is empty: a config may switch the admin API off. A config that
+# names none leaves the key to SKEID_ADMIN_API_KEY.
+sub _admin_api_key_from_config {
+  my ($self, $cfg) = @_;
+  my $admin = ref($cfg->{admin}) eq 'HASH' ? $cfg->{admin} : {};
+  return exists($cfg->{admin_api_key})     ? ($cfg->{admin_api_key} // '') . ''
+       : defined($cfg->{admin_api_key_env}) ? $ENV{$cfg->{admin_api_key_env}} // ''
+       : exists($admin->{api_key})          ? ($admin->{api_key} // '') . ''
+       : defined($admin->{api_key_env})     ? $ENV{$admin->{api_key_env}} // ''
+       : $self->_env_admin_api_key;
+}
+
+# The admin API key in force: the explicit one, else the config's.
+sub _apply_admin_api_key {
+  my ($self) = @_;
+  my $explicit = $self->_explicit_admin_api_key;
+  $self->admin_api_key(length($explicit) ? $explicit : $self->_config_admin_api_key);
+  return $self->admin_api_key;
+}
+
+=method set_admin_api_key
+
+  $skeid->set_admin_api_key($key);   # explicit: wins over the config, on every reload
+  $skeid->set_admin_api_key('');     # back to the config's key, or SKEID_ADMIN_API_KEY
+
+Sets the explicit admin API key -- what C<skeid serve --admin-api-key> and
+C<< build_app(admin_api_key => ...) >> set, and what an C<admin_api_key> passed to C<new> is. It
+outranks the config: a reload re-applies the order of L</admin> under it instead of replacing it.
+An empty or undefined key clears it, and the key the config resolved to takes over at once.
+Returns the admin API key now in force.
+
+=cut
+
+sub set_admin_api_key {
+  my ($self, $key) = @_;
+  $self->_explicit_admin_api_key(defined($key) ? "$key" : '');
+  return $self->_apply_admin_api_key;
 }
 
 =method maybe_reload_config
