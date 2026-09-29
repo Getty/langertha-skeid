@@ -166,7 +166,7 @@ sub _write_and_close {
 
 Writes one event and returns C<< { ok => 1, id => $id } >>, or C<< { ok => 0, error => … } >>.
 A write failure is reported, never thrown: losing a usage event must not also fail the request
-that was already served.
+that was already served. The proxy logs such an answer at C<error> level as a lost usage event.
 
 =cut
 

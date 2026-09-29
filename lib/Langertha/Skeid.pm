@@ -129,7 +129,9 @@ When a callback or override is provided, the configured store is bypassed entire
 and no database connection is created.  DBI, DBD::SQLite and DBD::Pg are C<recommends>
 dependencies — they are not required for C<jsonlog> or when usage is handled externally.
 With no sink at all, L</record_usage> builds no event and answers
-C<< { ok => 0, error => 'usage_store not configured' } >>.
+C<< { ok => 0, enabled => 0, error => 'usage_store not configured' } >>. A sink that fails answers
+C<< { ok => 0, error => ... } >> (or dies); the proxy logs that at C<error> level as a lost usage
+event, naming the request id and the store backend.
 
 =head2 Per-Key Routing Policy
 
@@ -2091,8 +2093,8 @@ sub normalize_engine_id {
 
 Builds one usage event and hands it to the sink: the L</store_usage_event> callback, a subclass's
 C<_store_usage_event>, or the configured store. Returns the sink's answer, or
-C<< { ok => 0, error => 'usage_store not configured' } >> without building an event when there
-is no sink.
+C<< { ok => 0, enabled => 0, error => 'usage_store not configured' } >> without building an
+event when there is no sink.
 
 The event carries C<created_at>, C<request_id>, C<api_format>, C<endpoint>, C<api_key_id>,
 C<provider>, C<engine>, C<model> (served), C<requested_model> (default C<model>), C<node_id>,
@@ -2112,7 +2114,7 @@ sub record_usage {
   # skip building it. record_usage runs once per forwarded request, and a
   # deployment that meters nothing should not pay for a normalized event it is
   # only going to throw away in _store_usage_event. (karr #15)
-  return { ok => 0, error => 'usage_store not configured' }
+  return { ok => 0, enabled => 0, error => 'usage_store not configured' }
     unless $self->_has_usage_sink;
 
   my $metrics = ref($args{metrics}) eq 'HASH' ? $args{metrics} : {};
@@ -2186,7 +2188,7 @@ sub _store_usage_event {
   my ($self, $event) = @_;
   return $self->store_usage_event->($self, $event) if $self->has_store_usage_event;
   my $store = $self->_usage_store_obj;
-  return { ok => 0, error => 'usage_store not configured' } unless $store;
+  return { ok => 0, enabled => 0, error => 'usage_store not configured' } unless $store;
   return $store->store($event);
 }
 

@@ -371,6 +371,13 @@ Revision history for Langertha-Skeid
     - GET /api/tags lists the same models as GET /v1/models: each distinct node
       model once, and no entry for a node configured without a model (it
       matches any requested name, so none reaches it in particular)
+    - A usage event the store cannot write is now logged at error level
+      ("usage event lost: request_id=... store=... api_key_id=... model=...
+      status=...: reason") for a thrown error and for a store's { ok => 0 }
+      answer alike, so a lost billing event is visible at the default log
+      level; the response still completes. The DBI store reports a failing
+      insert or report query as { ok => 0, error } instead of dying, with a
+      password= from its DSN masked in the error text
 
 0.003     2026-05-16 17:10:00Z
 

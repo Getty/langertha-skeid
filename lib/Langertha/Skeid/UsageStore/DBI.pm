@@ -235,10 +235,10 @@ sub shipped_schema_file {
   my $res = $store->store($event);
 
 Inserts one event. Returns C<< { ok => 1 } >> (plus C<id> on SQLite), or
-C<< { ok => 0, error => … } >> when there is no database handle -- a store that cannot connect
-is reported, not thrown, because the request it describes has already been served. A statement
-that fails once connected dies (the handle has C<RaiseError>); the proxy catches that around
-C<usage.record>.
+C<< { ok => 0, error => … } >> when there is no database handle or the insert fails -- a failure
+is reported, never thrown, because the request it describes has already been served. The proxy
+logs such an answer at C<error> level as a lost usage event. A C<password=> in the error text
+(a DSN that carries one) is masked.
 
 =cut
 
@@ -247,11 +247,27 @@ sub store {
 
   my $dbh = eval { $self->dbh };
   if (!$dbh || $@) {
-    my $err = $@ || 'failed to connect usage database';
-    $err =~ s/\s+$//;
-    return { ok => 0, error => $err };
+    return { ok => 0, error => $self->_error_text($@ || 'failed to connect usage database') };
   }
 
+  my %out;
+  my $inserted = eval { %out = $self->_insert($dbh, $event); 1 };
+  return { ok => 0, error => $self->_error_text($@) } unless $inserted;
+  return { ok => 1, %out };
+}
+
+# A DBI error names the DSN it failed on, and a DSN may carry the password. Nothing that
+# leaves this store may (ADR 0003).
+sub _error_text {
+  my ($self, $err) = @_;
+  $err = 'unknown database error' unless defined($err) && length($err);
+  $err =~ s/\b(password|pwd)=[^;'"\s)]*/$1=***/gi;
+  $err =~ s/\s+$//;
+  return $err;
+}
+
+sub _insert {
+  my ($self, $dbh, $event) = @_;
   my $sth = $dbh->prepare_cached(q{
     INSERT INTO usage_events (
       created_at, request_id, api_format, endpoint, api_key_id, provider, engine, model, node_id, route_url,
@@ -295,11 +311,9 @@ sub store {
     $event->{cache_write_tokens},
   );
 
-  my %out = (ok => 1);
-  if ($self->backend eq 'sqlite' && $dbh->can('sqlite_last_insert_rowid')) {
-    $out{id} = Langertha::Skeid::UsageStore::num($dbh->sqlite_last_insert_rowid);
-  }
-  return \%out;
+  return ($self->backend eq 'sqlite' && $dbh->can('sqlite_last_insert_rowid'))
+    ? ( id => Langertha::Skeid::UsageStore::num($dbh->sqlite_last_insert_rowid) )
+    : ();
 }
 
 =method report
@@ -309,22 +323,28 @@ sub store {
 Aggregates in SQL: totals, per-key and per-model breakdowns, and the newest C<limit> events.
 The same C<since> / C<api_key_id> / C<model> filter set applies to every part of the report, so
 the breakdowns always add up to the totals shown next to them. C<limit> defaults to 20. The shape
-is described in L<Langertha::Skeid::UsageStore/The store contract>; a failure to connect is
-C<< { ok => 0, enabled => 0, error => … } >>.
+is described in L<Langertha::Skeid::UsageStore/The store contract>; a failure to connect or a
+failing query is C<< { ok => 0, enabled => 0, error => … } >>.
 
 =cut
 
 sub report {
   my ($self, $filters) = @_;
   $filters ||= {};
-  my $num = \&Langertha::Skeid::UsageStore::num;
 
   my $dbh = eval { $self->dbh };
   if (!$dbh || $@) {
-    my $err = $@ || 'failed to connect usage database';
-    $err =~ s/\s+$//;
-    return { ok => 0, enabled => 0, error => $err };
+    return { ok => 0, enabled => 0, error => $self->_error_text($@ || 'failed to connect usage database') };
   }
+
+  my $report = eval { $self->_report($dbh, $filters) };
+  return { ok => 0, enabled => 0, error => $self->_error_text($@) } unless $report;
+  return $report;
+}
+
+sub _report {
+  my ($self, $dbh, $filters) = @_;
+  my $num = \&Langertha::Skeid::UsageStore::num;
 
   my $limit = $filters->{limit} // 20;
 

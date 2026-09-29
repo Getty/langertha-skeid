@@ -1427,10 +1427,11 @@ sub _record_usage_event {
     },
   };
 
+  my $request_id = _request_id($c);
   my $recorded = eval {
     $c->skeid->call_function('usage.record', {
       created_at    => Langertha::Skeid::Protocol::iso8601_now(),
-      request_id    => _request_id($c),
+      request_id    => $request_id,
       api_format    => ($args->{api_format} // ''),
       requested_model => ($args->{requested_model} // $args->{model} // ''),
       endpoint      => ($args->{endpoint} // ''),
@@ -1450,14 +1451,40 @@ sub _record_usage_event {
       metrics       => $safe_metrics,
     });
   };
+  my $err;
   if ($@) {
-    my $err = "$@";
+    $err = "$@";
+    $recorded = { ok => 0, error => $err };
+  } elsif (ref($recorded) eq 'HASH' && !$recorded->{ok} && ($recorded->{enabled} // 1)) {
+    # A store reports a failed write in its answer (the JsonLog contract); no sink at all
+    # answers enabled => 0 and has nothing to lose.
+    $err = $recorded->{error} // 'unknown error';
+  }
+  if (defined $err) {
+    # The event is the billing unit (ADR 0004) and it is gone: say so at a level production
+    # keeps, with what an operator needs to reconcile it by hand. The request id and the key
+    # id, never the key -- the key id is a digest (ADR 0016), the key is a secret (ADR 0003).
     $err =~ s/\s+$//;
-    $c->app->log->debug("usage.record failed: $err");
-    return { ok => 0, error => $err };
+    $c->app->log->error('usage event lost: request_id=' . $request_id
+      . ' store=' . _usage_sink_name($c)
+      . ' api_key_id=' . ($args->{api_key_id} // 'anonymous')
+      . ' model=' . ($args->{model} // '')
+      . ' status=' . ($args->{status_code} // 0)
+      . ': ' . $err);
   }
 
   return $recorded;
+}
+
+# Which sink a lost usage event was meant for, for the log line: the store's backend name, or
+# how the embedding application took the event over. Never the DSN or path, which may carry
+# credentials.
+sub _usage_sink_name {
+  my ($c) = @_;
+  my $skeid = $c->skeid;
+  return 'store_usage_event' if $skeid->has_store_usage_event;
+  my $cfg = $skeid->usage_store;
+  return (ref($cfg) eq 'HASH' && length($cfg->{backend} // '')) ? $cfg->{backend} : 'custom';
 }
 
 # The prompt-cache read count off a raw OpenAI-shaped upstream usage hash (k27). OpenAI nests it

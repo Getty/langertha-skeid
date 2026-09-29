@@ -20,8 +20,10 @@ L<Langertha::Skeid::UsageStore::JsonLog> or L<Langertha::Skeid::UsageStore::DBI>
 A store object answers C<backend> (its name), C<prepare> (create what it needs; called once
 when the store is configured, may croak), C<store($event)>, C<report(\%filters)> and
 C<disconnect>. C<store> and C<report> report failure in their answer rather than dying: the
-request an event describes has already been served. (The DBI store still dies when a statement
-fails; see L<Langertha::Skeid::UsageStore::DBI/store>.)
+request an event describes has already been served. The proxy logs a failed C<store> at
+C<error> level as a lost usage event, with the request id and the backend name -- never a DSN,
+a path or a key. An error text must not carry a secret either; the DBI store masks a
+C<password=> from its DSN.
 
 C<store> returns C<< { ok => 1 } >> (with an C<id> where the backend has one) or
 C<< { ok => 0, error => $message } >>. C<report> takes the filters C<since> (an ISO 8601 UTC

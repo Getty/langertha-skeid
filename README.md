@@ -404,7 +404,11 @@ Streamed requests are priced from the upstream's usage frame exactly like a non-
 answer. A stream cut short is recorded as failed, and billed from its usage frame if one
 arrived.
 
-Without a `usage_store` (and without `SKEID_USAGE_DB`) nothing is recorded.
+Without a `usage_store` (and without `SKEID_USAGE_DB`) nothing is recorded. When the store
+cannot write an event (a full disk, a dropped table, a lost database), the request is still
+answered, and the proxy logs `usage event lost: request_id=... store=<backend> api_key_id=...
+model=... status=...: <reason>` at `error` level, so the event can be reconciled by hand. The
+line never carries a key, a DSN or a password.
 
 ### jsonlog (recommended)
 
