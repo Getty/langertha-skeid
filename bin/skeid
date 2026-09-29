@@ -84,6 +84,7 @@ sub _run_usage {
   my $as_json = 0;
   my $backend = '';
   my $db_path = '';
+  my $log_path = '';
   my $dsn = '';
   my $db_user = '';
   my $db_pass = '';
@@ -99,6 +100,7 @@ sub _run_usage {
     'json!'         => \$as_json,
     'backend=s'     => \$backend,
     'db|sqlite=s'   => \$db_path,
+    'log-path|jsonlog=s' => \$log_path,
     'dsn=s'         => \$dsn,
     'db-user=s'     => \$db_user,
     'db-pass=s'     => \$db_pass,
@@ -124,6 +126,10 @@ sub _run_usage {
   if (defined $dsn && length $dsn) {
     $usage_store{backend} ||= 'postgresql';
     $usage_store{dsn} = $dsn;
+  }
+  if (defined $log_path && length $log_path) {
+    $usage_store{backend} ||= 'jsonlog';
+    $usage_store{log_path} = $log_path;
   }
   $usage_store{user} = $db_user if defined($db_user) && length($db_user);
   $usage_store{password} = $db_pass if defined($db_pass) && length($db_pass);
@@ -153,9 +159,10 @@ sub _run_usage {
   }
 
   my $backend_name = $report->{backend} // '';
-  my $db_label = $backend_name eq 'sqlite'
-    ? ($report->{db_path} // '')
-    : ($backend_name eq 'postgresql' ? 'configured DSN' : '(none)');
+  my $db_label = $backend_name eq 'sqlite'     ? ($report->{db_path} // '')
+               : $backend_name eq 'jsonlog'    ? ($report->{log_path} // '')
+               : $backend_name eq 'postgresql' ? 'configured DSN'
+               :                                 '(none)';
   print "Usage backend: $backend_name\n";
   print "Store: $db_label\n";
   print "Since: ", ($report->{since} && length($report->{since}) ? $report->{since} : '(all)'), "\n";
@@ -195,8 +202,9 @@ sub _run_usage {
   print "\nRecent:\n";
   print "  (none)\n" unless @{$report->{recent} || []};
   for my $row (@{$report->{recent} || []}) {
-    printf "  #%d %s %-9s %-20s model=%s status=%d tokens=%d cached=%d cost=\$%.8f\n",
-      ($row->{id} // 0),
+    # %s, not %d: a jsonlog event id is a string (time, pid, nonce, sequence), a DBI one a row id.
+    printf "  #%s %s %-9s %-20s model=%s status=%d tokens=%d cached=%d cost=\$%.8f\n",
+      ($row->{id} // ''),
       ($row->{created_at} || ''),
       ($row->{api_format} || ''),
       ($row->{api_key_id} || 'anonymous'),
@@ -247,8 +255,9 @@ Usage:
   skeid serve [--listen host:port] [--config skeid.yaml] [--admin-api-key KEY]
               [--workers N]    N > 1 runs prefork; each worker takes max_conns/N
   skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
-              [--backend sqlite|postgresql] [--db /path/to.sqlite]
-              [--dsn dbi:Pg:...] [--db-user USER] [--db-pass PASS|--db-pass-env ENV]
+              [--backend jsonlog|sqlite|postgresql] [--log-path /path/to/events/]
+              [--db /path/to.sqlite] [--dsn dbi:Pg:...]
+              [--db-user USER] [--db-pass PASS|--db-pass-env ENV]
               [--api-key-id ID] [--model NAME]
   skeid keyid [KEY ...]        the key id to use in the config's keys: section
                                (reads stdin when given no argument)
@@ -259,8 +268,9 @@ USAGE
 
   skeid serve [--listen host:port] [--config skeid.yaml] [--admin-api-key KEY] [--workers N]
   skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
-              [--backend sqlite|postgresql] [--db /path/to.sqlite]
-              [--dsn dbi:Pg:...] [--db-user USER] [--db-pass PASS | --db-pass-env VAR]
+              [--backend jsonlog|sqlite|postgresql] [--log-path /path/to/events/]
+              [--db /path/to.sqlite] [--dsn dbi:Pg:...]
+              [--db-user USER] [--db-pass PASS | --db-pass-env VAR]
               [--api-key-id ID] [--model NAME]
   skeid keyid [KEY ...]
 
@@ -313,11 +323,12 @@ served it.
 
   skeid usage --config /etc/skeid/skeid.yaml --since 2026-09-01T00:00:00Z --limit 50
 
-Prints a usage report: totals, per API key id, per model, and the newest events. The store is
-the config's C<usage_store>; any of C<--backend>, C<--db>, C<--dsn>, C<--db-user>, C<--db-pass>
-or C<--db-pass-env> replaces it with a store built from those options alone, so a C<jsonlog> store
-is read through the config. Exits 0, or 2 after printing C<ERROR: ...> when the report fails (no
-store configured, say) or C<--config> names no file.
+Prints a usage report: the backend and store (a C<jsonlog> path, the SQLite file, or
+C<configured DSN>), totals, per API key id, per model, and the newest events. The store is the
+config's C<usage_store>; any of C<--backend>, C<--log-path>, C<--db>, C<--dsn>, C<--db-user>,
+C<--db-pass> or C<--db-pass-env> replaces it with a store built from those options alone. Exits
+0, or 2 after printing C<ERROR: ...> when the report fails (no store configured, say) or
+C<--config> names no file.
 
 =opt --config, -c
 
@@ -338,7 +349,12 @@ Print the report as JSON instead of the text summary.
 
 =opt --backend
 
-C<sqlite> or C<postgresql>. Implied by C<--db> or C<--dsn>.
+C<jsonlog>, C<sqlite> or C<postgresql>. Implied by C<--log-path>, C<--db> or C<--dsn>.
+
+=opt --log-path, --jsonlog
+
+A C<jsonlog> store: its event directory (one file per event) or its JSON-lines file. An
+existing directory, or a path ending in C</>, is read as a directory; anything else as a file.
 
 =opt --db, --sqlite
 

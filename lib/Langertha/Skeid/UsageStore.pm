@@ -33,6 +33,7 @@ returns
   {
     ok => 1, enabled => 1, backend => 'jsonlog', since => '...',
     db_path  => '...',                  # DBI stores: the SQLite file, '' for postgresql
+    log_path => '...',                  # jsonlog: the event directory or file
     totals   => { requests, input_tokens, output_tokens, total_tokens, cached_tokens,
                   cache_write_tokens, tool_calls, total_cost_usd },
     by_key   => [ { api_key_id, requests, total_tokens, total_cost_usd }, ... ],

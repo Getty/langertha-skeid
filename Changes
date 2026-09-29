@@ -387,6 +387,11 @@ Revision history for Langertha-Skeid
       warned about once. The Docker image's default command passes --config
       /etc/skeid/skeid.yaml, so the image now exits when no config is mounted
       there instead of starting empty
+    - skeid usage reports a jsonlog store correctly: recent event ids print as
+      strings (no numeric warning, no truncated id) and the Store line names
+      the log path. New --log-path (alias --jsonlog) builds a jsonlog store
+      from the command line, --backend takes jsonlog, and the jsonlog report
+      carries log_path
 
 0.003     2026-05-16 17:10:00Z
 

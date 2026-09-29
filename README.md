@@ -462,6 +462,7 @@ ever dropped. SQLite is single-writer: do not use it with `--workers` above 1.
 ```bash
 bin/skeid usage --config skeid.yaml [--since 2026-09-01T00:00:00Z] [--api-key-id k_...] \
   [--model NAME] [--limit 20] [--json]
+bin/skeid usage --log-path /var/log/skeid/events/    # a jsonlog store, without a config
 curl -s -H "Authorization: Bearer $SKEID_ADMIN_API_KEY" \
   'http://127.0.0.1:8090/skeid/usage?since=2026-09-01T00:00:00Z&limit=50'
 ```
@@ -732,8 +733,9 @@ config's `nodes:` section, and reach only one worker under `--workers`.
 ```
 skeid serve [--listen host:port] [--config skeid.yaml] [--admin-api-key KEY] [--workers N]
 skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
-            [--backend sqlite|postgresql] [--db /path/to.sqlite]
-            [--dsn dbi:Pg:...] [--db-user USER] [--db-pass PASS | --db-pass-env ENV]
+            [--backend jsonlog|sqlite|postgresql] [--log-path /path/to/events/]
+            [--db /path/to.sqlite] [--dsn dbi:Pg:...]
+            [--db-user USER] [--db-pass PASS | --db-pass-env ENV]
             [--api-key-id ID] [--model NAME]
 skeid keyid [KEY ...]
 ```
@@ -743,8 +745,9 @@ skeid keyid [KEY ...]
   without `--config`, `./skeid.yaml` is read when it exists, and Skeid otherwise starts with
   no config and no nodes. A config file that disappears while Skeid runs keeps the config in
   force and is warned about once.
-- `usage` prints a report from the configured usage store; the `--backend`/`--db`/`--dsn`
-  options override it (`--db` implies sqlite, `--dsn` postgresql).
+- `usage` prints a report from the configured usage store; the
+  `--backend`/`--log-path`/`--db`/`--dsn` options override it (`--log-path` implies jsonlog,
+  `--db` sqlite, `--dsn` postgresql). `--config` behaves as for `serve`.
 - `keyid` prints the customer key id for each key, or for each line of stdin.
 
 ## Examples and lab recipes

@@ -289,8 +289,9 @@ sub report {
   return {
     ok      => 1,
     enabled => 1,
-    backend => 'jsonlog',
-    since   => ($filters->{since} // ''),
+    backend  => 'jsonlog',
+    log_path => $self->path,
+    since    => ($filters->{since} // ''),
     totals  => \%totals,
     by_key  => [ map {
       +{ api_key_id => $_, requests => $by_key{$_}{requests}, total_tokens => $by_key{$_}{total_tokens}, total_cost_usd => $by_key{$_}{total_cost_usd} }
