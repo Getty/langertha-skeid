@@ -172,9 +172,18 @@ becomes the key broker; if its login fails the proxy warns and runs without one.
 can renew its token starts renewing on a timer. The capacity probes of every node are started
 and restarted whenever the probed part of the inventory changes.
 
-Upstream connections time out after 10s to connect and 300s per request, and at most
-C<SKEID_UPSTREAM_POOL> (default 100) are kept. The app has a C<skeid> helper returning the
-control plane.
+Upstream connections time out after 10s to connect, and at most C<SKEID_UPSTREAM_POOL>
+(default 100) are kept. An upstream request may take C<SKEID_UPSTREAM_TIMEOUT> seconds (default
+300; a positive integer, anything else counts as unset) and may be silent for all of them --
+the time to the first token is silence on the wire. The client's connection is given the same
+time on top of the server's own inactivity timeout, on the routes that call an upstream and for
+that request only: the proxy never closes a request its upstream is still working on, and is
+still there to answer when the upstream timed out. Every other route stays under the server's
+timeout. The client's side is read from the user agent when a request arrives, so whoever
+changes C<< $app->ua->request_timeout >> afterwards changes both sides, and should set
+C<< $app->ua->inactivity_timeout >> to match.
+
+The app has a C<skeid> helper returning the control plane.
 
 =cut
 
@@ -222,7 +231,17 @@ sub build_app {
   my $app = Mojolicious->new;
   $app->secrets(['skeid-proxy']);
   $app->ua->connect_timeout(10);
-  $app->ua->request_timeout(300);
+  # One number for how long an upstream may take and how long it may be silent: a model that
+  # thinks sends nothing until its first token, and Mojo::UserAgent closes a connection that
+  # was silent for 40s whatever the request timeout allows. The client's side follows the same
+  # number per request, see _extend_client_timeout.
+  my $upstream_timeout
+    = (defined($ENV{SKEID_UPSTREAM_TIMEOUT}) && $ENV{SKEID_UPSTREAM_TIMEOUT} =~ /^\d+$/
+      && $ENV{SKEID_UPSTREAM_TIMEOUT} > 0)
+    ? 0 + $ENV{SKEID_UPSTREAM_TIMEOUT}
+    : 300;
+  $app->ua->request_timeout($upstream_timeout);
+  $app->ua->inactivity_timeout($upstream_timeout);
   # Mojo::UserAgent pools 5 upstream connections by default. A proxy serving more concurrent
   # requests than that reconnects for the surplus on every request, which shows up as latency
   # that grows with concurrency for no visible reason. Sized for the concurrency a single
@@ -534,8 +553,25 @@ sub _handle_manifest {
   return;
 }
 
+# The client's connection is silent while the upstream works, and the server closes a connection
+# that was silent for its inactivity timeout (30s unless the server was told otherwise). So a
+# request that calls an upstream gets, on top of that, what the upstream may take: the client
+# outlasts the upstream and is still there for the answer, or for the error. Read from the user
+# agent rather than kept beside it, so the two sides cannot drift apart. It holds for this
+# request only: the server sets its own timeout again for the next one on the connection. A
+# timeout of 0 is none, on either side, and stays none.
+sub _extend_client_timeout {
+  my ($c) = @_;
+  my $stream = Mojo::IOLoop->stream($c->tx->connection // '') or return;
+  my $own = $stream->timeout;
+  my $upstream = $c->app->ua->request_timeout;
+  $stream->timeout(($own && $upstream) ? $own + $upstream : 0);
+  return;
+}
+
 sub _handle_openai_chat {
   my ($c) = @_;
+  _extend_client_timeout($c);
   my $body = $c->req->json;
   unless (ref($body) eq 'HASH') {
     $c->render(json => { error => { message => 'Invalid JSON body', type => 'invalid_request_error' } }, status => 400);
@@ -582,6 +618,7 @@ sub _handle_openai_chat {
 
 sub _handle_openai_embeddings {
   my ($c) = @_;
+  _extend_client_timeout($c);
   my $body = $c->req->json;
   unless (ref($body) eq 'HASH') {
     $c->render(json => { error => { message => 'Invalid JSON body', type => 'invalid_request_error' } }, status => 400);
@@ -622,6 +659,7 @@ sub _handle_openai_embeddings {
 
 sub _handle_anthropic_messages {
   my ($c) = @_;
+  _extend_client_timeout($c);
   my $body = $c->req->json;
   unless (ref($body) eq 'HASH') {
     _render_error($c, 400, 'Invalid JSON body', 'invalid_request_error');
@@ -715,6 +753,7 @@ my %OLLAMA_FACE = (
 
 sub _handle_ollama {
   my ($c, $kind) = @_;
+  _extend_client_timeout($c);
   my $face = $OLLAMA_FACE{$kind};
   my $body = $c->req->json;
   unless (ref($body) eq 'HASH') {

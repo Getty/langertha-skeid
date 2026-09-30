@@ -127,6 +127,7 @@ OpenBao in dev mode.
 | `SKEID_CONFIG_RELOAD_INTERVAL` | control plane | `config_loader` re-run interval in seconds, default 1 |
 | `SKEID_TRUST_KEY_ID_HEADER` | proxy | believe the client's `x-skeid-key-id` — only behind an authenticating gateway |
 | `SKEID_UPSTREAM_POOL` | proxy | upstream connection pool size (default 100) |
+| `SKEID_UPSTREAM_TIMEOUT` | proxy | seconds an upstream request may take and be silent for (default 300); the client connection of a proxied request gets the same on top of the server's inactivity timeout |
 
 Secrets the config needs are named, never written: a node's `api_key_env`,
 `admin.api_key_env`, a usage store's `password_env`, and the registry's `secret_env` /

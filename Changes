@@ -439,6 +439,16 @@ Revision history for Langertha-Skeid
       dropped in any spelling: a client's X-Api-Key used to travel upstream
       beside the node's key, only x-api-key was removed. A node that names
       no key source still forwards the client's header unchanged
+    - A completion that takes longer than 30 seconds, or a stream whose
+      first token or whose gap between two tokens does, is no longer cut by
+      Skeid itself. Mojolicious closes a connection that was silent for 30s
+      (server) or 40s (user agent), while the upstream was allowed 300s. Both
+      sides now follow SKEID_UPSTREAM_TIMEOUT (seconds, default 300): an
+      upstream request may take that long and be silent for all of it, and
+      the client's connection of a request that calls an upstream is kept
+      open as long on top of the server's inactivity timeout, so the client
+      is still there for the answer or for the upstream's timeout error.
+      Other routes keep the server's timeout
 
 0.003     2026-05-16 17:10:00Z
 

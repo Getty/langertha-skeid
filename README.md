@@ -326,6 +326,7 @@ in the process list; in production, name the variable in the config.
 | `SKEID_USAGE_DB` | — | SQLite path used when the config has no `usage_store` |
 | `SKEID_ADMIN_API_KEY` | — | admin key when the config names none (see above) |
 | `SKEID_UPSTREAM_POOL` | `100` | upstream connection pool size |
+| `SKEID_UPSTREAM_TIMEOUT` | `300` | seconds an upstream request may take and may be silent for; the client's connection is kept open as long |
 | `SKEID_CONFIG_RELOAD_INTERVAL` | `1` | seconds between runs of a Perl `config_loader` (not used for files) |
 | `OPENBAO_ADDR` | `http://127.0.0.1:8200` | OpenBao address |
 | `OPENBAO_ROLE_ID`, `OPENBAO_SECRET_ID` | — | AppRole credentials; both set enables the KeyBroker |
@@ -333,7 +334,14 @@ in the process list; in production, name the variable in the config.
 
 Variables named in the config (`api_key_env`, `password_env`, `admin.api_key_env`,
 `registry.secret_env`, `registry.read_key_env`, a probe's `secret_env` / `read_key_env`) are
-read when the config is applied. Upstream requests time out after 10s connect / 300s total.
+read when the config is applied.
+
+Upstream requests time out after 10s to connect and `SKEID_UPSTREAM_TIMEOUT` seconds in total,
+and may be silent for all of that time: a model that thinks sends nothing until its first token.
+On the routes that call an upstream, the client's connection gets the same time on top of the
+server's inactivity timeout (30s), for that request only, so Skeid never closes a request its
+upstream is still working on. Every other route stays under the server's timeout. A proxy or load
+balancer in front of Skeid needs a read timeout at least as long.
 
 ## Client protocols
 

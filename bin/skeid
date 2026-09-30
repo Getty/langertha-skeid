@@ -417,6 +417,12 @@ only.
 
 Upstream connections kept per process (default 100).
 
+=env SKEID_UPSTREAM_TIMEOUT
+
+Seconds an upstream request may take, and may be silent for (default 300; a positive integer).
+The client's connection is kept open for as long on top of the server's own inactivity timeout,
+on the routes that call an upstream -- see L<Langertha::Skeid::Proxy/build_app>.
+
 =seealso
 
 L<Langertha::Skeid>, L<Langertha::Skeid::Proxy>

@@ -413,8 +413,8 @@ in force until restart, with a warning -- see L</CONFIGURATION>.
 Defaults for the attributes of the same meaning; a value in the config wins. Besides these, the
 config names variables of its own -- C<api_key_env> on a node, C<admin.api_key_env>, a usage
 store's C<password_env>, the registry's C<secret_env> and C<read_key_env> -- so that no secret has
-to be written into it. L<Langertha::Skeid::Proxy/build_app> reads the C<OPENBAO_*> variables and
-C<SKEID_UPSTREAM_POOL>.
+to be written into it. L<Langertha::Skeid::Proxy/build_app> reads the C<OPENBAO_*> variables,
+C<SKEID_UPSTREAM_POOL> and C<SKEID_UPSTREAM_TIMEOUT>.
 
 =env SKEID_ROUTE_WAIT_TIMEOUT_MS
 
