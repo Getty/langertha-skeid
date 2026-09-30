@@ -78,6 +78,7 @@ services:
       SKEID_ADMIN_API_KEY: ${SKEID_ADMIN_API_KEY:-change-me-in-prod}
       SKEID_USAGE_DB_PASSWORD: ${POSTGRES_PASSWORD:-skeid_password_change_me}
     volumes:
+      # Skeid runs as uid 10001 in the image: the file has to be readable for others.
       - ./skeid.yaml:/etc/skeid/skeid.yaml:ro
     healthcheck:
       # perl and HTTP::Tiny (core) are in the image; curl is not guaranteed to be.

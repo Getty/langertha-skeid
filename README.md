@@ -83,7 +83,7 @@ image name replace the default command, so they start with the subcommand (`serv
 config, run `serve --listen 0.0.0.0:8090`.
 
 ```bash
-mkdir -p skeid-config skeid-events
+mkdir -p skeid-config
 cat > skeid-config/skeid.yaml <<'YAML'
 nodes:
   - id: vllm-a
@@ -97,7 +97,7 @@ YAML
 
 docker run -d --name skeid -p 8090:8090 \
   -v "$PWD/skeid-config:/etc/skeid:ro" \
-  -v "$PWD/skeid-events:/var/log/skeid/events" \
+  -v skeid-events:/var/log/skeid/events \
   raudssus/langertha-skeid
 
 # or, with options: repeat the default command and add to it
@@ -108,9 +108,14 @@ curl -s http://127.0.0.1:8090/health
 docker exec skeid bin/skeid usage --config /etc/skeid/skeid.yaml
 ```
 
-The image installs `DBI` and `DBD::Pg`. `DBD::SQLite` is only a recommended dependency and the
-Dockerfile does not install it, so in a container use `jsonlog` or `postgresql`. Mount the
-events directory (or the database) on a volume, or the usage events go with the container.
+The image installs what `cpanfile` requires and what it recommends, so `DBI`, `DBD::Pg` and
+`DBD::SQLite` are there and every usage store works. It carries no compiler.
+
+Skeid runs as the unprivileged user `skeid` (uid and gid 10001). The image gives it two
+directories to write to: `/var/log/skeid/events` for a `jsonlog` store and `/var/lib/skeid` for
+a `sqlite` database. Mount a volume there, or the usage events go with the container. A named
+volume, as above, takes the ownership the image set. A host directory mounted instead has to
+be writable for uid 10001, and a mounted config readable for it.
 
 ## Configuration
 
@@ -544,9 +549,11 @@ the node's real occupancy; the division still applies.
 docker build -t raudssus/langertha-skeid .
 ```
 
-The Dockerfile installs `cpanfile` with `cpm` from MetaCPAN. When the required Langertha is
-released but not yet resolvable (right after a release), or to build against a local
-Langertha, install that tarball first:
+The Dockerfile has two stages. The first has the compiler and installs `cpanfile` with `cpm`
+from MetaCPAN, recommended modules included; the second is the image, and takes the installed
+modules and the checkout from the first. When the required Langertha is released but not yet
+resolvable (right after a release), or to build against a local Langertha, install that
+tarball first:
 
 ```bash
 docker build -t raudssus/langertha-skeid \

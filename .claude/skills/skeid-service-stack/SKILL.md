@@ -96,10 +96,10 @@ docker compose logs -f skeid
 the logical `secret/skeid/*` would deny every read), enables `approle`, creates role
 `skeid-service`, stores `SKEID_GROQ_KEY` / `SKEID_OPENAI_KEY` / `SKEID_ANTHROPIC_KEY` at
 `secret/skeid/remote/<provider>` when set (value on stdin, `api_key=-`), and prints `role_id` +
-`secret_id`. It needs nothing from the Skeid image, whose `perl:*-slim` base has neither `curl`
-nor a PostgreSQL client — which is also why the `skeid` healthcheck is a `perl -MHTTP::Tiny`
-one-liner. It creates no table and stores no customer keys: Skeid never looks a customer key
-up, and `names:`/`keys:` in `skeid.yaml` hold ids from `skeid keyid`.
+`secret_id`. It needs nothing from the Skeid image, whose `perl:*-slim` base has no PostgreSQL
+client and promises no `curl` — which is also why the `skeid` healthcheck is a
+`perl -MHTTP::Tiny` one-liner. It creates no table and stores no customer keys: Skeid never
+looks a customer key up, and `names:`/`keys:` in `skeid.yaml` hold ids from `skeid keyid`.
 
 Dev mode forgets everything on restart: after the `openbao` container restarts, run
 `skeid-init` again and replace both ids in `.env`. The role's `secret_id` has no use limit and
@@ -170,3 +170,19 @@ overrides for an unreleased Langertha go through `SKEID_DOCKER_BUILD_ARGS`
 `dist.ini`. For a local test image:
 `docker build -t raudssus/langertha-skeid:test .`, then `SKEID_IMAGE=raudssus/langertha-skeid:test`
 in `examples/service/.env` to run the compose stack on it.
+
+Two stages: `build` has `build-essential` and `libpq-dev` and runs `cpm` with
+`--top-level-relationship requires,recommends`, so `DBI`, `DBD::Pg` and `DBD::SQLite` come
+from the `cpanfile` and nowhere else; the final stage takes `site_perl` and `/opt/skeid` from
+it and adds only `libpq5` and `jq`. What the `perl:*-slim` base brings stays (`make`,
+`libssl-dev`, `zlib1g-dev`, no compiler). The final stage is the default target, so
+`docker build` needs no `--target`. A module with XS that links a new shared library needs
+that library in the final stage too — the `perl -M…` line there fails the build when one is
+missing.
+
+The process runs as `skeid`, uid and gid 10001 (`USER` is numeric so an orchestrator can verify
+non-root). It owns `/var/log/skeid/events` (jsonlog) and `/var/lib/skeid` (sqlite) and nothing
+else; `/opt/skeid` is root's and read-only to it. A named volume mounted on either directory
+takes that ownership, a bind mount keeps the host's — the directory must be writable, and a
+mounted `skeid.yaml` readable, for uid 10001. The compose stack writes nothing locally (usage
+goes to PostgreSQL) and mounts its config `:ro`.

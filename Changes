@@ -449,6 +449,14 @@ Revision history for Langertha-Skeid
       open as long on top of the server's inactivity timeout, so the client
       is still there for the answer or for the upstream's timeout error.
       Other routes keep the server's timeout
+    - The Docker image runs Skeid as the unprivileged user skeid (uid and
+      gid 10001) instead of root, and no longer carries build-essential
+      and libpq-dev: the Dockerfile builds in one stage and ships another.
+      DBI, DBD::Pg and DBD::SQLite are installed from the cpanfile's
+      recommends instead of by a second, unversioned install, so the
+      sqlite usage store now works in the image too. The user owns
+      /var/log/skeid/events and /var/lib/skeid in the image; a host
+      directory mounted over them has to be writable for uid 10001
 
 0.003     2026-05-16 17:10:00Z
 
