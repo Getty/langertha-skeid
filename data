@@ -1,0 +1,29 @@
+---
+claimed_at: 2026-09-30T03:10:20Z
+claimed_by: skeid-protocol-worker
+class: standard
+completed: 2026-09-30T03:10:20Z
+created: 2026-09-29T19:37:45Z
+depends_on:
+- 73
+id: 75
+priority: medium
+started: 2026-09-30T03:04:11Z
+status: done
+tags:
+- proxy
+- streaming
+- protocols
+title: An exception inside an upstream callback leaves the client without an answer
+updated: 2026-09-30T03:10:20Z
+---
+
+Found by reading Proxy.pm (2026-09-29), hypothesis, not reproduced.
+
+$stream->delta in the read handler of _proxy_openai_stream and response_from_openai in the JSON callbacks of the Anthropic and Ollama handlers run without eval; only $stream->finish is guarded. A translator that dies there throws inside a Mojo::UserAgent callback.
+
+Wanted: prove what the client sees today, then answer in the face's own error shape (HTTP error before the stream opened, in-band error event after), with request.finish and the usage event recorded as failed. Touches the same functions as the client-abort card -- do it after that one has landed.
+
+2026-09-30 03:08 Done: translator exceptions in stream delta and JSON response translation are caught; face-shaped error (HTTP 500 before the stream is open, in-band error event/line after), request.finish once, usage failed (500, translation_error), upstream cancelled. Test t/62-translator-exceptions.t (93 tests, 3 faces x json/stream-first/stream-later). prove -lr t/: only the 3 known-red files fail. Also seen (not fixed): _handle_ollama calls request_to_openai without eval, unlike the Anthropic handler.
+
+2026-09-30 03:10 Committed as eb37a98
