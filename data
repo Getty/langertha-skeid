@@ -1,0 +1,24 @@
+---
+claimed_at: 2026-09-30T03:16:48Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-09-30T03:16:44Z
+created: 2026-09-29T19:37:55Z
+depends_on:
+- 73
+id: 77
+priority: low
+started: 2026-09-30T03:10:44Z
+status: done
+tags:
+- proxy
+- usage
+title: The request id is made up at usage-record time and never returned to the client
+updated: 2026-09-30T03:16:48Z
+---
+
+_request_id is called inside _record_usage_event; a generated id is never sent back as x-request-id, so a 'usage event lost' log line cannot be matched to a client request. Wanted: one id per request, fixed when the request arrives, returned as x-request-id on every face, used for the usage event. After the client-abort card.
+
+2026-09-30 03:13 x-request-id fixed in a before_dispatch hook (stash skeid.request_id + response header), _request_id reads the stash first; header re-set after the upstream-header copies (relay, stream) and after the header clear on the stream translator-error path. Client x-request-id was already honoured, kept. New t/63-request-id.t (red before: header missing / upstream id leaked / usage id != header). prove -lr t/: only known-red 20, 37, 56 fail.
+
+2026-09-30 03:16 Committed as 5c59652
