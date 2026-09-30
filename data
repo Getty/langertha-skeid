@@ -1,0 +1,21 @@
+---
+claimed_at: 2026-09-30T07:56:20Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-09-30T07:56:15Z
+created: 2026-09-30T07:52:41Z
+id: 87
+priority: low
+started: 2026-09-30T07:53:09Z
+status: done
+tags:
+- bench
+title: 'bench: fakellm SIGTERM, honest keep-alive on streams, usage log out of /tmp'
+updated: 2026-09-30T07:56:20Z
+---
+
+Only if small; else leave open.
+
+2026-09-30 07:54 fakellm: sigaction without SA_RESTART (glibc signal() restarts accept) -> SIGTERM exits, self-tested; streamed answers now Connection: close; usage log -> bench/results/usage/ + bench/.gitignore. Compiled once with nice, clean, binary in /tmp removed. Old report docs/bench/2026-09-30 still names /tmp (historic, untouched).
+
+2026-09-30 07:56 Committed 512e2e0
