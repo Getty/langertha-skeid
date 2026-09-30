@@ -1,0 +1,26 @@
+---
+claimed_at: 2026-09-30T06:02:31Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-09-30T06:02:31Z
+created: 2026-09-29T19:38:00Z
+id: 78
+priority: low
+started: 2026-09-30T05:37:54Z
+status: done
+tags:
+- usage
+- adr
+- question
+title: 'DBI usage writes are synchronous on the request path: ticket or accept in
+  ADR 0005'
+updated: 2026-09-30T06:02:31Z
+---
+
+ADR 0005 calls the synchronous DBI usage write 'ticketed', but no open card exists. Maintainer decision: either an async/off-loop write path (design needed) or ADR 0005 says it stays, with jsonlog as the recommendation.
+
+2026-09-30 05:40 Analysis: every Proxy exit path calls _record_usage_event -> usage.record -> store->store BEFORE render, so the client's own answer and every other stream on the loop wait for the DBI insert (autocommit: one commit/fsync per event). Decision: (a) opt-in write-behind in UsageStore::DBI: usage_store.flush_interval_ms (default 0 = today's synchronous insert, unchanged). >0: store() queues and returns {ok=>1, queued=>1}; a Mojo::IOLoop timer flushes the queue in ONE transaction. Batch failure on a live handle -> per-event fallback so one bad event loses only itself; dead handle -> one reconnect per flush, not per event. Lost events reported via a Skeid on_usage_lost hook the proxy logs in the existing 'usage event lost' format. Flush on disconnect (store replaced on reload, DEMOLISH), on no running loop (sync), and an END block in bin/skeid (daemon TERM, prefork graceful). Not fully off-loop: the flush itself still runs on the loop, amortised; truly async needs DBD::Pg pg_async (untestable offline) -- documented in ADR 0005.
+
+2026-09-30 06:01 Done, option (a), opt-in. Tree: linked worktree .claude/worktrees/k78-dbi-write-behind on branch k78-dbi-write-behind, uncommitted (the shared checkout refused Edit/Write for this session, so the work was moved there and main is clean). Change: usage_store.flush_interval_ms for sqlite/postgresql, default 0 = synchronous write as before. >0 while the loop runs: DBI store() queues and answers {ok=>1, queued=>1} (no id); a Mojo::IOLoop timer flushes the queue in ONE transaction. Flush also on disconnect (store replaced on reload, Skeid DEMOLISH), before report, before a synchronous write, via new Skeid->flush_usage, and from an END block in bin/skeid. Failing batch is rolled back -> per-event on a live handle (one bad event loses only itself) / one reconnect per flush on a dead one. Losses go store->on_lost -> Skeid->on_usage_lost (new attr) -> proxy's existing 'usage event lost' error line, now one helper _log_lost_usage_event. ADR 0005 + ADR 0004 got k78 updates (amortised not off-loop; wider loss window; prefork TERM = SIGKILL loses queue, use QUIT). Verified: new t/66-usage-dbi-write-behind.t (59 tests; checked red against two mutations: no queueing, disconnect without flush); prove -lr t/: Files=71, Tests=3761, PASS. Proposed commit: 'Write DBI usage events behind the request, opt-in per flush_interval_ms (skeid k78)'. Also found, for the dispatcher: skeid-core skill Usage section and skeid-service-stack could mention flush_interval_ms; Dockerfile STOPSIGNAL question for prefork + write-behind; no perf number yet, ask skeid-perf-tester if wanted.
+
+2026-09-30 06:02 Committed 2e10552 on branch k78-dbi-write-behind
