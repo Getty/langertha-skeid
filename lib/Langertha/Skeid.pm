@@ -1281,6 +1281,46 @@ sub list_nodes {
   return [ map { +{%$_} } @{$self->nodes} ];
 }
 
+=method list_models
+
+  my $models = $skeid->list_models(api_key_id => $key_id);
+  # [ { model => 'house-model', engine => '' }, { model => 'qwen3-32b', engine => 'vllm' } ]
+
+The names a client can put in C<model>, sorted by name, each once: the distinct C<model> of the
+nodes plus the alias names. A node without a C<model> lists nothing -- it matches any name, so
+none reaches it in particular. A name that is both a node model and an alias is one entry.
+C<engine> is the first node's engine for a node model, empty for an alias.
+
+The list is narrowed by the policy of C<api_key_id> (none means the default policy), so a key is
+never shown a name L</route_plan> would refuse it: a name its C<models> do not grant is left out,
+an alias with every tier denied is left out, and a node model that only nodes carrying a denied
+tag serve is left out. This backs C</v1/models> and C</api/tags>.
+
+=cut
+
+sub list_models {
+  my ($self, %args) = @_;
+  my $policy = $self->policy_for_key($args{api_key_id});
+  my $deny   = $policy ? $policy->{deny_tags} : [];
+  my %entry;
+
+  for my $n (@{$self->nodes || []}) {
+    my $model = $n->{model};
+    next unless defined $model && length $model;
+    next if $self->_node_has_any_tag($n, $deny);
+    $entry{$model} //= { model => $model, engine => ($n->{engine} // '') };
+  }
+  for my $name (keys %{$self->model_aliases || {}}) {
+    $entry{$name} //= { model => $name, engine => '' };
+  }
+
+  return [
+    map  { $entry{$_} }
+    grep { $self->route_plan(model => $_, api_key_id => $args{api_key_id})->{permitted} }
+    sort keys %entry
+  ];
+}
+
 =method set_node_health
 
   $skeid->set_node_health('gpu-1', 0);   # take it out of rotation

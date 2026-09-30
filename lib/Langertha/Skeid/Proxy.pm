@@ -50,19 +50,21 @@ No Skeid credential is needed on these; see L</Customer identity>.
 
   GET  /health                     {status: ok, proxy: skeid, config_reload: {...}}
   GET  /.well-known/langertha.json provider manifest for the presented key
-  GET  /v1/models                  OpenAI: the distinct models of the configured nodes
+  GET  /v1/models                  OpenAI: node models and alias names, once each
   POST /v1/chat/completions        OpenAI chat; a stream is relayed byte for byte
   POST /v1/embeddings              OpenAI embeddings
   POST /v1/messages                Anthropic Messages, streamed or not
   POST /api/chat                   Ollama chat; streams unless "stream": false
   POST /api/generate               Ollama generate; streams unless "stream": false
-  GET  /api/tags                   Ollama: the same models as /v1/models
+  GET  /api/tags                   Ollama: the same names as /v1/models
   GET  /api/ps                     Ollama: always an empty list
 
 C</health> stays C<ok> while a config reload is failing -- the proxy serves under the config it
 kept -- and shows the reload state without its message. C</v1/models> and C</api/tags> list the
-nodes' own model names, each once: aliases are not listed, no key's policy is applied, and
-unhealthy nodes are included. A node without a C<model> is not listed -- it matches any
+node models and the alias names, each once, so a client can discover what it may put in
+C<model>. The list follows the policy of the key presented (no key: the default policy): a name
+the key's C<models> do not grant, an alias with every tier denied and a model only denied nodes
+serve are left out. Unhealthy nodes are included. A node without a C<model> is not listed -- it matches any
 requested name, so no name reaches it in particular. The manifest route answers C<404> unless
 the config enables it, C<401> without a key and C<403> for a key without a grant; see
 L<Langertha::Skeid/Provider Manifest>.
@@ -301,19 +303,14 @@ sub build_app {
   # OpenAI format
   $r->get('/v1/models' => sub {
     my ($c) = @_;
-    my %seen;
-    my @data;
-    for my $n (@{$c->skeid->list_nodes}) {
-      my $id = $n->{model};
-      next unless defined $id && length $id;
-      next if $seen{$id}++;
-      push @data, {
-        id       => $id,
+    my @data = map {
+      +{
+        id       => $_->{model},
         object   => 'model',
         created  => int(time),
         owned_by => 'skeid',
-      };
-    }
+      }
+    } @{$c->skeid->list_models(api_key_id => _request_api_key_id($c))};
     $c->render(json => { object => 'list', data => \@data });
   });
 
@@ -357,7 +354,8 @@ sub build_app {
 
   $ollama->get('/tags' => sub {
     my ($c) = @_;
-    $c->render(json => Langertha::Skeid::Protocol::Ollama->tags_from_nodes($c->skeid->list_nodes));
+    $c->render(json => Langertha::Skeid::Protocol::Ollama->tags_from_models(
+      $c->skeid->list_models(api_key_id => _request_api_key_id($c))));
   });
 
   $ollama->get('/ps' => sub {

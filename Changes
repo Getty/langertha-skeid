@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - GET /v1/models and GET /api/tags list the alias names as well as the
+      node models, one entry per name (an alias named like a model is listed
+      once), and follow the policy of the key presented -- no key means the
+      default policy. A name the key's models do not grant, an alias whose
+      tiers are all denied and a model only denied nodes serve are left out.
+      Both faces build the list from one Langertha::Skeid method, list_models
     - A client that hangs up is counted apart from node errors: the slot is
       given back as a third outcome, aborted, which shows in the node metrics
       as "aborted" and does not raise "error", the registry snapshot's

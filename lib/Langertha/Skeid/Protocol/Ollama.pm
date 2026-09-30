@@ -277,15 +277,13 @@ sub generate_response_from_openai {
   };
 }
 
-=method tags_from_nodes
+=method tags_from_models
 
-  my $tags = Langertha::Skeid::Protocol::Ollama->tags_from_nodes($skeid->list_nodes);
+  my $tags = Langertha::Skeid::Protocol::Ollama->tags_from_models($skeid->list_models(api_key_id => $id));
 
-Renders the node inventory as an Ollama C<< /api/tags >> model list: one entry per distinct
-node C<model>, the same names C</v1/models> lists. Several nodes serving one model make one
-entry, its C<family> taken from the first of them. A node without a C<model> contributes
-nothing: it matches any requested name, so there is no name that reaches it in particular, and
-its id is not a routing key (skeid k67).
+Renders a model list (L<Langertha::Skeid/list_models>: hashes with C<model> and C<engine>) as an
+Ollama C<< /api/tags >> answer, one entry per name, the same names C</v1/models> lists. C<family>
+is the entry's C<engine>, C<openaibase> when it has none (an alias).
 
 The fields Ollama clients expect but Skeid cannot know — size, digest, parameter size,
 quantisation — are filled with empty or C<'unknown'> placeholders rather than invented, so a
@@ -293,25 +291,22 @@ client that displays them shows nothing instead of showing a lie.
 
 =cut
 
-sub tags_from_nodes {
-  my ($class, $nodes) = @_;
-  my %seen;
+sub tags_from_models {
+  my ($class, $models) = @_;
   my @models = map {
     +{
-      name       => $_->{model},
-      model      => $_->{model},
+      name        => $_->{model},
+      model       => $_->{model},
       modified_at => Langertha::Skeid::Protocol::iso8601_now(),
-      size       => 0,
-      digest     => '',
-      details    => {
+      size        => 0,
+      digest      => '',
+      details     => {
         family             => ($_->{engine} || 'openaibase'),
         parameter_size     => 'unknown',
         quantization_level => 'unknown',
       },
     }
-  } grep {
-    defined $_->{model} && length $_->{model} && !$seen{$_->{model}}++
-  } @{$nodes || []};
+  } @{$models || []};
 
   return { models => \@models };
 }

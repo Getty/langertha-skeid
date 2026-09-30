@@ -222,8 +222,10 @@ aliases:
   a config without aliases routes as it always did.
 - The usage event records both the served model (`model`, what is priced) and the
   requested model (`requested_model`, what the customer asked for).
-- `GET /v1/models` and `GET /api/tags` list the models the nodes serve, not alias names. A
-  node without a `model` matches any name and has none of its own, so it is not listed.
+- `GET /v1/models` and `GET /api/tags` list the node models and the alias names, each once,
+  narrowed by the policy of the key presented (no key: the default policy) -- a key is not
+  shown a name it would be refused. A node without a `model` matches any name and has none of
+  its own, so it is not listed.
 
 ### Customer key ids and per-key policy
 
@@ -354,11 +356,11 @@ balancer in front of Skeid needs a read timeout at least as long.
 | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI | passed through; streaming relayed byte for byte |
 | `POST /v1/embeddings` | OpenAI | passed through |
-| `GET /v1/models` | OpenAI | the distinct models of the configured nodes |
+| `GET /v1/models` | OpenAI | node models and alias names, per key policy |
 | `POST /v1/messages` | Anthropic | translated to and from OpenAI |
 | `POST /api/chat` | Ollama | translated; streams unless `"stream": false` |
 | `POST /api/generate` | Ollama | translated; streams unless `"stream": false` |
-| `GET /api/tags` | Ollama | the same models as `/v1/models` (size, digest etc. left empty) |
+| `GET /api/tags` | Ollama | the same names as `/v1/models` (size, digest etc. left empty) |
 | `GET /api/ps` | Ollama | always an empty list |
 | `GET /health` | — | `{status, proxy, config_reload}`; no auth |
 | `GET /.well-known/langertha.json` | — | provider manifest for the calling key |
