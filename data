@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-09-29T20:00:54Z
+claimed_by: skeid-worker-timeout
+class: standard
+completed: 2026-09-30T02:48:55Z
+created: 2026-09-29T19:37:40Z
+id: 74
+priority: high
+started: 2026-09-29T19:38:30Z
+status: done
+tags:
+- proxy
+- timeouts
+title: Client connections are cut after 30s of silence while the upstream may take
+  300s
+updated: 2026-09-30T02:48:55Z
+---
+
+Found by reading bin/skeid and Proxy.pm (2026-09-29), not reproduced end to end.
+
+bin/skeid builds Mojo::Server::Daemon / Prefork without inactivity_timeout and Proxy.pm sets none per request. Mojolicious 9.49 defaults to 30s. The upstream UA has request_timeout 300. A non-streamed completion that takes longer than 30s, or a stream whose first token takes longer than 30s, would be cut by Skeid itself.
+
+Wanted: the client side waits at least as long as the upstream is allowed to take. Decide where it belongs (server option in bin/skeid vs. per-request $c->inactivity_timeout in the proxy handlers -- the latter also covers embedders of build_app), make it configurable next to the existing ENV surface, document it in POD/README. Reproduce with a scaled-down timeout in a test; no real 30s waits in t/.
+
+Commit-ready in /home/getty/dev/langertha-skeid/.claude/worktrees/agent-abf915752cef2c0c3. Confirmed by red test (t/61-upstream-timeout.t), plus the user agent's own 40s inactivity default. SKEID_UPSTREAM_TIMEOUT (default 300) drives upstream request and inactivity timeout; client connection gets server timeout + that, per request, on upstream routes only.
+
+2026-09-30 02:48 Committed as fce2400
