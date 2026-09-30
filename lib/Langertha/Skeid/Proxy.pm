@@ -267,6 +267,17 @@ sub build_app {
     $probes = Langertha::Skeid::CapacityProbe->start_for_skeid($skeid);
   });
 
+  # The request's id is fixed here, before anything can fail or hang up: the client gets it back
+  # as x-request-id whatever the answer turns out to be, and the usage event and the lost-event
+  # log line carry the same one. It lives in the stash because a request whose client is gone
+  # has no transaction to read it from any more.
+  $app->hook(before_dispatch => sub {
+    my ($c) = @_;
+    my $id = _request_id($c);
+    $c->stash('skeid.request_id' => $id);
+    $c->res->headers->header('x-request-id' => $id);
+  });
+
   my $r = $app->routes;
 
   # Still 'ok' while a config reload is failing: the proxy serves under the config it kept, so
@@ -1186,6 +1197,9 @@ sub _proxy_openai_stream {
 
   my $headers_sent = 0;
   my $had_error = 0;
+  # Taken now: the header goes out before the first byte, and the request may be past its
+  # transaction by then.
+  my $request_id = _request_id($c);
   # A translator that can report errors in its own format (Anthropic, Ollama) takes the failure
   # paths too: an upstream error status before the stream opens becomes a plain HTTP error in
   # the client's shape, a failure after it becomes an in-band error event (core karr #224).
@@ -1272,6 +1286,7 @@ sub _proxy_openai_stream {
     $upstream_done = 1;
     if (!$wrote) {
       $c->res->headers->remove($_) for @{$c->res->headers->names};
+      $c->res->headers->header('x-request-id' => $request_id);
       _render_error($c, 500, 'Stream translation failed', 'api_error');
       undef $drain;
       return;
@@ -1311,6 +1326,7 @@ sub _proxy_openai_stream {
       }
       $c->res->headers->header('content-type' => $stream->content_type) if $stream;
       $c->res->headers->header('x-skeid-node' => $node_id);
+      $c->res->headers->header('x-request-id' => $request_id);
       $headers_sent = 1;
     }
 
@@ -1573,6 +1589,7 @@ sub _render_upstream_response {
     $c->res->headers->header($name => $res->headers->header($name));
   }
   $c->res->headers->header('x-skeid-node' => $node_id);
+  $c->res->headers->header('x-request-id' => _request_id($c));
   $c->res->body($res->body);
   $c->rendered;
 }
@@ -1784,8 +1801,13 @@ sub _request_api_key_id {
   return $c->skeid->key_id_for_key($api_key);
 }
 
+# The id taken when the request arrived; a client's own x-request-id is taken over, else one is
+# made up. Before that hook ran (a bare controller) it is worked out from the request, and once
+# the transaction is gone it must come from the stash.
 sub _request_id {
   my ($c) = @_;
+  my $kept = $c->stash('skeid.request_id');
+  return $kept if defined($kept) && length($kept);
   my $rid = $c->req->headers->header('x-request-id');
   return $rid if defined($rid) && length($rid);
   return 'req_' . int(time * 1000) . '_' . int(rand(1_000_000));

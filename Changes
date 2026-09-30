@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Every answer carries an x-request-id header: on all three faces, on
+      refusals, upstream errors and translator failures, and on streams before
+      the first byte. The id is fixed when the request arrives -- the client's
+      own x-request-id if it sent one, else a generated one -- and it is the
+      request_id of the usage event and of the "usage event lost" log line. An
+      x-request-id from the upstream never replaces it on the relayed answer
     - A translator that dies on the Anthropic or Ollama face is answered in
       that face's own error shape: an HTTP 500 while nothing was sent, an
       error event or line once the stream is open. The upstream is cancelled,
