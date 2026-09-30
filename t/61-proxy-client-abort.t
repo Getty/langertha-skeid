@@ -433,6 +433,39 @@ subtest 'hanging up while the node key is being resolved never reaches upstream'
   released_since($from, 'controller was destroyed');
 };
 
+# The key does not resolve either: refusing would record a usage event and render on a
+# transaction nobody holds any more.
+for my $case ([ 'JSON', {} ], [ 'stream', { stream => \1 } ]) {
+  my ($label, $extra) = @$case;
+  subtest 'hanging up while an unresolvable node key is being resolved refuses nobody, '.$label => sub {
+    my $model = 'nokey-'.lc($label);
+    add_node($model, api_key_ref => 'secret/skeid/remote/abort-'.lc($label));
+
+    my $from = scalar @client_controllers;
+    my $events = scalar @usage_events;
+    my $client = open_client('/v1/chat/completions', chat($model, %$extra));
+    ok run_until(sub { scalar @{$broker->held} }), 'the request is waiting for its node key';
+
+    hang_up($client);
+    ok run_until(sub { my $c = $client_controllers[-1]; !$c || !$c->tx }, 1),
+      'the proxy noticed the closed connection';
+    my @warnings;
+    {
+      local $SIG{__WARN__} = sub { push @warnings, join('', @_) };
+      is $broker->release(undef), 1, 'the vault has no key, after the client is gone';
+      run_for(0.05);
+    }
+
+    is scalar(seen_upstream($model)), 0, 'upstream was not called for nobody';
+    paired_metrics($model, 1, 'abort during unresolvable key resolution');
+    is scalar(@usage_events), $events, 'no refusal is recorded for a client that is gone';
+    is scalar(grep { /request|transaction|Can't call|Can.t use/i } @warnings), 0,
+      'nothing was rendered on the destroyed transaction'
+      or diag explain \@warnings;
+    released_since($from, 'controller was destroyed');
+  };
+}
+
 subtest 'hanging up while the upstream connection is being opened' => sub {
   add_node('hold-connecting');
 

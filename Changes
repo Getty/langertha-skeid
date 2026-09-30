@@ -15,7 +15,8 @@ Revision history for Langertha-Skeid
       status_code 499 and error_type client_abort, priced from the usage
       the stream had reported until then. A client that leaves while the
       node key is still being resolved never reaches the node and records
-      no usage event
+      no usage event, also when that node's key turns out to be
+      unavailable
     - Complete POD for every module and the skeid command, including a full
       configuration and environment reference in Langertha::Skeid and a
       route/auth/error reference in Langertha::Skeid::Proxy.

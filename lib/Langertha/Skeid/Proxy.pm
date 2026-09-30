@@ -1007,18 +1007,9 @@ sub _proxy_openai_json_async {
   my %fwd_headers = _forward_headers($c);
   _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
   my ($no_key) = @_;
-  if (defined $no_key) {
-    _refuse_unkeyed_node($c, $node_id, $started, $meta, $no_key);
-    $cb->(undef, 1, 503);
-    return;
-  }
-  my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
 
-  # Set by whichever comes first, the upstream's completion or the client hanging up, so that
-  # request.finish and the usage event happen once.
-  my $closed = 0;
-
-  # The client hung up while the node key was being resolved. Nothing went upstream: the slot
+  # The client hung up while the node key was being resolved, whether or not it resolved -- asked
+  # before the refusal, which would meter and answer a transaction nobody holds any more. Nothing went upstream: the slot
   # is given back and nothing is metered, as for every request that was not forwarded.
   if (_client_gone($c)) {
     $c->skeid->call_function('request.finish', {
@@ -1029,6 +1020,17 @@ sub _proxy_openai_json_async {
     $cb->(undef, 1, 499);
     return;
   }
+
+  if (defined $no_key) {
+    _refuse_unkeyed_node($c, $node_id, $started, $meta, $no_key);
+    $cb->(undef, 1, 503);
+    return;
+  }
+  my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
+
+  # Set by whichever comes first, the upstream's completion or the client hanging up, so that
+  # request.finish and the usage event happen once.
+  my $closed = 0;
 
   $c->tx->on(finish => sub {
     return if $closed;
@@ -1132,6 +1134,20 @@ sub _proxy_openai_stream {
 
   _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
   my ($no_key) = @_;
+
+  # The client hung up while the node key was being resolved, whether or not it resolved -- asked
+  # before the refusal, which would meter and answer a transaction nobody holds any more. Nothing
+  # went upstream: the slot is given back and nothing is metered, as for every request that was
+  # not forwarded. Nothing is set up yet, so there is nothing to take apart.
+  if (_client_gone($c)) {
+    $c->skeid->call_function('request.finish', {
+      id => $node_id,
+      ok => 0,
+      duration_ms => _duration_ms($started),
+    });
+    return;
+  }
+
   return _refuse_unkeyed_node($c, $node_id, $started, $meta, $no_key) if defined $no_key;
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
   # Mojolicious would parse an unchunked, exactly-text/event-stream body into its own `sse`
@@ -1264,20 +1280,6 @@ sub _proxy_openai_stream {
   # Set by whichever comes first, the upstream's completion or the client hanging up, so that
   # request.finish and the usage event happen once.
   my $closed = 0;
-
-  # The client hung up while the node key was being resolved. Nothing went upstream: the slot
-  # is given back and nothing is metered, as for every request that was not forwarded. The
-  # read listener and the drain callback are taken apart as on every other way out.
-  if (_client_gone($c)) {
-    $tx->res->content->unsubscribe('read');
-    undef $drain;
-    $c->skeid->call_function('request.finish', {
-      id => $node_id,
-      ok => 0,
-      duration_ms => _duration_ms($started),
-    });
-    return;
-  }
 
   $c->tx->on(finish => sub {
     # Also emitted when the answer is complete, and then there is nothing left to do here. When
