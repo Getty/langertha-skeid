@@ -316,6 +316,16 @@ Override points, in order of preference: `usage_store` config → `store_usage_e
 `query_usage_report` callbacks → subclass. `jsonlog` is the recommended default because it
 never blocks the event loop on a database.
 
+`usage_store.flush_interval_ms` (sqlite/postgresql only; ADR 0005 update, skeid k78): default
+`0` = each event is written synchronously, as ever. `> 0` = write-behind: events are queued and
+written by a timer every that many ms, in one transaction. The queue is also flushed on config
+reload (store swap), on shutdown (`END` in `bin/skeid`), before a usage report, and by
+`flush_usage`. The price is a loss window: a kill without flush (`SIGKILL`, OOM) loses the
+queue, and billed requests with it. Under prefork `SIGTERM`/`SIGINT` make the manager
+`SIGKILL` the workers and lose the queue; `SIGQUIT` (the Docker image's `STOPSIGNAL`) flushes.
+A lost event is reported on `on_usage_lost`, never silent. `jsonlog` stays the recommendation;
+it has nothing to amortise.
+
 `node_metrics` is a *different* thing: volatile in-memory counters for ops, never billed.
 
 ## Admin API

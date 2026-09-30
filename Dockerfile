@@ -15,7 +15,9 @@ WORKDIR /opt/skeid
 COPY . .
 # requires,recommends: DBI, DBD::Pg and DBD::SQLite are what the cpanfile recommends, at the
 # versions it names. chmod: the runtime user is not the owner, and a checkout made under a
-# tight umask would otherwise be unreadable to it.
+# tight umask would otherwise be unreadable to it. Cpanel::JSON::XS is a recommends;
+# the -M line fails the build should it be missing, whatever cpm did with it. Without it the stream
+# relay decodes every SSE frame in pure Perl and loses 43 % throughput (ADR 0019).
 RUN cpanm --notest App::cpm \
     && if [ -n "$LANGERTHA_SRC" ]; then cpanm --notest "$LANGERTHA_SRC"; fi \
     && if [ -f cpanfile.snapshot ]; then SNAP="--snapshot=./cpanfile.snapshot"; else SNAP=""; fi \
@@ -25,6 +27,7 @@ RUN cpanm --notest App::cpm \
       --resolver metacpan \
       --workers=$(nproc) \
       --show-build-log-on-failure \
+    && perl -MCpanel::JSON::XS -e 1 \
     && chmod -R a+rX /opt/skeid
 
 # Runtime stage: the same perl, the shared libraries the XS modules link against (libssl
@@ -50,11 +53,18 @@ COPY --from=build /opt/skeid /opt/skeid
 WORKDIR /opt/skeid
 
 # Fails the build when a shared library an XS module needs is missing from this stage.
-RUN perl -MDBI -MDBD::Pg -MDBD::SQLite -MIO::Socket::SSL -e 1
+RUN perl -MDBI -MDBD::Pg -MDBD::SQLite -MIO::Socket::SSL -MCpanel::JSON::XS -e 1
 
 USER 10001:10001
 
 EXPOSE 8090
+
+# SIGQUIT is the graceful stop. Mojolicious's prefork manager answers SIGTERM by SIGKILLing its
+# workers, which loses what a write-behind usage store (usage_store.flush_interval_ms, k78)
+# still holds; on SIGQUIT the workers run END and flush. A single process handles it too
+# (bin/skeid). docker stop sends this, then SIGKILL after its grace period (10 s by default):
+# raise it (`--time`, compose stop_grace_period) when streams outlive that.
+STOPSIGNAL SIGQUIT
 
 ENTRYPOINT ["perl", "-Ilib", "bin/skeid"]
 CMD ["serve", "--listen", "0.0.0.0:8090", "--config", "/etc/skeid/skeid.yaml"]

@@ -2,6 +2,9 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Docker image stops on SIGQUIT so write-behind usage events are flushed;
+      serve handles SIGQUIT in single-process mode; the image build fails
+      without Cpanel::JSON::XS
     - A SQLite or PostgreSQL usage store can write behind the request:
       usage_store.flush_interval_ms queues each event and writes the queue in
       one transaction per interval, so the answer no longer waits for the

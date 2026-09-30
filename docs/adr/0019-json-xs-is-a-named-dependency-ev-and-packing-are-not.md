@@ -52,9 +52,14 @@ process:
 - Earlier dev-box reports ran EV+XS. For JSON at c=16 they are about 15 % pessimistic compared
   with the image. For streaming they are the same. Future reports should state which reactor
   was loaded.
-- The EV question stays open in one place: whether its streaming-tail advantage at c=64
-  survives `--workers N`, where each loop holds fewer connections. That measurement would
-  reopen decision 2. Nothing else should.
+- **Open, explicitly unmeasured:** whether EV's streaming-tail advantage at c=64 survives
+  `--workers 4`, where each loop holds fewer connections (EV vs Poll, `--workers 4`, c=64).
+  The report measured one process only; no number here says anything about it. The status
+  stays proposed until it is measured, and that measurement would reopen decision 2. Nothing
+  else should.
+- The Dockerfile now checks for Cpanel::JSON::XS by name (`perl -MCpanel::JSON::XS`, build and
+  runtime stage), so a missing module fails the image build instead of shipping the slow path
+  (skeid k85).
 - A single-file build for hosts without Docker is a distribution question, not a performance
   one. If it comes back, start from what the report records: `PAR_VERBATIM=1`, explicit
   namespaces, trim the DBD drivers, and the host still needs libssl and a compatible glibc.

@@ -244,7 +244,7 @@ static void handle_completion(int fd, const req_params *rp, int keep_alive) {
                   "HTTP/1.1 200 OK\r\n"
                   "Content-Type: text/event-stream\r\n"
                   "Cache-Control: no-cache\r\n"
-                  "Connection: keep-alive\r\n"
+                  "Connection: close\r\n"
                   "Transfer-Encoding: chunked\r\n"
                   "\r\n");
 
@@ -435,8 +435,14 @@ int main(int argc, char **argv) {
     }
 
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
+    /* No SA_RESTART: signal() on glibc restarts accept(), so the loop would never see
+     * `running` change and SIGTERM would not stop the server. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {

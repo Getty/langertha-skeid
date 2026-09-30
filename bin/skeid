@@ -82,6 +82,9 @@ if ($workers > 1) {
     app    => $app,
     listen => ["http://$listen"],
   );
+  # Daemon->run handles INT and TERM only; SIGQUIT (the image's STOPSIGNAL) would otherwise
+  # kill the process with its default action, before END could flush a write-behind queue.
+  $SIG{QUIT} = sub { $daemon->ioloop->stop };
   $daemon->run;
 }
 
@@ -333,7 +336,7 @@ served it.
 A usage store with C<flush_interval_ms> holds events in memory until they are written; stopping
 the server writes them. Stop a prefork server with C<SIGQUIT> (graceful): on C<SIGINT> or
 C<SIGTERM> Mojolicious's prefork manager kills its workers with C<SIGKILL>, and what they still
-held is lost. A single process (C<--workers 1>) flushes on C<SIGINT> and C<SIGTERM> as well.
+held is lost. A single process (C<--workers 1>) flushes on C<SIGINT>, C<SIGTERM> and C<SIGQUIT>.
 
 =head2 usage
 

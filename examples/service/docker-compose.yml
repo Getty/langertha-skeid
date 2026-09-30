@@ -60,6 +60,9 @@ services:
     image: ${SKEID_IMAGE:-raudssus/langertha-skeid:latest}
     container_name: skeid-proxy
     restart: unless-stopped
+    # The image's STOPSIGNAL is SIGQUIT (graceful; flushes a write-behind usage store). Do not
+    # set stop_signal here. Streams longer than the 10 s default grace get SIGKILLed: add
+    # stop_grace_period when usage_store.flush_interval_ms is on.
     depends_on:
       openbao:
         condition: service_healthy

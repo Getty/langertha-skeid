@@ -112,3 +112,13 @@ the proxy answers before the row exists and `request.start`/`request.finish` sta
 timer, `disconnect`, a store replaced on reload, destroying the Skeid, a report and
 `flush_usage` all write the queue; three queued events take one transaction; a bad event, a
 dropped table and a dead database each end in reported, never silent, losses.
+
+**Stopping (skeid k84).** The Docker image sets `STOPSIGNAL SIGQUIT`, so `docker stop` is the
+graceful stop and write-behind loses nothing on it. Under prefork the manager answers
+`SIGTERM` by `SIGKILL`ing its workers, which is where the queue would go; `SIGQUIT` lets them
+finish and run `END`. A single process handled `SIGINT`/`SIGTERM` only — `Mojo::Server::Daemon`
+installs no `SIGQUIT` handler, so the image's stop signal would have killed it unflushed —
+and `bin/skeid` now stops the loop on `SIGQUIT` as well. `docker stop` still `SIGKILL`s after
+its grace period (10 s by default), which loses the queue again for a stream that outlives it;
+whoever enables write-behind sets `stop_grace_period` (compose) or `--time` to match. Under
+compose the image's signal is used as is; `examples/service/` sets no `stop_signal`.

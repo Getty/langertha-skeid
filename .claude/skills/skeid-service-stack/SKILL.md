@@ -161,6 +161,14 @@ config is applied, so at start — and adds any column an older table is missing
 stack relies on that and carries no schema of its own. Reports: `bin/skeid usage --json`, or
 `GET /skeid/usage`.
 
+`usage_store.flush_interval_ms` (sqlite/postgresql only, default `0` = synchronous write) turns
+on write-behind: events queue in memory and are written every that many ms, and on reload,
+shutdown, report and `flush_usage`. A kill without flush loses the queue. Prefork stopped with
+`SIGTERM` loses it too (the manager `SIGKILL`s its workers); `SIGQUIT` flushes, which is why the
+image sets `STOPSIGNAL SIGQUIT` and the compose stack must not override it. `docker stop`
+`SIGKILL`s after its grace period (10 s default): set `stop_grace_period` when streams run
+longer. `jsonlog` remains the recommended default.
+
 ## Docker image
 
 Built and pushed by `dzil release` via `run_after_release` (see the release rule — never run

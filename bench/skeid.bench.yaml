@@ -25,7 +25,9 @@ routing:
 
 usage_store:
   backend: jsonlog
-  path: /tmp/skeid-bench-usage/
+  # Relative to the checkout root, where run-bench.sh starts the proxy. Not /tmp: that is
+  # RAM-backed on many hosts and one file per request adds up. Ignored by bench/.gitignore.
+  path: bench/results/usage/
   mode: dir
 
 admin:
