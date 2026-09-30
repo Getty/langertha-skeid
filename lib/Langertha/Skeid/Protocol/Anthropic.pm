@@ -4,6 +4,7 @@ our $VERSION = '0.003';
 use strict;
 use warnings;
 use Langertha::Skeid::Protocol;
+use Langertha::Skeid::Protocol::Refusal;
 use Langertha::Tool;
 use Langertha::ToolCall;
 use Langertha::ToolChoice;
@@ -68,9 +69,12 @@ user message.
 
 Only function tools are translated. A provider built-in in C<tools> (C<web_search_20250305>,
 C<bash_20250124>, C<text_editor_*>, C<computer_*>, C<mcp_toolset>, ...) or a definition
-L<Langertha::Tool/classify> does not recognise makes it die with a one-line message naming the
-tool type and its category; the proxy answers that, and any other failure to translate the
-request, as a C<400 invalid_request_error>.
+L<Langertha::Tool/classify> does not recognise, and an image source that is neither base64 nor a
+url, make it throw a L<Langertha::Skeid::Protocol::Refusal> with a one-line message naming the
+tool type and its category; the proxy answers that as a C<400 invalid_request_error> carrying
+the message. Any other failure to translate the request is answered as a C<400> with the fixed
+text C<Invalid request>: that exception's text can quote the request, so it is neither sent
+nor logged.
 
 =cut
 
@@ -192,8 +196,8 @@ sub request_to_openai {
       next unless ref($tool) eq 'HASH';
       my ($category, undef, $label) = Langertha::Tool->classify($tool, 'anthropic');
       next if $category eq 'function';
-      die "tools[$i]: tool type '" . ($label // '') . "' ($category) is not supported: "
-        . "skeid does not forward provider built-in tools, only function tools\n";
+      Langertha::Skeid::Protocol::Refusal->refuse("tools[$i]: tool type '" . ($label // '') . "' ($category) is not supported: "
+        . "skeid does not forward provider built-in tools, only function tools");
     }
     my $tools = Langertha::Tool->from_list($body->{tools});
     $out{tools} = [ map { $_->to_openai } @$tools ];
@@ -226,7 +230,7 @@ sub _image_part {
     if $kind eq 'base64' && defined($source->{data}) && !ref($source->{data});
   return Langertha::Skeid::Protocol::image_url_part($source->{url})
     if $kind eq 'url' && defined($source->{url}) && !ref($source->{url}) && length($source->{url});
-  die "image source type '$kind' is not supported: skeid forwards base64 and url images only\n";
+  Langertha::Skeid::Protocol::Refusal->refuse("image source type '$kind' is not supported: skeid forwards base64 and url images only");
 }
 
 =method response_from_openai

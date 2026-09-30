@@ -11,6 +11,11 @@ Revision history for Langertha-Skeid
       is answered with a 400 in Ollama's error shape, before anything is routed
       or metered, instead of an HTML 500. The exception's text is neither sent
       nor logged
+    - An Anthropic request (/v1/messages) whose translation fails for a reason
+      of the translator's own is answered with the fixed text "Invalid request"
+      instead of the exception's text, which can quote the request. A deliberate
+      refusal (a provider built-in tool, an unsupported image source) keeps its
+      worded message
     - Every answer carries an x-request-id header: on all three faces, on
       refusals, upstream errors and translator failures, and on streams before
       the first byte. The id is fixed when the request arrives -- the client's

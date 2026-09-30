@@ -7,6 +7,7 @@ use Mojolicious;
 use Mojo::IOLoop;
 use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
+use Scalar::Util qw(blessed);
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::Registry;
@@ -686,10 +687,12 @@ sub _handle_anthropic_messages {
   # anything is routed or metered (core karr #216).
   my $openai_body = eval { Langertha::Skeid::Protocol::Anthropic->request_to_openai($body) };
   unless ($openai_body) {
-    my $msg = $@ || 'unknown error';
-    $msg =~ s/ at \S+ line \d+\.?\n?\z//;
-    chomp $msg;
-    _render_error($c, 400, "Invalid request: $msg", 'invalid_request_error');
+    # A deliberate refusal carries a message written for the client. Any other exception can quote
+    # the request, so its text is neither sent nor logged (k75, k82).
+    my $err = $@;
+    my $msg = blessed($err) && $err->isa('Langertha::Skeid::Protocol::Refusal')
+      ? $err->message : 'Invalid request';
+    _render_error($c, 400, $msg, 'invalid_request_error');
     return;
   }
   my $model = $openai_body->{model} // '';
