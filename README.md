@@ -167,10 +167,14 @@ perl -Ilib -MLangertha::Skeid -E 'say for @{ Langertha::Skeid->supported_engine_
 ```
 
 **Upstream authentication.** A node with `api_key_ref` or `api_key_env` gets
-`Authorization: Bearer <key>` and any client `x-api-key` is dropped. `api_key_ref` needs the
-OpenBao KeyBroker (see [Service stack](#service-stack-openbao--postgresql)); when it resolves
-nothing, `api_key_env` is the fallback. A node with neither forwards the client's own
-`Authorization` / `x-api-key` header unchanged. Hop-by-hop headers are never forwarded.
+`Authorization: Bearer <key>` and any client `x-api-key` is dropped, in any spelling.
+`api_key_ref` needs the OpenBao KeyBroker (see
+[Service stack](#service-stack-openbao--postgresql)); when it resolves nothing, `api_key_env`
+is the fallback. A node with neither forwards the client's own
+`Authorization` / `x-api-key` header unchanged. A node that names a key source and gets no key
+from it (the broker fails or is not running, the variable is unset or empty) is never called:
+the request is answered `503` (`upstream_key_unavailable`) in the error shape of the face that
+was called, the log names the key reference, and the client's key stays with Skeid. Hop-by-hop headers are never forwarded.
 
 `healthy` is only ever changed by an operator (config or admin API). Skeid does not poll
 nodes, and neither errors nor rate limits mark a node unhealthy.

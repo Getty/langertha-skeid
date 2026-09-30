@@ -105,7 +105,11 @@ C</embeddings>; the body carries the served model (an alias tier's C<model>), ev
 the client sent it or as translated. The client's headers go upstream except the hop-by-hop
 ones, C<Host>, C<Content-Length> and C<Accept-Encoding>. When the node has a key of its own --
 C<api_key_ref> through the key broker, else C<api_key_env> -- it replaces C<Authorization> and
-C<x-api-key> is dropped; otherwise the client's own key goes upstream. An answer that came from a node carries
+the client's C<Authorization> and C<x-api-key> are dropped, however the client spelled them. A
+node that names neither forwards the client's own key. A node that names one and gets no key
+from it -- the broker fails or is not running, the variable is unset or empty -- is not called
+at all, and neither is one that left the inventory after it was selected: the request is
+refused with C<503> (see L</Errors>), so the client's key never stands in for the node's. An answer that came from a node carries
 C<x-skeid-node> with the node id. Rate-limit headers and C<429>s on every response feed
 L<Langertha::Skeid/observe_response_headers>.
 
@@ -117,7 +121,9 @@ included.
 A request no node may serve for this key is C<403 permission_error>; a model no healthy node
 serves is C<503 model_not_found>; eligible nodes that stay full past the wait are
 C<429 rate_limit_error>; an upstream failure is its status (or C<502>) with type
-C<upstream_error>. The body is shaped for the face that was called: OpenAI's
+C<upstream_error>; a node whose own key cannot be resolved is
+C<503 upstream_key_unavailable>, logged with the key reference and recorded as a failed usage
+event. The body is shaped for the face that was called: OpenAI's
 C<{error: {message, type}}>, Anthropic's envelope
 (L<Langertha::Skeid::Protocol::Anthropic/error_body>) on C</v1/messages>, and Ollama's
 C<{error: "..."}> on C</api/*>. A stream that fails after it opened ends with the face's in-band
@@ -886,6 +892,12 @@ sub _proxy_openai_json_async {
 
   my %fwd_headers = _forward_headers($c);
   _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
+  my ($no_key) = @_;
+  if (defined $no_key) {
+    _refuse_unkeyed_node($c, $node_id, $started, $meta, $no_key);
+    $cb->(undef, 1, 503);
+    return;
+  }
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
   $c->app->ua->start($tx => sub {
     my ($ua, $done) = @_;
@@ -965,6 +977,8 @@ sub _proxy_openai_stream {
   $c->render_later;
 
   _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
+  my ($no_key) = @_;
+  return _refuse_unkeyed_node($c, $node_id, $started, $meta, $no_key) if defined $no_key;
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
   # Mojolicious would parse an unchunked, exactly-text/event-stream body into its own `sse`
   # events and never emit `read` -- the relay would forward nothing (skeid karr #30).
@@ -1300,8 +1314,17 @@ sub _forward_headers {
 
 # Sets the upstream Authorization header for the selected node, from the KeyBroker
 # (api_key_ref) or from the environment (api_key_env), overriding whatever the client sent.
-# The callback runs exactly once, and always: a node with no key of its own simply forwards
-# the client's header untouched.
+# The callback runs exactly once, and always. It is called with nothing when the request may go
+# upstream: the node's key is in place, or the node names no key source and forwards the
+# client's header untouched. It is called with a reason when the node names a key source and
+# none produced a key, or when the node is no longer in the inventory and what it named cannot
+# be known -- the caller must then refuse the request (_refuse_unkeyed_node) rather than call
+# the node, because the only credential left in the headers is the customer's own, and the
+# pass-through would hand it to the provider (ADR 0003). The reason names the node, the key
+# reference and the variable, never a key, and is for the log and the usage event.
+#
+# Wherever the client's header is not what goes upstream -- a key was injected, or the request
+# is refused -- the client's credentials are taken out of the headers first, in any spelling.
 #
 # Async because resolution can mean a vault round-trip, and this sits between routing and the
 # upstream call -- doing it synchronously stalls every other in-flight request for that
@@ -1312,37 +1335,100 @@ sub _inject_node_auth_async {
   $cb ||= sub { };
 
   my ($node) = grep { ($_->{id} // '') eq $node_id } @{$skeid->nodes};
-  return $cb->() unless $node;
+  unless ($node) {
+    _drop_client_credentials($headers_ref);
+    return $cb->("node '$node_id' is no longer in the inventory, its key source is unknown");
+  }
+
+  my $ref = $node->{api_key_ref};
+  $ref = undef unless defined($ref) && length($ref);
+  my $env_name = $node->{api_key_env};
+  $env_name = undef unless defined($env_name) && length($env_name);
 
   my $apply = sub {
-    my ($key) = @_;
+    my ($key, $ref_failure) = @_;
 
     # Fallback: env var
     if (!defined($key) || !length($key)) {
-      if (defined(my $env_name = $node->{api_key_env})) {
+      if (defined $env_name) {
         $key = $ENV{$env_name} // '';
       }
     }
 
-    return $cb->() unless defined($key) && length($key);
-    $headers_ref->{Authorization} = "Bearer $key";
-    delete $headers_ref->{'x-api-key'};
-    $cb->();
+    if (defined($key) && length($key)) {
+      _drop_client_credentials($headers_ref);
+      $headers_ref->{Authorization} = "Bearer $key";
+      return $cb->();
+    }
+
+    # A node with no key of its own: the documented pass-through.
+    return $cb->() unless defined($ref) || defined($env_name);
+
+    # A key source was named and produced nothing. Take the client's credentials out of what
+    # would go upstream as well, so a caller that ignored the reason still could not leak them.
+    _drop_client_credentials($headers_ref);
+    $cb->(join('; ',
+      (defined($ref) ? "api_key_ref '$ref' $ref_failure" : ()),
+      (defined($env_name)
+        ? "api_key_env '$env_name' is " . (defined($ENV{$env_name}) ? 'empty' : 'not set')
+        : ()),
+    ));
   };
 
-  if ($skeid->has_key_broker && defined(my $ref = $node->{api_key_ref})) {
+  if (defined($ref) && $skeid->has_key_broker) {
     $skeid->key_broker->key_async($ref, sub {
       my ($key, $error) = @_;
       # The reference may be logged; what it resolves to may not, and neither may a vault
       # response body that might carry it (ADR 0003).
       warn "KeyBroker resolve failed for '$ref': $error"
         if defined($error) && !defined($key);
-      $apply->($key);
+      $apply->($key, 'did not resolve');
     });
     return;
   }
 
-  $apply->();
+  $apply->(undef, 'has no key broker to resolve it');
+  return;
+}
+
+# Header names are case-insensitive and Mojolicious hands an unknown one on as the client
+# spelled it, so `X-Api-Key` is as much the client's key as `x-api-key`. An exact-case delete
+# lets it travel upstream beside the node's own key.
+sub _drop_client_credentials {
+  my ($headers_ref) = @_;
+  delete @{$headers_ref}{
+    grep { lc($_) eq 'authorization' || lc($_) eq 'x-api-key' } keys %$headers_ref
+  };
+  return;
+}
+
+# The answer to a request whose node names a key source that produced no key: no upstream call,
+# and everything an admitted request is owed -- its request.finish, one usage event, an error in
+# the shape of the face that was called. 503, not 502: no upstream was asked, so nothing came
+# back bad; this Skeid cannot serve the request until its broker or its environment is put
+# right, and a client may retry. The client is told no more than that -- the reason carries a
+# key reference, which belongs in the log and the usage event, not in a customer's answer.
+sub _refuse_unkeyed_node {
+  my ($c, $node_id, $started, $meta, $reason) = @_;
+  my $duration_ms = _duration_ms($started);
+  $c->app->log->error("No upstream key for node '$node_id', request refused: $reason");
+  $c->skeid->call_function('request.finish', {
+    id => $node_id,
+    ok => 0,
+    duration_ms => $duration_ms,
+  });
+  _record_usage_event($c, {
+    %$meta,
+    node_id       => $node_id,
+    status_code   => 503,
+    ok            => 0,
+    duration_ms   => $duration_ms,
+    error_type    => 'upstream_key_unavailable',
+    error_message => $reason,
+    metrics       => {},
+  });
+  _render_error($c, 503, 'The upstream key for this model is not available',
+    'upstream_key_unavailable');
   return;
 }
 

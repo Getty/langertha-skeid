@@ -89,11 +89,23 @@ instead, and pin the new `Langertha` version in `cpanfile`.
 1. **KeyBroker**, if the node has `api_key_ref` — resolved per request through `key_async`
    (in-memory cache, coalesced misses; never `resolve_key` on the request path).
 2. **`api_key_env`** fallback — key from that environment variable.
-3. Neither → the client's own `Authorization` survives (pass-through deployments).
+3. Neither **configured** → the client's own `Authorization` survives (pass-through
+   deployments).
 
-When a key is injected, the client's `x-api-key` is dropped so an Anthropic-style client can
-never leak its own key upstream. A resolve failure warns and falls through — it must never put
-the reference or the key into the message.
+When a key is injected, the client's `Authorization` and `x-api-key` are dropped first — in
+any spelling (`_drop_client_credentials`; Mojolicious hands `X-Api-Key` on as the client wrote
+it, and an exact-case delete forwards it beside the node's key) — so an Anthropic-style client
+can never leak its own key upstream. A resolve failure warns — with the reference, never the key or
+a vault response body — and falls through to `api_key_env`.
+
+**A configured key source that yields no key fails closed.** Broker error or cached failure, no
+broker at all (a failed OpenBao login at boot), variable unset or empty, or a node that left
+the inventory after it was selected (its key source is unknown): the callback gets a reason, and both callers answer through `_refuse_unkeyed_node` — no upstream call,
+`request.finish` with `ok => 0`, one failed usage event, `503 upstream_key_unavailable` in the
+face's error shape. The pass-through is for a node that names *no* key source; taking it for a
+node whose key went missing sends the customer's key to the provider. The reason (reference,
+variable name) goes to the log and the usage event, not to the client. `t/61-node-key-fail-closed.t`
+fails if the pass-through comes back.
 
 ## Caller identity
 

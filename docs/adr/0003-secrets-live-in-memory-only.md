@@ -37,6 +37,13 @@ No secret is ever written to disk by Skeid.
   Injected keys replace the client's `Authorization` header and delete its `x-api-key`, so a
   client's own credential cannot leak upstream.
 
+  Refined when the pass-through was found to cover a node whose own key could not be resolved
+  (broker down, no broker after a failed login, variable unset): a node that names a key
+  source and gets no key from it is not called. The request is refused with `503`, recorded as a failed usage
+  event and logged with the key reference. Forwarding the client's header is reserved for a
+  node that names no key source at all -- otherwise the customer's key is what the provider
+  receives as bearer token.
+
 ## Consequences
 
 - A restart is the recovery path for every credential problem. That is cheap here — Skeid is

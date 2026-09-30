@@ -412,6 +412,19 @@ Revision history for Langertha-Skeid
       once and retries the event, instead of losing every later usage event
       until restart. A failed reconnect is reported as a lost event, never
       thrown, and the next event tries again
+    - Security: a node that names a key of its own (api_key_ref, api_key_env)
+      and gets no key from it is no longer called with the client's key. When
+      the key broker failed or was not running (a failed OpenBao login at
+      start), or the variable was unset or empty, the request used to go
+      upstream with the customer's own Authorization / x-api-key as its
+      credential. It is now refused with 503 upstream_key_unavailable in the
+      shape of the face that was called, streamed or not, recorded as a
+      failed usage event and logged with the key reference. The same goes
+      for a node that left the inventory after it was selected. When a node
+      key is injected, the client's Authorization and x-api-key are now
+      dropped in any spelling: a client's X-Api-Key used to travel upstream
+      beside the node's key, only x-api-key was removed. A node that names
+      no key source still forwards the client's header unchanged
 
 0.003     2026-05-16 17:10:00Z
 

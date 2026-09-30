@@ -50,8 +50,10 @@ response body, which may carry what was being read.
 
 Auto-wiring: `Proxy->build_app` constructs the broker when `OPENBAO_ROLE_ID` and
 `OPENBAO_SECRET_ID` are both set, then starts its renewal timer. A failure there warns and
-leaves Skeid running without a broker — nodes then fall back to `api_key_env` or client
-pass-through.
+leaves Skeid running without a broker — a node with `api_key_ref` then needs a set
+`api_key_env`, or every request routed to it is refused with `503 upstream_key_unavailable`.
+It never falls back to the client's key; pass-through is only for a node that names no key
+source.
 
 ## KeyBroker base class — what every broker gets
 

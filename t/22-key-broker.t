@@ -198,10 +198,40 @@ sub inject {
 }
 
 {
-  # An unknown node must still call back, or the request that asked for it hangs forever.
+  # An unknown node must still call back, or the request that asked for it hangs forever. It
+  # calls back with a reason, though: whether that node had a key of its own can no longer be
+  # known, so the client's header must not be what goes upstream in its place.
   my $skeid = Langertha::Skeid->new;
-  my %headers;
-  ok inject(\%headers, $skeid, 'no-such-node'), 'an unknown node calls back rather than hanging';
+  my %headers = (Authorization => 'Bearer client-key', 'X-Api-Key' => 'client-key', accept => '*/*');
+  my @answer;
+  Langertha::Skeid::Proxy::_inject_node_auth_async(\%headers, $skeid, 'no-such-node',
+    sub { push @answer, [@_] });
+  is scalar(@answer), 1, 'an unknown node calls back rather than hanging, exactly once';
+  like $answer[0][0], qr/no-such-node/, 'with a reason that names the node, so the caller refuses';
+  unlike $answer[0][0], qr/client-key/, 'and not the client key';
+  is \%headers, { accept => '*/*' }, 'and the client credentials are taken out of the upstream headers';
+}
+
+{
+  # The client's credentials go, however the client spelled them. Mojo hands an unknown header
+  # name on as it was sent, so an exact-case delete leaves `X-Api-Key` beside the node's key.
+  my $broker = TestBroker->new(_keys => { 'ref/test' => 'secret_key_123' });
+  my $skeid = Langertha::Skeid->new(key_broker => $broker);
+  $skeid->add_node(id => 'test-node', url => 'http://test', api_key_ref => 'ref/test');
+
+  for my $spelling ('x-api-key', 'X-Api-Key', 'X-API-KEY') {
+    my %headers = (Authorization => 'Bearer client-key', $spelling => 'client-key', accept => '*/*');
+    ok inject(\%headers, $skeid, 'test-node'), "$spelling: injection calls back";
+    is \%headers, { Authorization => 'Bearer secret_key_123', accept => '*/*' },
+      "$spelling: only the node key is left";
+  }
+
+  for my $spelling ('authorization', 'AUTHORIZATION') {
+    my %headers = ($spelling => 'Bearer client-key', accept => '*/*');
+    inject(\%headers, $skeid, 'test-node');
+    is \%headers, { Authorization => 'Bearer secret_key_123', accept => '*/*' },
+      "$spelling: a client Authorization in another spelling does not survive beside the node key";
+  }
 }
 
 {
@@ -220,6 +250,74 @@ sub inject {
   my %headers;
   inject(\%headers, $skeid, 'fail-node');
   is $headers{Authorization}, 'Bearer fallback_key', 'falls back to env on broker failure';
+}
+
+# --- a named key source that yields nothing ---
+#
+# The pass-through belongs to a node with no key of its own. A node that names one and cannot
+# produce it answers with a reason instead, and the caller refuses the request: forwarding the
+# client's header there would hand the customer's key to the provider (ADR 0003).
+sub refusal {
+  my ($headers, $skeid, $node_id) = @_;
+  my @answer;
+  my @warnings;
+  local $SIG{__WARN__} = sub { push @warnings, @_ };
+  Langertha::Skeid::Proxy::_inject_node_auth_async($headers, $skeid, $node_id, sub { push @answer, [@_] });
+  is scalar(@answer), 1, "$node_id: the callback runs exactly once";
+  return ($answer[0][0], join('', @warnings));
+}
+
+{
+  my $skeid = Langertha::Skeid->new;
+  $skeid->add_node(id => 'bare-node', url => 'http://test');
+  my %headers = (Authorization => 'Bearer client-key');
+  my ($reason) = refusal(\%headers, $skeid, 'bare-node');
+  is $reason, undef, 'a node with no key source has nothing to refuse';
+}
+
+{
+  # What a failed OpenBao login at boot leaves behind: references, and nobody to resolve them.
+  my $skeid = Langertha::Skeid->new;
+  $skeid->add_node(id => 'ref-node', url => 'http://test', api_key_ref => 'ref/orphan');
+
+  my %headers = (authorization => 'Bearer client-key', 'X-Api-Key' => 'client-key', accept => '*/*');
+  my ($reason) = refusal(\%headers, $skeid, 'ref-node');
+  like $reason, qr{api_key_ref 'ref/orphan'}, 'a reference without a broker is refused, by name';
+  unlike $reason, qr/client-key/, 'without the client key in the reason';
+  is \%headers, { accept => '*/*' },
+    'and the client credentials are taken out of the upstream headers, however they were spelled';
+}
+
+{
+  my $skeid = Langertha::Skeid->new(key_broker => FailBroker->new);
+  $skeid->add_node(id => 'fail-node', url => 'http://test', api_key_ref => 'ref/x');
+
+  my %headers = (Authorization => 'Bearer client-key');
+  my ($reason, $warned) = refusal(\%headers, $skeid, 'fail-node');
+  like $reason, qr{api_key_ref 'ref/x'}, 'a reference the broker cannot resolve is refused';
+  ok !exists $headers{Authorization}, 'and the client key does not stay in the upstream headers';
+  like $warned, qr{ref/x}, 'the broker failure is still logged with the reference';
+
+  my ($again) = refusal({ Authorization => 'Bearer client-key' }, $skeid, 'fail-node');
+  like $again, qr{api_key_ref 'ref/x'}, 'and so is its cached failure';
+}
+
+{
+  my $skeid = Langertha::Skeid->new(key_broker => FailBroker->new);
+  $skeid->add_node(id => 'env-node', url => 'http://test',
+    api_key_ref => 'ref/x', api_key_env => 'TEST_SKEID_KEY');
+
+  {
+    delete local $ENV{TEST_SKEID_KEY};
+    my ($reason) = refusal({ Authorization => 'Bearer client-key' }, $skeid, 'env-node');
+    like $reason, qr{api_key_ref 'ref/x'.*api_key_env 'TEST_SKEID_KEY' is not set},
+      'an unset variable is refused, and the reason names every source that was tried';
+  }
+  {
+    local $ENV{TEST_SKEID_KEY} = '';
+    my ($reason) = refusal({ Authorization => 'Bearer client-key' }, $skeid, 'env-node');
+    like $reason, qr{api_key_env 'TEST_SKEID_KEY' is empty}, 'an empty variable is refused too';
+  }
 }
 
 done_testing;
