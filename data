@@ -1,0 +1,22 @@
+---
+claimed_at: 2026-09-30T07:56:00Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-09-30T07:55:55Z
+created: 2026-09-30T07:52:31Z
+id: 85
+priority: medium
+started: 2026-09-30T07:52:59Z
+status: done
+tags:
+- docker
+- perf
+title: 'Dockerfile: install Cpanel::JSON::XS hard'
+updated: 2026-09-30T07:56:00Z
+---
+
+Without it -43% streaming throughput (docs/bench/2026-09-30-ev-json-binary.md, ADR 0019). cpanfile stays recommends.
+
+2026-09-30 07:54 Dockerfile: perl -MCpanel::JSON::XS -e 1 in build and runtime stage (recommends already installed by cpm; build now fails if missing). Compiler already in build stage. No docker build run.
+
+2026-09-30 07:56 Committed 512e2e0
