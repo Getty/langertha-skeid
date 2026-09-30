@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-09-30T03:56:56Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-09-30T03:56:56Z
+created: 2026-09-29T17:08:59Z
+id: 66
+priority: low
+started: 2026-09-30T03:49:24Z
+status: done
+tags:
+- protocols
+- aliases
+- question
+title: /v1/models and /api/tags list node models but never alias names
+updated: 2026-09-30T03:56:56Z
+---
+
+Found by the k60 README audit. Clients that discover models via /v1/models or /api/tags never see the model aliases/tiers they are supposed to call. Design question: should aliases be listed (and hide the raw node models?) -- needs a maintainer decision before code.
+
+2026-09-29 19:40 Second half of the same decision (2026-09-29 review): /v1/models and /api/tags answer without a key and are not filtered by the key's policy -- a key sees node models its policy denies. Decide together with the alias question: list per key (like the manifest, ADR 0015) or keep the public catalog.
+
+2026-09-30 03:53 Decision: /v1/models and /api/tags list node models plus alias names (raw models stay: a client can use them), once each, narrowed per key by policy (no key = default policy; routes stay open). One helper Skeid::list_models; Ollama renders via tags_from_models; no Anthropic model list route exists. Red test t/65-model-list-aliases.t failed 6/18 on old code, passes now with t/58. Full prove -lr t/ did not complete (loadguard slots busy / runs stalled) - please run it.
+
+2026-09-30 03:56 Committed as bb9d755
