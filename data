@@ -1,0 +1,31 @@
+---
+claimed_at: 2026-09-29T20:00:43Z
+claimed_by: skeid-protocol-worker
+class: standard
+completed: 2026-09-30T02:48:38Z
+created: 2026-09-29T19:37:30Z
+id: 72
+priority: high
+started: 2026-09-29T19:38:20Z
+status: done
+tags:
+- security
+- keybroker
+- proxy
+title: A node whose own key cannot be resolved forwards the client's key upstream
+updated: 2026-09-30T02:48:38Z
+---
+
+Found by reading Proxy.pm (2026-09-29), not reproduced yet.
+
+_inject_node_auth_async (lib/Langertha/Skeid/Proxy.pm) leaves the client's Authorization header untouched when neither the KeyBroker nor api_key_env yields a key. That is the documented pass-through for a node with NO key of its own. It also happens for a node that HAS api_key_ref / api_key_env configured but whose key cannot be resolved: broker error, cached failure, empty env var. And build_app only warns when the OpenBao login fails at boot and runs without a broker -- then has_key_broker is false and every api_key_ref node takes the pass-through branch.
+
+Result: the customer's Skeid key is sent to the upstream provider as Bearer token (ADR 0003 in spirit: a secret reaches a party that must never see it).
+
+Wanted: a node with a configured key source (api_key_ref or api_key_env) that resolves to nothing fails closed -- no upstream call, error in the face's own shape (502/503), request.finish with ok => 0, one usage event, the reference in the log but never a key. A node with neither keeps the pass-through. t/22-key-broker.t covers only the env-fallback case today.
+
+Reproduce first (red test), then fix.
+
+Commit-ready in /home/getty/dev/langertha-skeid/.claude/worktrees/agent-acb5d34f1a7cf6c7a. Red test first (t/61-node-key-fail-closed.t, t/22). Refuses with 503 upstream_key_unavailable; client credentials dropped in any spelling on success and refusal; a node gone from the inventory is refused too. Boot behaviour on a failed OpenBao login unchanged -- maintainer decision. Integrated with k73/k74/k76: prove -lr -I../langertha/lib t/ PASS, 65 files, 3391 tests.
+
+2026-09-30 02:48 Committed as e893e39
