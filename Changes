@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A client that hangs up is counted apart from node errors: the slot is
+      given back as a third outcome, aborted, which shows in the node metrics
+      as "aborted" and does not raise "error", the registry snapshot's
+      errors_in_window or last_failure_at. The usage event is ok 0,
+      status_code 499, error_type client_abort
     - An Ollama request (/api/chat, /api/generate) that the translator cannot read
       is answered with a 400 in Ollama's error shape, before anything is routed
       or metered, instead of an HTML 500. The exception's text is neither sent

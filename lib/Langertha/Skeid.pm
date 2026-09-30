@@ -3528,10 +3528,13 @@ sub start_request {
 =method finish_request
 
   $skeid->finish_request('gpu-1', ok => 1, duration_ms => 840);
+  $skeid->finish_request('gpu-1', aborted => 1);   # the client hung up
 
-Releases the slot L</start_request> took and counts the outcome for L</node_metrics>; a request
-that is not C<ok> also counts toward the registry snapshot's C<errors_in_window>. Never touches
-C<healthy>. Returns 1. The C<request.finish> function calls it.
+Releases the slot L</start_request> took and counts the outcome for L</node_metrics>. There are
+three outcomes: C<ok>, failed (neither C<ok> nor C<aborted>), and C<aborted> -- the client went
+away, which says nothing about the node. A failed request counts toward the registry snapshot's
+C<errors_in_window> and C<last_failure_at>; an aborted one is counted apart and toward neither.
+C<aborted> wins over C<ok>. Never touches C<healthy>. Returns 1. The C<request.finish> function calls it.
 
 =cut
 
@@ -3543,7 +3546,10 @@ sub finish_request {
   $cur = 0 if $cur < 0;
   $self->_inflight->{$node_id} = $cur;
 
-  if ($args{ok}) {
+  if ($args{aborted}) {
+    # The client left. The node did nothing wrong: not an error, not a failure in the window.
+    $self->_stats->{$node_id}{aborted} = 1 + ($self->_stats->{$node_id}{aborted} // 0);
+  } elsif ($args{ok}) {
     $self->_stats->{$node_id}{ok} = 1 + ($self->_stats->{$node_id}{ok} // 0);
   } else {
     $self->_stats->{$node_id}{error} = 1 + ($self->_stats->{$node_id}{error} // 0);
@@ -3644,7 +3650,7 @@ sub registry_snapshot {
   my $all = $skeid->node_metrics;
 
 Volatile per-process counters for operations, never billed: C<node_id>, C<inflight>,
-C<started>, C<ok>, C<error>, C<duration_ms_total>, and C<capacity> while a current reading
+C<started>, C<ok>, C<error>, C<aborted>, C<duration_ms_total>, and C<capacity> while a current reading
 exists. With no id, an arrayref with one entry per node. Served by C<GET /skeid/metrics/nodes>.
 
 =cut
@@ -3660,6 +3666,7 @@ sub node_metrics {
       started => 0 + ($s->{started} // 0),
       ok => 0 + ($s->{ok} // 0),
       error => 0 + ($s->{error} // 0),
+      aborted => 0 + ($s->{aborted} // 0),
       duration_ms_total => 0 + ($s->{duration_ms_total} // 0),
       # Present only when a probe has something current to say. A report must not present a
       # measured node and an inferred one as equally known (ADR 0009).
@@ -3703,7 +3710,7 @@ function names a required argument.
   capacity.observe    id, headers, status                   { capacity }
   capacity.forget     id (optional)                         { ok }
   request.start       id                                    { ok }
-  request.finish      id, ok, duration_ms                   { ok }
+  request.finish      id, ok|aborted, duration_ms                 { ok }
   config.reload                                             { config } (dies on failure)
   config.status                                             reload_status
   usage.record        as record_usage                       record_usage

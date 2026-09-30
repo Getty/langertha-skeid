@@ -229,9 +229,18 @@ sub paired_metrics {
   my $metrics = $skeid->node_metrics($id);
   is $metrics->{started}, $started, "$name: expected request.start count";
   is $metrics->{inflight}, 0, "$name: no request remains in flight";
-  is $metrics->{ok} + $metrics->{error}, $metrics->{started},
+  is $metrics->{ok} + $metrics->{error} + $metrics->{aborted}, $metrics->{started},
     "$name: every request.start has exactly one request.finish";
   return $metrics;
+}
+
+# What the registry snapshot tells a fronting tier about the node: no failure, so it is not
+# steered away from a node that did nothing wrong.
+sub no_node_failure {
+  my ($id, $name) = @_;
+  my ($row) = grep { $_->{id} eq $id } @{$skeid->registry_snapshot->{nodes}};
+  is $row->{errors_in_window}, 0, "$name: no error in the registry snapshot's window";
+  is $row->{last_failure_at}, undef, "$name: no failure time in the registry snapshot";
 }
 
 sub near {
@@ -322,7 +331,9 @@ subtest 'hanging up on a JSON request cancels the upstream call' => sub {
   $seen->{answer}->() if $seen->{answer};
   run_for(0.05);
   $metrics = paired_metrics('hold-json', 1, 'aborted JSON request');
-  is $metrics->{error}, 1, 'counted once, as failed';
+  is $metrics->{aborted}, 1, 'counted once, as aborted';
+  is $metrics->{error}, 0, 'a client that hung up is not a node error';
+  no_node_failure('hold-json', 'aborted JSON request');
   is scalar(@usage_events) - $events, 1, 'still one usage event after the upstream ended';
   released_since($from, 'controller of the aborted JSON request was destroyed');
 };
@@ -363,7 +374,9 @@ for my $face (qw(openai anthropic ollama)) {
     $seen->{answer}->() if $seen->{answer};
     run_for(0.05);
     my $metrics = paired_metrics($model, 1, 'aborted stream');
-    is $metrics->{error}, 1, 'counted once, as failed';
+    is $metrics->{aborted}, 1, 'counted once, as aborted';
+    is $metrics->{error}, 0, 'a client that hung up is not a node error';
+    no_node_failure($model, 'aborted stream');
     is scalar(@usage_events) - $events, 1, 'still one usage event after the upstream ended';
     released_since($from, 'controller of the aborted stream was destroyed');
   };
@@ -489,7 +502,9 @@ subtest 'hanging up while the upstream connection is being opened' => sub {
   $_->{answer} && $_->{answer}->() for seen_upstream('hold-connecting');
   run_for(0.05);
   my $metrics = paired_metrics('hold-connecting', 1, 'abort while connecting');
-  is $metrics->{error}, 1, 'counted once, as failed';
+  is $metrics->{aborted}, 1, 'counted once, as aborted';
+  is $metrics->{error}, 0, 'a client that hung up is not a node error';
+  no_node_failure('hold-connecting', 'abort while connecting');
   is scalar(@usage_events) - $events, 1, 'one usage event: the upstream call had been started';
   is $usage_events[-1]{error_type}, 'client_abort', 'usage event names the cause';
   released_since($from, 'controller was destroyed');

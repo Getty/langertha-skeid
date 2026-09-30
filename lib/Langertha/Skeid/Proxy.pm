@@ -121,8 +121,9 @@ included.
 A client that closes its connection before the answer is complete ends its request at that
 moment. While it waits for capacity it stops waiting and takes no slot. Once a node was called,
 the upstream connection is closed -- which is how the node learns to stop generating -- and is
-not returned to the pool; the slot is given back with a C<request.finish> that is not C<ok>, and
-the one usage event is written with C<ok = 0>, C<status_code> 499 and C<error_type>
+not returned to the pool; the slot is given back with a C<request.finish> marked C<aborted> -- counted apart, not as a node
+error, so the node's error counter and the registry snapshot's C<errors_in_window> stay untouched --
+and the one usage event is written with C<ok = 0>, C<status_code> 499 and C<error_type>
 C<client_abort>, priced from the usage the stream had reported until then (nothing, for a
 request that was not streamed). A client that leaves while the node's key is still being
 resolved gives its slot back too, but nothing was forwarded, so no usage event is written.
@@ -1037,6 +1038,7 @@ sub _proxy_openai_json_async {
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => 0,
+      aborted => 1,
       duration_ms => _duration_ms($started),
     });
     $cb->(undef, 1, 499);
@@ -1061,6 +1063,7 @@ sub _proxy_openai_json_async {
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => 0,
+      aborted => 1,
       duration_ms => $duration_ms,
     });
     _record_usage_event($c, {
@@ -1191,6 +1194,7 @@ sub _proxy_openai_stream {
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => 0,
+      aborted => 1,
       duration_ms => _duration_ms($started),
     });
     return;
@@ -1406,6 +1410,7 @@ sub _proxy_openai_stream {
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => 0,
+      aborted => 1,
       duration_ms => $duration_ms,
     });
     _record_usage_event($c, {
