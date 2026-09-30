@@ -2,6 +2,10 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - An Ollama request (/api/chat, /api/generate) that the translator cannot read
+      is answered with a 400 in Ollama's error shape, before anything is routed
+      or metered, instead of an HTML 500. The exception's text is neither sent
+      nor logged
     - Every answer carries an x-request-id header: on all three faces, on
       refusals, upstream errors and translator failures, and on streams before
       the first byte. The id is fixed when the request arrives -- the client's

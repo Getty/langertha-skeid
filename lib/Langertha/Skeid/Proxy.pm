@@ -777,7 +777,14 @@ sub _handle_ollama {
   my $wants_stream = exists $body->{stream} ? ($body->{stream} ? 1 : 0) : 1;
 
   my $request_method = $face->{request};
-  my $openai_body = Langertha::Skeid::Protocol::Ollama->$request_method($body);
+  # A body the translator cannot read is the client's malformed request. Uncaught it escapes as
+  # Mojolicious' HTML 500; answer a 400 in Ollama's shape before anything is routed or metered.
+  # The exception's text stays out of the answer and the log, as with a dying response translator.
+  my $openai_body = eval { Langertha::Skeid::Protocol::Ollama->$request_method($body) };
+  unless (ref($openai_body) eq 'HASH') {
+    _render_error($c, 400, 'Invalid request', 'invalid_request_error');
+    return;
+  }
   my $model = $openai_body->{model} // '';
   my $api_key_id = _request_api_key_id($c);
 
