@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A translator that dies on the Anthropic or Ollama face is answered in
+      that face's own error shape: an HTTP 500 while nothing was sent, an
+      error event or line once the stream is open. The upstream is cancelled,
+      the slot is given back, and one usage event is written as failed with
+      status_code 500 and error_type translation_error. The exception's text
+      is neither logged nor sent to the client
     - A client that hangs up before its answer is complete now ends its
       request. It used to go unnoticed: a request waiting for capacity kept
       polling, then took a slot it never gave back; a request already at a

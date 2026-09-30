@@ -719,15 +719,15 @@ sub _handle_anthropic_messages {
     delete $openai_body->{stream};
     $c->render_later;
     _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
-      my ($res, $err, $status, $upstream) = @_;
+      my ($res, $err, $status, $upstream, $payload) = @_;
       return if $err;
-
-      # response_from_openai reads a decoded OpenAI response ($upstream->{choices}, ...); the
-      # raw Mojo $res would read as all-undef and yield a well-formed but empty envelope (karr #26).
-      my $payload = Langertha::Skeid::Protocol::Anthropic->response_from_openai($upstream, $model);
       $c->res->code($status || 200);
       $c->res->headers->header('x-skeid-node' => $node_id);
       $c->render(json => $payload);
+    }, sub {
+      # response_from_openai reads a decoded OpenAI response ($upstream->{choices}, ...); the
+      # raw Mojo $res would read as all-undef and yield a well-formed but empty envelope (karr #26).
+      return Langertha::Skeid::Protocol::Anthropic->response_from_openai($_[0], $model);
     });
   });
 }
@@ -803,16 +803,16 @@ sub _handle_ollama {
     delete $openai_body->{stream};
     $c->render_later;
     _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
-      my ($res, $err, $status, $upstream) = @_;
+      my ($res, $err, $status, $upstream, $payload) = @_;
       return if $err;
-
-      # See the Anthropic path above: the translator needs the decoded upstream body, not the
-      # Mojo response object, or every field reads undef and the client gets empty content (karr #26).
-      my $response_method = $face->{response};
-      my $payload = Langertha::Skeid::Protocol::Ollama->$response_method($upstream);
       $c->res->code($status || 200);
       $c->res->headers->header('x-skeid-node' => $node_id);
       $c->render(json => $payload);
+    }, sub {
+      # See the Anthropic path above: the translator needs the decoded upstream body, not the
+      # Mojo response object, or every field reads undef and the client gets empty content (karr #26).
+      my $response_method = $face->{response};
+      return Langertha::Skeid::Protocol::Ollama->$response_method($_[0]);
     });
   });
 }
@@ -999,8 +999,12 @@ sub _client_abort_event {
   );
 }
 
+# $translate is an optional coderef that turns the decoded upstream answer into what the client
+# gets. It runs before the request is finished and metered, so a translator that dies is one
+# failed request -- one usage event with ok => 0, an error in the face's own shape -- and the
+# callback gets the translated payload as its fifth argument, or nothing after an error.
 sub _proxy_openai_json_async {
-  my ($c, $url, $body, $node_id, $started, $meta, $cb) = @_;
+  my ($c, $url, $body, $node_id, $started, $meta, $cb, $translate) = @_;
   $meta ||= {};
   $cb ||= sub { };
 
@@ -1088,6 +1092,33 @@ sub _proxy_openai_json_async {
     }
 
     my $status = $res->code // 200;
+    my $payload = eval { $res->json };
+
+    my $translated;
+    if ($translate) {
+      $translated = eval { $translate->(ref($payload) eq 'HASH' ? $payload : {}) };
+      unless (defined $translated) {
+        $c->app->log->error('Translating the answer of node ' . $node_id . ' failed');
+        $c->skeid->call_function('request.finish', {
+          id => $node_id,
+          ok => 0,
+          duration_ms => $duration_ms,
+        });
+        _record_usage_event($c, {
+          %$meta,
+          node_id       => $node_id,
+          status_code   => 500,
+          ok            => 0,
+          duration_ms   => $duration_ms,
+          error_type    => 'translation_error',
+          error_message => 'Response translation failed',
+          metrics       => {},
+        });
+        _render_error($c, 500, 'Response translation failed', 'api_error');
+        $cb->(undef, 1, 500);
+        return;
+      }
+    }
 
     $c->skeid->call_function('request.finish', {
       id => $node_id,
@@ -1095,7 +1126,6 @@ sub _proxy_openai_json_async {
       duration_ms => $duration_ms,
     });
 
-    my $payload = eval { $res->json };
     my $metrics = {};
     if (ref($payload) eq 'HASH') {
       my $tool_calls = eval { [ map { $_->to_hash } Langertha::ToolCall->extract('openai', $payload) ] } || [];
@@ -1111,7 +1141,7 @@ sub _proxy_openai_json_async {
       metrics      => $metrics,
     });
 
-    $cb->($res, 0, $status, (ref($payload) eq 'HASH' ? $payload : {}));
+    $cb->($res, 0, $status, (ref($payload) eq 'HASH' ? $payload : {}), $translated);
   });
   });
 
@@ -1206,6 +1236,56 @@ sub _proxy_openai_stream {
   # frame -- usually the last one, which is the one carrying usage.
   my $pending = '';
 
+  # Set by whichever comes first, the upstream's completion, the client hanging up or a
+  # translator that died, so that request.finish and the usage event happen once.
+  my $closed = 0;
+
+  # A translator that dies on a chunk ends the request here, not in the upstream callback the
+  # exception would escape from: the upstream is cancelled, the slot given back, one failed usage
+  # event written, and the client answered in its own face's error shape -- an HTTP error when
+  # nothing was queued for it yet, an in-band error event when the stream is open. The
+  # exception's text is neither logged nor sent: it is the translator's own and may quote the
+  # request.
+  my $wrote = 0;
+  my $fail_translation = sub {
+    return if $closed;
+    $closed = 1;
+    $tx->res->content->unsubscribe('read');
+    my $duration_ms = _duration_ms($started);
+    $c->skeid->call_function('request.finish', {
+      id => $node_id,
+      ok => 0,
+      duration_ms => $duration_ms,
+    });
+    _record_usage_event($c, {
+      %$meta,
+      node_id       => $node_id,
+      status_code   => 500,
+      ok            => 0,
+      duration_ms   => $duration_ms,
+      error_type    => 'translation_error',
+      error_message => 'Stream translation failed',
+      content_bytes => $content_bytes->(),
+      metrics       => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
+    });
+    _cancel_upstream($tx);
+    $upstream_done = 1;
+    if (!$wrote) {
+      $c->res->headers->remove($_) for @{$c->res->headers->names};
+      _render_error($c, 500, 'Stream translation failed', 'api_error');
+      undef $drain;
+      return;
+    }
+    my $frame = eval { $stream_errors ? $stream->error_event(500, 'Stream translation failed') : '' };
+    push @queue, $frame if defined $frame && length $frame;
+    $drain->() unless $draining;
+    if (!$draining && !$finished) {
+      $finished = 1;
+      $c->finish;
+      undef $drain;
+    }
+  };
+
   $tx->res->content->unsubscribe('read')->on(read => sub {
     my ($content, $bytes) = @_;
     # Kept only to lift the upstream's own error message into the error the client gets.
@@ -1260,8 +1340,14 @@ sub _proxy_openai_stream {
         $upstream_usage = _merge_usage($upstream_usage, $json->{usage});
       }
 
-      my $out = $stream ? $stream->delta($json) : '';
-      $translated .= $out;
+      if ($stream) {
+        my $out = eval { $stream->delta($json) };
+        unless (defined $out) {
+          $c->app->log->error('Translating a stream chunk failed for node ' . $node_id);
+          return $fail_translation->();
+        }
+        $translated .= $out;
+      }
     }
 
     # The first read event fires with an empty chunk as soon as the upstream headers are
@@ -1269,17 +1355,15 @@ sub _proxy_openai_stream {
     # end the stream before its first token -- headers, no body, no error.
     if ($stream) {
       return unless length $translated;
+      $wrote = 1;
       push @queue, $translated;
     } else {
       return unless length $bytes;
+      $wrote = 1;
       push @queue, $bytes;
     }
     $drain->() unless $draining;
   });
-
-  # Set by whichever comes first, the upstream's completion or the client hanging up, so that
-  # request.finish and the usage event happen once.
-  my $closed = 0;
 
   $c->tx->on(finish => sub {
     # Also emitted when the answer is complete, and then there is nothing left to do here. When
