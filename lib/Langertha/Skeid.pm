@@ -7,7 +7,7 @@ use warnings;
 use Carp qw(croak);
 use POSIX qw(strftime);
 use Digest::SHA qw(sha1_hex sha256_hex);
-use Scalar::Util qw(blessed looks_like_number refaddr reftype);
+use Scalar::Util qw(blessed looks_like_number refaddr reftype weaken);
 use Time::HiRes ();
 use YAML::PP;
 use Langertha ();
@@ -402,11 +402,18 @@ The provider manifest: C<enabled>, C<public_url>, C<provider_id> (default C<skei
     # sqlite:     sqlite_path (or path, db_path), schema_file, auto_migrate (default on)
     # postgresql: dsn, or host (127.0.0.1) / port (5432) / dbname or database (skeid);
     #             user, password or password_env, schema_file, auto_migrate (default on)
+    # sqlite and postgresql: flush_interval_ms (default 0) -- above 0, queue events and
+    #             write them in one transaction per interval (write-behind)
 
 Where usage events go; see L<Langertha::Skeid::UsageStore/normalize_config> for the inference and
 the defaults. C<usage_db_path>, a top-level key, is the older spelling of a sqlite store and is
 read only when C<usage_store> is absent. A changed store is swapped on reload; a removed one stays
 in force until restart, with a warning -- see L</CONFIGURATION>.
+
+C<flush_interval_ms> moves a database write off the request path: the request is answered at
+once and the queued events are written together once per interval. Queued events are held in
+memory until then; a process that is killed rather than stopped loses them. See
+L<Langertha::Skeid::UsageStore::DBI/flush_interval_ms> and ADR 0005.
 
 =head1 ENVIRONMENT
 
@@ -713,6 +720,24 @@ C<limit>.
 has query_usage_report => (
   is        => 'ro',
   predicate => 'has_query_usage_report',
+);
+
+=attr on_usage_lost
+
+  $skeid->on_usage_lost(sub { my ($skeid, $event, $error) = @_; ... });
+
+Optional code ref (C<has_on_usage_lost> is its predicate), called for every usage event a
+write-behind store (C<usage_store.flush_interval_ms>) queued and then could not write. The
+request was answered before the write was tried, so this is the only place that failure can be
+said. L<Langertha::Skeid::Proxy/build_app> sets it to the proxy's C<usage event lost> log line;
+without it Skeid C<warn>s. A failure of a synchronous write is the caller's to report, from the
+answer of L</record_usage>, and never comes here.
+
+=cut
+
+has on_usage_lost => (
+  is        => 'rw',
+  predicate => 'has_on_usage_lost',
 );
 
 =attr admin_api_key
@@ -2188,7 +2213,8 @@ sub _configure_usage_store {
     && (($old->{user} // '') eq ($normalized->{user} // ''))
     && (($old->{password} // '') eq ($normalized->{password} // ''))
     && (($old->{schema_file} // '') eq ($normalized->{schema_file} // ''))
-    && ((($old->{auto_migrate} // 1) ? 1 : 0) == (($normalized->{auto_migrate} // 1) ? 1 : 0));
+    && ((($old->{auto_migrate} // 1) ? 1 : 0) == (($normalized->{auto_migrate} // 1) ? 1 : 0))
+    && (($old->{flush_interval_ms} // 0) == ($normalized->{flush_interval_ms} // 0));
 
   # Rebuild when the config changed, and also when there simply is no store object yet:
   # BUILD hands us the caller's raw config as $old, which can compare equal to its own
@@ -2199,6 +2225,12 @@ sub _configure_usage_store {
     # fails the reload with the old store still connected (reload_config is all or nothing).
     my $store = Langertha::Skeid::UsageStore->for_config($normalized);
     $store->prepare if $store;
+    if ($store && $store->can('on_lost')) {
+      weaken(my $weak = $self);
+      $store->on_lost(sub { $weak->_usage_lost(@_) if $weak });
+    }
+    # The old store flushes what it still holds on the way out: those events were recorded
+    # while it was the configured destination.
     $self->_disconnect_usage_store;
     $self->usage_store($normalized);
     $self->_usage_store_obj($store);
@@ -2398,6 +2430,40 @@ sub _store_usage_event {
   my $store = $self->_usage_store_obj;
   return { ok => 0, enabled => 0, error => 'usage_store not configured' } unless $store;
   return $store->store($event);
+}
+
+# A queued event the store could not write (skeid k78): through on_usage_lost when the
+# embedding application -- the proxy -- set it, else a warning. Never the DSN, never a key.
+sub _usage_lost {
+  my ($self, $event, $err) = @_;
+  return $self->on_usage_lost->($self, $event, $err) if $self->has_on_usage_lost;
+  my $cfg = $self->usage_store;
+  warn 'skeid: usage event lost: request_id=' . ($event->{request_id} // '')
+    . ' store=' . ((ref($cfg) eq 'HASH' && $cfg->{backend}) || 'custom')
+    . ' api_key_id=' . ($event->{api_key_id} // '')
+    . ' model=' . ($event->{model} // '')
+    . ' status=' . ($event->{status_code} // 0)
+    . ': ' . ($err // 'unknown error') . "\n";
+  return;
+}
+
+=method flush_usage
+
+  my $res = $skeid->flush_usage;
+
+Writes the usage events a write-behind store still holds (see
+L<Langertha::Skeid::UsageStore::DBI/flush>) and returns its answer, or C<< { ok => 1, written
+=> 0 } >> when the store holds nothing back. F<bin/skeid> calls it when the server stops, and an
+application embedding the proxy should call it before it exits: queued events live in memory
+only. Replacing the store on a reload and destroying this object flush as well.
+
+=cut
+
+sub flush_usage {
+  my ($self) = @_;
+  my $store = $self->_usage_store_obj;
+  return { ok => 1, written => 0 } unless $store && $store->can('flush');
+  return $store->flush;
 }
 
 # True when a usage event has somewhere to go: a store_usage_event callback, a

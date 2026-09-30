@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A SQLite or PostgreSQL usage store can write behind the request:
+      usage_store.flush_interval_ms queues each event and writes the queue in
+      one transaction per interval, so the answer no longer waits for the
+      database. Off by default (0 = write each event at once). Queued events
+      are written on reload, shutdown, before a report and by flush_usage; a
+      process killed without a flush loses them. An event a flush cannot write
+      is logged as "usage event lost", as before
     - GET /v1/models and GET /api/tags list the alias names as well as the
       node models, one entry per name (an alias named like a model is listed
       once), and follow the policy of the key presented -- no key means the

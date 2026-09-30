@@ -9,6 +9,8 @@ use File::Basename qw(dirname);
 use File::Path qw(make_path);
 use File::Spec;
 use File::ShareDir qw(dist_dir);
+use Mojo::IOLoop;
+use Scalar::Util qw(weaken);
 use Langertha::Skeid::UsageStore;
 
 =head1 DESCRIPTION
@@ -16,9 +18,17 @@ use Langertha::Skeid::UsageStore;
 Usage events in a real database — SQLite for a single box, PostgreSQL for a deployment. Both
 speak the same C<usage_events> table, shipped as F<share/sql/usage_events.E<lt>backendE<gt>.sql>.
 
-Writing here costs a synchronous database round-trip on the request path, which is why
-L<Langertha::Skeid::UsageStore::JsonLog> is the recommended default and this backend is a
-deliberate choice. See F<docs/adr/0004-usage-events-are-the-billing-unit.md>.
+By default every event costs a synchronous database round-trip -- and a commit -- on the request
+path, which is why L<Langertha::Skeid::UsageStore::JsonLog> is the recommended default and this
+backend is a deliberate choice. See F<docs/adr/0004-usage-events-are-the-billing-unit.md>.
+
+C<flush_interval_ms> turns on write-behind: while the event loop runs, L</store> only queues the
+event and answers at once, and a L<Mojo::IOLoop> timer writes the queue in one transaction. The
+request is answered without waiting for the database, and a burst of events costs one commit
+instead of one each. The flush itself is still a synchronous database call on the loop -- it
+runs once per interval instead of once per request, it is not off the loop. The price is a wider
+loss window: events still queued when the process dies without a flush are lost (ADR 0005,
+Update skeid k78). Off by default.
 
 C<DBI> is loaded at runtime rather than compile time: a Skeid that never configures a database
 backend must not require one to be installed.
@@ -53,6 +63,21 @@ Explicit schema path. Empty means "find the shipped one for this backend".
 
 Apply the schema when the store is prepared. On by default.
 
+=attr flush_interval_ms
+
+Write-behind interval in milliseconds; C<0> (the default) writes every event synchronously when
+L</store> is called. Above C<0>, L</store> queues the event while L<Mojo::IOLoop> is running, and
+the first queued event arms a timer that calls L</flush> after this many milliseconds. With no
+running loop there is nothing to protect and nothing to fire the timer, so L</store> writes at
+once, after anything still queued.
+
+=attr on_lost
+
+Optional code ref, called as C<< ->($event, $error) >> for every queued event a L</flush> could
+not write -- the request it describes was answered long ago, so there is no caller left to hand
+the failure to. L<Langertha::Skeid> sets it to its own lost-event report. Without it the store
+C<warn>s one line naming the request id and the backend, never the DSN.
+
 =cut
 
 has backend      => (is => 'ro', required => 1);
@@ -62,8 +87,12 @@ has password     => (is => 'ro', default => sub { '' });
 has path         => (is => 'ro', default => sub { '' });
 has schema_file  => (is => 'ro', default => sub { '' });
 has auto_migrate => (is => 'ro', default => sub { 1 });
+has flush_interval_ms => (is => 'ro', default => sub { 0 });
+has on_lost      => (is => 'rw');
 
 has _dbh => (is => 'rw');
+has _queue => (is => 'ro', default => sub { [] });
+has _flush_timer => (is => 'rw');
 
 =method prepare
 
@@ -181,13 +210,22 @@ sub dbh {
 
 =method disconnect
 
-Drops the cached handle, so the next L</dbh> connects anew. Called when the store is replaced,
-from Skeid's C<DEMOLISH>, and by L</store> / L</report> when a failed statement left the
-handle dead.
+Writes what is still queued (L</flush>), then drops the cached handle, so the next L</dbh>
+connects anew. Called when the store is replaced on a reload -- the queued events belong to this
+store's destination, not the next one's -- and from Skeid's C<DEMOLISH>.
 
 =cut
 
 sub disconnect {
+  my ($self) = @_;
+  $self->flush;
+  $self->_drop_handle;
+  return;
+}
+
+# Forget the handle without flushing: what _with_handle does to a handle a failed statement left
+# dead, in the middle of a flush as well -- where a flush of its own would be a re-entry.
+sub _drop_handle {
   my ($self) = @_;
   my $dbh = $self->_dbh or return;
   eval { $dbh->disconnect };
@@ -242,6 +280,10 @@ is reported, never thrown, because the request it describes has already been ser
 logs such an answer at C<error> level as a lost usage event. A C<password=> in the error text
 (a DSN that carries one) is masked.
 
+With L</flush_interval_ms> set and the event loop running, the event is queued instead and the
+answer is C<< { ok => 1, queued => 1 } >>, without an C<id>: the row does not exist yet. What
+becomes of it is L</flush>'s to report.
+
 A dropped connection is survived: when the insert fails and the handle turns out to be dead
 (not C<Active>, or C<ping> fails -- checked only after a failure, so a healthy write costs
 nothing extra), the store connects once more and retries that one event once. The new handle
@@ -259,10 +301,133 @@ nothing to reconcile.
 
 sub store {
   my ($self, $event) = @_;
+  if ($self->_writes_behind) {
+    push @{ $self->_queue }, { %$event };
+    $self->_arm_flush;
+    return { ok => 1, queued => 1 };
+  }
+  # Whatever was queued while the loop ran goes first, so the table keeps the order the events
+  # arrived in.
+  $self->flush if @{ $self->_queue };
   return $self->_with_handle(sub {
     my ($dbh) = @_;
     return { ok => 1, $self->_insert($dbh, $event) };
   });
+}
+
+# Queue only while a loop runs to fire the flush timer. Outside one -- a script calling
+# usage.record, the prefork manager before it forks -- there is no request path to keep free and
+# a queue that nothing would ever write.
+sub _writes_behind {
+  my ($self) = @_;
+  return 0 unless $self->flush_interval_ms > 0;
+  return Mojo::IOLoop->is_running ? 1 : 0;
+}
+
+sub _arm_flush {
+  my ($self) = @_;
+  return if defined $self->_flush_timer;
+  weaken(my $weak = $self);
+  $self->_flush_timer(Mojo::IOLoop->timer($self->flush_interval_ms / 1000 => sub {
+    return unless $weak;
+    $weak->_flush_timer(undef);
+    $weak->flush;
+  }));
+  return;
+}
+
+=method flush
+
+  my $res = $store->flush;
+
+Writes every queued event in one transaction and empties the queue. Returns
+C<< { ok => 1, written => $n } >>, or C<< { ok => 0, written => $n, lost => $m, error => … } >>
+when some could not be written; each of those is also handed to L</on_lost>. Never dies, never
+waits, never retries later: every queued event gets the one attempt a synchronous L</store>
+would have given it.
+
+A failing batch is rolled back, so nothing is half written. When the handle survived the failure
+-- one event a constraint rejects, a dropped table -- the events are written one by one, so a
+single bad event loses only itself. When the handle died, it is reconnected once and the batch
+retried once, as for L</store>; a reconnect that fails loses the whole batch with one connect
+attempt, not one per event. The duplicate corner of L</store> applies to a batch: a connection
+that drops after the server committed but before it answered is retried as a whole.
+
+Called by the flush timer, by L</disconnect>, by L</report> (so a report counts what was queued)
+and by L</store> when it writes synchronously. L<Langertha::Skeid/flush_usage> calls it.
+
+=cut
+
+sub flush {
+  my ($self) = @_;
+  if (defined(my $timer = $self->_flush_timer)) {
+    Mojo::IOLoop->remove($timer);
+    $self->_flush_timer(undef);
+  }
+  my @events = splice @{ $self->_queue };
+  return { ok => 1, written => 0 } unless @events;
+
+  my $batch = $self->_with_handle(sub {
+    my ($dbh) = @_;
+    $dbh->begin_work;
+    my $done = eval {
+      $self->_insert($dbh, $_) for @events;
+      $dbh->commit;
+      1;
+    };
+    unless ($done) {
+      my $err = $@;
+      eval { $dbh->rollback };
+      die $err;
+    }
+    return { ok => 1, written => scalar @events };
+  });
+  return $batch if $batch->{ok};
+
+  # No handle left: the reconnect failed, and one attempt per event would only repeat it.
+  return $self->_lose(0, \@events, $batch->{error}) unless $self->_dbh;
+
+  my ($written, $lost, $error) = (0, 0);
+  while (@events) {
+    my $event = shift @events;
+    my $one = $self->_with_handle(sub {
+      my ($dbh) = @_;
+      $self->_insert($dbh, $event);
+      return { ok => 1 };
+    });
+    if ($one->{ok}) {
+      $written++;
+      next;
+    }
+    $lost++;
+    $error = $one->{error};
+    $self->_report_lost($event, $error);
+    next if $self->_dbh;
+    # The handle died under the single writes and did not come back: the rest go with it.
+    $lost += $self->_lose(0, \@events, $error)->{lost};
+    last;
+  }
+  return $lost
+    ? { ok => 0, written => $written, lost => $lost, error => $error }
+    : { ok => 1, written => $written };
+}
+
+# Reports every event in $events as lost and answers the flush with it.
+sub _lose {
+  my ($self, $written, $events, $err) = @_;
+  my $failure = $self->_failure($err);
+  $self->_report_lost($_, $failure->{error}) for @$events;
+  return { ok => 0, written => $written, lost => scalar(@$events), error => $failure->{error} };
+}
+
+sub _report_lost {
+  my ($self, $event, $err) = @_;
+  my $cb = $self->on_lost;
+  return if $cb && eval { $cb->($event, $err); 1 };
+  # A timer callback that dies takes the reactor's error path; a lost event must still be said.
+  warn 'skeid: usage event lost: request_id=' . ($event->{request_id} // '')
+    . ' store=' . $self->backend . ': ' . $err . "\n";
+  return;
 }
 
 # Runs $work with the store's handle and returns its answer, or { ok => 0, error } when it dies.
@@ -279,7 +444,7 @@ sub _with_handle {
   my $err = $@;
   return $self->_failure($err) if $self->_handle_alive($dbh);
 
-  $self->disconnect;
+  $self->_drop_handle;
   my $fresh = eval { $self->dbh };
   return $self->_failure('usage database connection lost, reconnect failed: '
     .($@ || 'no database handle')) unless $fresh;
@@ -371,13 +536,15 @@ The same C<since> / C<api_key_id> / C<model> filter set applies to every part of
 the breakdowns always add up to the totals shown next to them. C<limit> defaults to 20. The shape
 is described in L<Langertha::Skeid::UsageStore/The store contract>; a failure to connect or a
 failing query is C<< { ok => 0, enabled => 0, error => … } >>. A dropped connection is
-reconnected once, exactly as for L</store>.
+reconnected once, exactly as for L</store>. Queued events are flushed first, so a report counts
+every event recorded before it was asked for.
 
 =cut
 
 sub report {
   my ($self, $filters) = @_;
   $filters ||= {};
+  $self->flush;
 
   my $report = $self->_with_handle(sub {
     my ($dbh) = @_;

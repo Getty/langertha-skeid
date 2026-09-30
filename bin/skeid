@@ -51,6 +51,16 @@ $opts{worker_count} = $workers;
 
 my $app = Langertha::Skeid::Proxy->build_app(%opts);
 
+# A write-behind usage store (usage_store.flush_interval_ms) holds events in memory until its
+# timer fires. The loop stops before that on SIGINT/SIGTERM to a single process, and a prefork
+# worker leaves through exit after a graceful stop (SIGQUIT) -- both run END, the last point the
+# database handle is still alive. Without it those events, billed requests, would be gone
+# (skeid k78). A worker the prefork manager SIGKILLs runs nothing.
+END {
+  local $?;
+  $app->skeid->flush_usage if $app;
+}
+
 print "Starting Skeid proxy on http://$listen\n";
 print "Config: ", ($opts{config_file} // '(none)'), "\n";
 print "Workers: $workers\n" if $workers > 1;
@@ -319,6 +329,11 @@ Prefork worker count (default 1; below 1 counts as 1). Each worker admits its sh
 node's C<max_conns> and polls capacity probes at its share of the rate (ADR 0010). Under several
 workers a SQLite usage store is unsafe, and an admin API write reaches only the worker that
 served it.
+
+A usage store with C<flush_interval_ms> holds events in memory until they are written; stopping
+the server writes them. Stop a prefork server with C<SIGQUIT> (graceful): on C<SIGINT> or
+C<SIGTERM> Mojolicious's prefork manager kills its workers with C<SIGKILL>, and what they still
+held is lost. A single process (C<--workers 1>) flushes on C<SIGINT> and C<SIGTERM> as well.
 
 =head2 usage
 

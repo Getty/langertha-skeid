@@ -73,3 +73,15 @@ prepared before the old one is let go, so events keep flowing to a named destina
 with every later request unbilled and nothing but the missing rows to show for it. So the
 running store stays in force until restart, and the reload logs once that it was removed. A
 restart applies the absence — at start-up, where it is visible, not in the middle of traffic.
+
+## Update (skeid k78, 2026-09-30): write-behind is opt-in and widens the loss window
+
+The Consequences above accept that a crash loses the one event of the request in flight, and
+require a store that can block to be opt-in. A DBI store with `usage_store.flush_interval_ms`
+answers `store` with `{ ok => 1, queued => 1 }` and writes the queue later, in one transaction
+per interval (ADR 0005, Update skeid k78). An event means the same thing wherever it is written,
+and every event still gets one write attempt, a failure is still reported — through
+`Skeid->on_usage_lost`, since the request's answer has gone out — but a process that dies
+without a flush loses every event queued since the last one, not only the request in flight.
+That changes what an outage can cost the billing record, so it is off by default and an
+operator opts into it with the interval that bounds the window.

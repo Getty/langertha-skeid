@@ -7,7 +7,7 @@ use Mojolicious;
 use Mojo::IOLoop;
 use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
-use Scalar::Util qw(blessed);
+use Scalar::Util qw(blessed weaken);
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::Registry;
@@ -170,6 +170,10 @@ set before any admission or probe timer reads it.
 
 =back
 
+The Skeid's L<Langertha::Skeid/on_usage_lost> is set to this app's C<usage event lost> log line,
+so a usage event a write-behind store could not write is logged like one whose synchronous write
+failed. An embedding application that wants its own hook sets it after C<build_app>.
+
 With both C<OPENBAO_ROLE_ID> and C<OPENBAO_SECRET_ID> set, a
 L<Langertha::Skeid::KeyBroker::OpenBao> at C<OPENBAO_ADDR> (default C<http://127.0.0.1:8200>)
 becomes the key broker; if its login fails the proxy warns and runs without one. A broker that
@@ -234,6 +238,18 @@ sub build_app {
 
   my $app = Mojolicious->new;
   $app->secrets(['skeid-proxy']);
+
+  # A write-behind usage store (usage_store.flush_interval_ms) writes after the request was
+  # answered, so its failures cannot come back through _record_usage_event; they come here and
+  # get the same log line (skeid k78). Weak: the app holds the skeid, the skeid holds this.
+  weaken(my $weak_app = $app);
+  $skeid->on_usage_lost(sub {
+    my ($skeid, $event, $err) = @_;
+    return _log_lost_usage_event($weak_app, $skeid, $event, $err) if $weak_app;
+    warn 'skeid: usage event lost: request_id=' . ($event->{request_id} // '') . ': '
+      . ($err // 'unknown error') . "\n";
+    return;
+  });
   $app->ua->connect_timeout(10);
   # One number for how long an upstream may take and how long it may be silent: a model that
   # thinks sends nothing until its first token, and Mojo::UserAgent closes a connection that
@@ -1878,27 +1894,40 @@ sub _record_usage_event {
     $err = $recorded->{error} // 'unknown error';
   }
   if (defined $err) {
-    # The event is the billing unit (ADR 0004) and it is gone: say so at a level production
-    # keeps, with what an operator needs to reconcile it by hand. The request id and the key
-    # id, never the key -- the key id is a digest (ADR 0016), the key is a secret (ADR 0003).
-    $err =~ s/\s+$//;
-    $c->app->log->error('usage event lost: request_id=' . $request_id
-      . ' store=' . _usage_sink_name($c)
-      . ' api_key_id=' . ($args->{api_key_id} // 'anonymous')
-      . ' model=' . ($args->{model} // '')
-      . ' status=' . ($args->{status_code} // 0)
-      . ': ' . $err);
+    _log_lost_usage_event($c->app, $c->skeid, {
+      request_id  => $request_id,
+      api_key_id  => ($args->{api_key_id} // 'anonymous'),
+      model       => $args->{model},
+      status_code => $args->{status_code},
+    }, $err);
   }
 
   return $recorded;
+}
+
+# The event is the billing unit (ADR 0004) and it is gone: say so at a level production keeps,
+# with what an operator needs to reconcile it by hand. The request id and the key id, never the
+# key -- the key id is a digest (ADR 0016), the key is a secret (ADR 0003). One line for both
+# ways an event is lost: a write that failed while the request waited, and a queued one a
+# write-behind flush could not write later (skeid k78).
+sub _log_lost_usage_event {
+  my ($app, $skeid, $event, $err) = @_;
+  $err //= 'unknown error';
+  $err =~ s/\s+$//;
+  $app->log->error('usage event lost: request_id=' . ($event->{request_id} // '')
+    . ' store=' . _usage_sink_name($skeid)
+    . ' api_key_id=' . ($event->{api_key_id} // 'anonymous')
+    . ' model=' . ($event->{model} // '')
+    . ' status=' . ($event->{status_code} // 0)
+    . ': ' . $err);
+  return;
 }
 
 # Which sink a lost usage event was meant for, for the log line: the store's backend name, or
 # how the embedding application took the event over. Never the DSN or path, which may carry
 # credentials.
 sub _usage_sink_name {
-  my ($c) = @_;
-  my $skeid = $c->skeid;
+  my ($skeid) = @_;
   return 'store_usage_event' if $skeid->has_store_usage_event;
   my $cfg = $skeid->usage_store;
   return (ref($cfg) eq 'HASH' && length($cfg->{backend} // '')) ? $cfg->{backend} : 'custom';

@@ -19,13 +19,18 @@ L<Langertha::Skeid::UsageStore::JsonLog> or L<Langertha::Skeid::UsageStore::DBI>
 
 A store object answers C<backend> (its name), C<prepare> (create what it needs; called once
 when the store is configured, may croak), C<store($event)>, C<report(\%filters)> and
-C<disconnect>. C<store> and C<report> report failure in their answer rather than dying: the
-request an event describes has already been served. The proxy logs a failed C<store> at
+C<disconnect>. A store that can hold events back also answers C<flush> (write what it holds,
+answer like C<store> with C<written> and C<lost> counts) and C<disconnect> flushes before it lets
+go; L<Langertha::Skeid::UsageStore::DBI> with C<flush_interval_ms> is one. C<store> and
+C<report> report failure in their answer rather than dying: the request an event describes has
+already been served. The proxy logs a failed C<store> at
 C<error> level as a lost usage event, with the request id and the backend name -- never a DSN,
 a path or a key. An error text must not carry a secret either; the DBI store masks a
 C<password=> from its DSN.
 
-C<store> returns C<< { ok => 1 } >> (with an C<id> where the backend has one) or
+C<store> returns C<< { ok => 1 } >> (with an C<id> where the backend has one),
+C<< { ok => 1, queued => 1 } >> for an event held for a later C<flush> -- whose failures the store
+reports itself, the proxy's answer having gone out by then -- or
 C<< { ok => 0, error => $message } >>. C<report> takes the filters C<since> (an ISO 8601 UTC
 timestamp, compared as a string), C<api_key_id>, C<model> (the served model) and C<limit>, and
 returns
@@ -71,15 +76,18 @@ needs a path. A C<path> alone is therefore a sqlite file; a jsonlog store must s
 when the path is an existing directory or ends in C</>, else C<file>; C<fsync> (default off).
 
 =item * sqlite -- C<sqlite_path> (or C<path>, C<db_path>), required; C<schema_file> (default:
-the shipped one); C<auto_migrate> (default on).
+the shipped one); C<auto_migrate> (default on); C<flush_interval_ms> (default C<0>, write each
+event at once; see L<Langertha::Skeid::UsageStore::DBI/flush_interval_ms>).
 
 =item * postgresql -- C<dsn>, else one built from C<host> (default C<127.0.0.1>), C<port> (5432)
 and C<dbname> or C<database> (C<skeid>); C<user>; C<password>, or C<password_env> naming the
-variable that holds it; C<schema_file>; C<auto_migrate> (default on).
+variable that holds it; C<schema_file>; C<auto_migrate> (default on); C<flush_interval_ms>, as
+for sqlite.
 
 =back
 
-Croaks on a config that is not a hashref, a missing path, or an unknown backend.
+Croaks on a config that is not a hashref, a missing path, an unknown backend, or a
+C<flush_interval_ms> that is not a whole number of milliseconds.
 
 =cut
 
@@ -109,6 +117,7 @@ sub normalize_config {
       password     => '',
       schema_file  => ($cfg->{schema_file} // ''),
       auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
+      flush_interval_ms => $class->_flush_interval_ms($cfg),
     };
   }
 
@@ -132,6 +141,7 @@ sub normalize_config {
       password     => $password,
       schema_file  => ($cfg->{schema_file} // ''),
       auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
+      flush_interval_ms => $class->_flush_interval_ms($cfg),
     };
   }
 
@@ -151,6 +161,17 @@ sub normalize_config {
   }
 
   croak "unsupported usage_store backend '$backend'";
+}
+
+# Write-behind for the DBI backends (skeid k78). 0 -- the default -- is the synchronous write
+# every deployment had before; anything else widens the loss window, so it has to be asked for
+# with a number that means what it says.
+sub _flush_interval_ms {
+  my ($class, $cfg) = @_;
+  my $ms = $cfg->{flush_interval_ms} // 0;
+  croak 'usage_store.flush_interval_ms must be a whole number of milliseconds (0 = write each event at once)'
+    unless $ms =~ /\A\d+\z/;
+  return 0 + $ms;
 }
 
 =method for_config
@@ -187,6 +208,7 @@ sub for_config {
     path         => ($cfg->{path} // ''),
     schema_file  => ($cfg->{schema_file} // ''),
     auto_migrate => (exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1),
+    flush_interval_ms => ($cfg->{flush_interval_ms} // 0),
   );
 }
 
