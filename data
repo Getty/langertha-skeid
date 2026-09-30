@@ -1,0 +1,33 @@
+---
+claimed_at: 2026-09-30T07:29:28Z
+claimed_by: skeid-perf-tester
+class: standard
+completed: 2026-09-30T07:29:28Z
+created: 2026-09-29T19:40:39Z
+id: 79
+priority: low
+started: 2026-09-30T03:57:27Z
+status: done
+tags:
+- perf
+- docker
+- benchmark
+- question
+title: Measure what the Docker image loses without EV, and whether a packed binary
+  buys anything
+updated: 2026-09-30T07:29:35Z
+---
+
+Maintainer question 2026-09-29: can Skeid ship as one static binary, and is that faster?
+
+Expectation to be measured, not assumed: packing (PAR::Packer, staticperl, fatpack) changes distribution and startup, not the request path -- the same perl runs the same Mojolicious loop. What can change the request path is which XS modules the process finds: EV (Mojolicious falls back to Mojo::Reactor::Poll without it) and Cpanel::JSON::XS. Neither is in cpanfile or the Dockerfile; both are installed on the dev box, so bench/ numbers from the dev box may not describe the image.
+
+Wanted, with bench/ (ADR 0007), one run at a time: TTFT and throughput with and without EV (MOJO_REACTOR=Mojo::Reactor::Poll), with and without Cpanel::JSON::XS; startup time of plain perl vs. a PAR-packed binary. Then decide: EV/Cpanel::JSON::XS into the image (recommends in cpanfile), and whether a packed binary is worth maintaining. Run only when no other agent is running tests.
+
+2026-09-29 20:01 k76 build confirmed: the image has no EV (Mojo::Reactor->detect is Mojo::Reactor::Poll); Cpanel::JSON::XS 4.53 is installed.
+
+2026-09-30 07:28 Measured on 2e10552 (worktree k78-dbi-write-behind), one process, bench/run-bench.sh, all runs niced, one at a time. Cpanel::JSON::XS blocked via PERL5LIB stubs (JSON::MaybeXS ignores PERL_JSON_BACKEND); /proc maps verified per variant. c=16 medians over 5 rounds: stream req/s EV+XS 116.9, Poll+XS 113.4, EV+PP 67.2, Poll+PP 75.8; stream TTFT p99 99 -> 209-224 ms without XS. json req/s Poll+XS 141.5 vs EV+XS 119.7 (Poll faster 5/5, also in a bare Mojolicious pass-through). c=64 stream p99 EV 247-300 vs Poll 356-435 (3/3). 256 slow streams: equal. PAR binary: same request path; startup serve->health median 867 ms plain, 1074 warm, 4521 cold; +11 MB RSS; needs PAR_VERBATIM=1 (PodStrip breaks =seealso) and namespace -M wildcards; unpacks 80 MB and still links host libssl/libcrypto/libz. staticperl/fatpack not installed, not measured. Also found: (1) fakellm installs SIGTERM via signal() -> SA_RESTART accept, so it outlives run-bench.sh until the next connection; back-to-back runs fail 'fakellm did not become healthy'. (2) fakellm sends 'Connection: keep-alive' on SSE but closes after the stream; Mojo UA reuses the pooled connection -> Skeid 502 'Premature connection close' (2 failures at c=16, 52 at c=64). (3) bench usage jsonlog goes to /tmp (tmpfs here): 4 KB RAM per event; this session wrote ~160 MB (deleted), 154 MB from earlier sessions still in /tmp/skeid-bench-usage. c=64 round 4 aborted during box-wide memory thrash.
+
+2026-09-30 07:28 Done: docs/bench/2026-09-30-ev-json-binary.md (commands + numbers), docs/adr/0019-json-xs-is-a-named-dependency-ev-and-packing-are-not.md (proposed), cpanfile: recommends 'Cpanel::JSON::XS', '4.20' (Dockerfile unchanged; it already installs requires,recommends). EV not added (no consistent gain; adding it to recommends would switch the image's reactor). No packed binary (no request-path gain, slower start, not static). Verified: cpanfile parses via Module::CPANfile; no Docker build, no tests needed for a recommends line. Open: EV vs Poll under --workers 4 at c=64 is the only measurement that could reopen the EV decision.
+
+2026-09-30 07:29 Committed as 93b5656 on branch k78-dbi-write-behind (local, not pushed)
