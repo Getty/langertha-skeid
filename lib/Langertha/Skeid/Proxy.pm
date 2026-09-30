@@ -116,6 +116,19 @@ L<Langertha::Skeid/observe_response_headers>.
 Each admitted request gets its C<request.finish> on every path and one usage event, failures
 included.
 
+=head2 A client that hangs up
+
+A client that closes its connection before the answer is complete ends its request at that
+moment. While it waits for capacity it stops waiting and takes no slot. Once a node was called,
+the upstream connection is closed -- which is how the node learns to stop generating -- and is
+not returned to the pool; the slot is given back with a C<request.finish> that is not C<ok>, and
+the one usage event is written with C<ok = 0>, C<status_code> 499 and C<error_type>
+C<client_abort>, priced from the usage the stream had reported until then (nothing, for a
+request that was not streamed). A client that leaves while the node's key is still being
+resolved gives its slot back too, but nothing was forwarded, so no usage event is written.
+When the node had already finished and only the rest of the answer was still being written
+out, the request stays what it was: finished and metered by the node's answer.
+
 =head2 Errors
 
 A request no node may serve for this key is C<403 permission_error>; a model no healthy node
@@ -804,6 +817,7 @@ sub _begin_route_async {
   my $tier_deadline = 0;
 
   my $tick;
+  my $wait_timer;
   my $fail = sub {
     # Nothing eligible can mean two different things once a policy is in play: the model is
     # unroutable, or it is routable and this key is not allowed at the nodes that serve it.
@@ -869,7 +883,7 @@ sub _begin_route_async {
 
       # Eligible but nothing free: this tier is worth waiting on, up to its own window.
       if (time < $tier_deadline) {
-        Mojo::IOLoop->timer($wait_poll_ms / 1000, $tick);
+        $wait_timer = Mojo::IOLoop->timer($wait_poll_ms / 1000, $tick);
         return;
       }
     }
@@ -880,9 +894,70 @@ sub _begin_route_async {
     return;
   };
 
+  # A client that hangs up while its request waits for capacity stops waiting: the next poll
+  # would take a slot for nobody and never give it back. $tick is set exactly as long as
+  # admission is undecided, which tells this finish from the one every answered request emits
+  # as well. Nothing is rendered, there is nobody to read it. A stand-in controller has no
+  # transaction.
+  if ($c->can('tx') && $c->tx) {
+    $c->tx->on(finish => sub {
+      return unless $tick;
+      Mojo::IOLoop->remove($wait_timer) if defined $wait_timer;
+      undef $tick;
+      $cb->();
+    });
+  }
+
   $tier_deadline = time + ((@$plan ? ($plan->[0]{wait_ms} // 0) : 0) / 1000);
   $tick->();
   return;
+}
+
+# True once the client of this request cannot be answered any more: its transaction was closed,
+# or is destroyed already -- the controller holds it weakly. Only asked before anything was
+# rendered, because a transaction that was answered is finished as well.
+sub _client_gone {
+  my ($c) = @_;
+  my $tx = $c->tx;
+  return (!$tx || $tx->is_finished) ? 1 : 0;
+}
+
+# Ends an upstream transaction in flight by closing its connection. The user agent then drops
+# the connection instead of pooling it and runs the transaction's completion callback, and the
+# node sees the connection close, which is what makes it stop generating. A transaction that
+# is still connecting is closed as soon as it has a connection -- one tick later, because the
+# user agent is in the middle of setting that connection up when it announces it. A finished
+# transaction is left alone: its connection may be serving another request by now.
+sub _cancel_upstream {
+  my ($tx) = @_;
+  my $close = sub {
+    my ($id) = @_;
+    return if $tx->is_finished;
+    my $stream = Mojo::IOLoop->stream($id) or return;
+    $stream->close;
+    return;
+  };
+  if (defined(my $id = $tx->connection)) {
+    $close->($id);
+    return;
+  }
+  $tx->once(connection => sub {
+    my (undef, $id) = @_;
+    Mojo::IOLoop->next_tick(sub { $close->($id) });
+  });
+  return;
+}
+
+# What a request its client abandoned records (ADR 0004): failed, under the status nginx made
+# the convention for "client closed request" -- no answer was delivered, and 499 can be told
+# from every status a node or Skeid itself answers with.
+sub _client_abort_event {
+  return (
+    status_code   => 499,
+    ok            => 0,
+    error_type    => 'client_abort',
+    error_message => 'Client closed the connection before the response was complete',
+  );
 }
 
 sub _proxy_openai_json_async {
@@ -899,8 +974,48 @@ sub _proxy_openai_json_async {
     return;
   }
   my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
+
+  # Set by whichever comes first, the upstream's completion or the client hanging up, so that
+  # request.finish and the usage event happen once.
+  my $closed = 0;
+
+  # The client hung up while the node key was being resolved. Nothing went upstream: the slot
+  # is given back and nothing is metered, as for every request that was not forwarded.
+  if (_client_gone($c)) {
+    $c->skeid->call_function('request.finish', {
+      id => $node_id,
+      ok => 0,
+      duration_ms => _duration_ms($started),
+    });
+    $cb->(undef, 1, 499);
+    return;
+  }
+
+  $c->tx->on(finish => sub {
+    return if $closed;
+    $closed = 1;
+    my $duration_ms = _duration_ms($started);
+    $c->skeid->call_function('request.finish', {
+      id => $node_id,
+      ok => 0,
+      duration_ms => $duration_ms,
+    });
+    _record_usage_event($c, {
+      %$meta,
+      _client_abort_event(),
+      node_id     => $node_id,
+      duration_ms => $duration_ms,
+      metrics     => {},
+    });
+    _cancel_upstream($tx);
+    $cb->(undef, 1, 499);
+  });
+
   $c->app->ua->start($tx => sub {
     my ($ua, $done) = @_;
+    # The client hung up and its request was closed then; this is the cancelled transaction.
+    return if $closed;
+    $closed = 1;
     my $duration_ms = _duration_ms($started);
     my $res = $done->res;
 
@@ -1028,7 +1143,7 @@ sub _proxy_openai_stream {
     }
     $draining = 1;
     my $chunk = shift @queue;
-    $c->write_chunk($chunk => sub { $drain->() });
+    $c->write_chunk($chunk => sub { $drain->() if $drain });
   };
 
   # SSE frames do not respect read boundaries: one read can carry half a frame, and the half
@@ -1107,6 +1222,55 @@ sub _proxy_openai_stream {
     $drain->() unless $draining;
   });
 
+  # Set by whichever comes first, the upstream's completion or the client hanging up, so that
+  # request.finish and the usage event happen once.
+  my $closed = 0;
+
+  # The client hung up while the node key was being resolved. Nothing went upstream: the slot
+  # is given back and nothing is metered, as for every request that was not forwarded. The
+  # read listener and the drain callback are taken apart as on every other way out.
+  if (_client_gone($c)) {
+    $tx->res->content->unsubscribe('read');
+    undef $drain;
+    $c->skeid->call_function('request.finish', {
+      id => $node_id,
+      ok => 0,
+      duration_ms => _duration_ms($started),
+    });
+    return;
+  }
+
+  $c->tx->on(finish => sub {
+    # Also emitted when the answer is complete, and then there is nothing left to do here. When
+    # the client hung up, what is queued has no reader and the drain callback that would take
+    # the next chunk does not run again: drop the queue and the callback's self-reference, or
+    # they keep the controller alive.
+    @queue = ();
+    $finished = 1;
+    undef $drain;
+    return if $closed;
+    $closed = 1;
+    $tx->res->content->unsubscribe('read');
+
+    # Billed from what the stream reported before the client left; the node spent that, whoever
+    # read it (ADR 0004).
+    my $duration_ms = _duration_ms($started);
+    $c->skeid->call_function('request.finish', {
+      id => $node_id,
+      ok => 0,
+      duration_ms => $duration_ms,
+    });
+    _record_usage_event($c, {
+      %$meta,
+      _client_abort_event(),
+      node_id       => $node_id,
+      duration_ms   => $duration_ms,
+      content_bytes => $content_bytes->(),
+      metrics       => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
+    });
+    _cancel_upstream($tx);
+  });
+
   $c->app->ua->start($tx => sub {
     my ($ua, $tx_done) = @_;
 
@@ -1114,6 +1278,10 @@ sub _proxy_openai_stream {
     # Completion means no further bytes can arrive, so remove it before returning from any path;
     # otherwise the completed transaction owns the listener that owns the transaction forever.
     $tx_done->res->content->unsubscribe('read');
+
+    # The client hung up and its request was closed then; this is the cancelled transaction.
+    return if $closed;
+    $closed = 1;
 
     # As on the JSON path, an HTTP error is still a response whose capacity headers matter.
     # Observe it before the pre-stream error return; transport failures contribute nothing.

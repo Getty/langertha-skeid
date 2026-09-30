@@ -2,6 +2,20 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - A client that hangs up before its answer is complete now ends its
+      request. It used to go unnoticed: a request waiting for capacity kept
+      polling, then took a slot it never gave back; a request already at a
+      node kept the node generating and its slot taken until the node was
+      done, and then lost its usage event; on the Anthropic and Ollama
+      streaming faces the slot was never given back at all, and an abandoned
+      stream kept its controller and everything still queued for the client
+      in memory. Now the wait stops without taking a slot, the upstream
+      connection is closed so the node stops generating, the slot is given
+      back exactly once, and one usage event is written as failed with
+      status_code 499 and error_type client_abort, priced from the usage
+      the stream had reported until then. A client that leaves while the
+      node key is still being resolved never reaches the node and records
+      no usage event
     - Complete POD for every module and the skeid command, including a full
       configuration and environment reference in Langertha::Skeid and a
       route/auth/error reference in Langertha::Skeid::Proxy.
