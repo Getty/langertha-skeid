@@ -1,0 +1,29 @@
+---
+claimed_at: 2026-09-30T03:03:53Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-09-30T03:03:47Z
+created: 2026-09-29T20:01:05Z
+depends_on:
+- 72
+- 73
+id: 80
+priority: medium
+started: 2026-09-30T02:49:25Z
+status: done
+tags:
+- proxy
+- lifecycle
+- keybroker
+title: 'A client gone during key resolution meets an unresolved node key: refusal
+  runs against a destroyed transaction'
+updated: 2026-09-30T03:03:53Z
+---
+
+Integration gap between k72 and k73, found by reading the merged tree, not reproduced. In both _proxy_* functions the key callback first refuses an unkeyed node (_refuse_unkeyed_node: log, request.finish, usage event, render) and only then checks _client_gone. When the client left during the key round-trip and the key did not resolve, the refusal records a usage event and renders on a transaction that is gone -- _request_id reads $c->req and would croak after request.finish. Wanted: client-gone is checked first; red test for the combination on JSON and stream. Also decide whether the abort handler should be registered before key resolution, so the slot is not held for the round-trip.
+
+2026-09-30 02:50 Decision abort handler: NOT moved before key resolution. The finish handler needs the upstream tx (_cancel_upstream) and the usage/inflight bookkeeping that exist only after the key callback; registering it earlier means a second partial handler plus a 'key pending / upstream started' state across two faces, in the most delicate lifecycle code. Cost of leaving it: the slot is held for one key round-trip, only on a cold cache (key_async answers from cache synchronously); the hang-up is detected right after and the slot released (t/61 covers it). Not worth the risk.
+
+2026-09-30 03:01 Client-gone is now checked before _refuse_unkeyed_node in _proxy_openai_json_async and _proxy_openai_stream (moved to the top of the key callback; the old later blocks removed). Red first: t/61-proxy-client-abort.t gained JSON and stream cases (hang up, then vault yields no key); both died with 'Transaction already destroyed' on unfixed lib. Green after. prove -lr t/: only the known-red 20, 37, 56 fail. Abort handler stays after key resolution (reason in earlier note). Changes entry added.
+
+2026-09-30 03:03 Committed d9b1585
