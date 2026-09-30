@@ -1,0 +1,23 @@
+---
+claimed_at: 2026-09-30T03:29:36Z
+claimed_by: skeid-protocol-worker
+class: standard
+completed: 2026-09-30T03:29:30Z
+created: 2026-09-30T03:10:24Z
+id: 82
+priority: low
+started: 2026-09-30T03:17:37Z
+status: done
+tags:
+- proxy
+- protocols
+title: '_handle_ollama calls request_to_openai without eval: a dying translator has
+  no answer'
+updated: 2026-09-30T03:29:36Z
+---
+
+In Proxy.pm, _handle_ollama calls request_to_openai without an eval, unlike the Anthropic handler, which turns a dying translator into a 400. Found while working k75, not reproduced. Wanted: a red test first, then an answer in the Ollama error shape.
+
+2026-09-30 03:27 _handle_ollama wraps the request translator in eval; 400 in Ollama error shape with fixed text 'Invalid request' (no exception text sent or logged), before routing so no request.start. New t/63-ollama-request-translation.t (red first: HTML 500). prove -lr t/: only the 3 known-red files fail.
+
+2026-09-30 03:29 Committed as 41f5935
