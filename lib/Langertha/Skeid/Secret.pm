@@ -1,5 +1,5 @@
 package Langertha::Skeid::Secret;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 # ABSTRACT: Constant-time comparison for keys, tokens and signatures
 use strict;
 use warnings;

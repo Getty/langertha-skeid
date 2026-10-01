@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::Ollama::Stream;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 # ABSTRACT: Rewrites an OpenAI SSE stream as Ollama newline-delimited JSON
 use strict;
 use warnings;

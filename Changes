@@ -1,5 +1,7 @@
 Revision history for Langertha-Skeid
 
+{{$NEXT}}
+
 0.003     2026-10-01 21:30:07Z
 
     - Docker image stops on SIGQUIT so write-behind usage events are flushed;

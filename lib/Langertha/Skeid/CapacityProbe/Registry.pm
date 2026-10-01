@@ -1,5 +1,5 @@
 package Langertha::Skeid::CapacityProbe::Registry;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 # ABSTRACT: Capacity probe reading a downstream Skeid's signed registry snapshot
 use Moo;
 use Carp qw(croak);

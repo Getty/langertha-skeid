@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::Refusal;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 # ABSTRACT: A translator's deliberate refusal of a request, with a message for the client
 use strict;
 use warnings;

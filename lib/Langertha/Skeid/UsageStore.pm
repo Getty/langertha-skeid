@@ -1,5 +1,5 @@
 package Langertha::Skeid::UsageStore;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 # ABSTRACT: Usage event sink — config normalization and backend factory
 use strict;
 use warnings;

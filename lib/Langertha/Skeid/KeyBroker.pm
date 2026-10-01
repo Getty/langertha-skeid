@@ -1,5 +1,5 @@
 package Langertha::Skeid::KeyBroker;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 # ABSTRACT: Pluggable API key resolution for Skeid nodes
 use Moo;
 use Carp qw(croak);

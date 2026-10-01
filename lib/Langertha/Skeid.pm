@@ -1,5 +1,5 @@
 package Langertha::Skeid;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 # ABSTRACT: Dynamic routing control-plane for multi-node LLM serving with normalized metrics and cost accounting
 use Moo;
 use strict;

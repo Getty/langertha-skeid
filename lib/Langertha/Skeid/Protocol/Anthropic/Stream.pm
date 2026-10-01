@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::Anthropic::Stream;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 # ABSTRACT: Rewrites an OpenAI SSE stream as Anthropic streaming events
 use strict;
 use warnings;
