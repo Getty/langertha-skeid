@@ -171,11 +171,12 @@ longer. `jsonlog` remains the recommended default.
 
 ## Docker image
 
-Built and pushed by `dzil release` via `run_after_release` (see the release rule — never run
-that yourself). Tags: `raudssus/langertha-skeid:<version>`, `:<major>`, `:latest`. Source
-overrides for an unreleased Langertha go through `SKEID_DOCKER_BUILD_ARGS`
-(`--build-arg LANGERTHA_SRC=…`, a CPAN author path or tarball URL), documented at the top of
-`dist.ini`. For a local test image:
+Built in every `dzil build` and pushed by `dzil release` through the bundle's
+`docker_image` (`Dist::Zilla::Plugin::Docker::API`; see the release rule — never run a release
+yourself). Tags: `raudssus/langertha-skeid:<version>`, `:<major>`, `:latest`. The release path
+passes no build arguments; a source override for an unreleased Langertha
+(`--build-arg LANGERTHA_SRC=…`, a CPAN author path or tarball URL) only works with a manual
+`docker build`. For a local test image:
 `docker build -t raudssus/langertha-skeid:test .`, then `SKEID_IMAGE=raudssus/langertha-skeid:test`
 in `examples/service/.env` to run the compose stack on it.
 

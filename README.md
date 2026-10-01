@@ -562,8 +562,12 @@ docker build -t raudssus/langertha-skeid \
   --build-arg LANGERTHA_SRC=GETTY/Langertha-X.YYY.tar.gz .   # CPAN path or tarball URL
 ```
 
-`dzil release` builds and pushes the image itself and passes `SKEID_DOCKER_BUILD_ARGS` to
-`docker build`, so the same argument can be given there.
+`dzil release` tags and pushes the image itself (`latest`, `<major>`, `<version>`) through
+`Dist::Zilla::Plugin::Docker::API`, which `docker_image` in `dist.ini` switches on. It talks to
+the container engine at `DOCKER_HOST` over the Engine HTTP API, so rootless Podman works and no
+`docker` binary is needed. The image is built in every `dzil build` and `dzil test` as well;
+`DZIL_DOCKER_API_SKIP=1` skips that for those two, and `dzil release` refuses to run with it.
+`LANGERTHA_SRC` cannot be given from the environment on that path.
 
 ### Service stack (OpenBao + PostgreSQL)
 

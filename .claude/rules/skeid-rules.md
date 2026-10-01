@@ -54,7 +54,8 @@ OOM-rebooted this box.
 ## Release — never without permission
 
 `prove -lr t/`, `dzil build`, `dzil test` are fine anytime. `dzil release` uploads to CPAN
-**and** builds and pushes `raudssus/langertha-skeid` Docker images (`run_after_release`) —
+**and** pushes `raudssus/langertha-skeid` Docker images (bundle `docker_image`) and creates
+the GitHub release —
 STRICTLY forbidden without the maintainer's explicit go-ahead, even if a plan says
 "release" next. Same for `git push`, tags and `docker push`.
 

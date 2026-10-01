@@ -63,7 +63,9 @@ GitHub file, excluded from the tarball, and never generated from POD. `Git::Gath
 only git-tracked files — `.claude/`, `bench/` and `docs/` are excluded via
 `gather_exclude_match` in `dist.ini`.
 
-Releasing also builds and pushes Docker images (`run_after_release`). See the release rule.
+Releasing also pushes Docker images and creates the GitHub release, both through the bundle
+(`docker_image`, `GitHub::CreateRelease`); `dist.ini` has no `run_after_release`. See the
+release rule.
 
 ## Testing
 
