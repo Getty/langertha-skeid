@@ -1,0 +1,22 @@
+---
+class: standard
+completed: 2026-10-01T22:43:49Z
+created: 2026-10-01T21:41:50Z
+id: 89
+priority: high
+started: 2026-10-01T21:41:56Z
+status: done
+tags:
+- release
+- docker
+title: Docker image via bundle docker_image instead of run_after_release
+updated: 2026-10-01T22:43:49Z
+---
+
+dist.ini: replace the four docker run_after_release lines with docker_image = raudssus/langertha-skeid (Author::GETTY 0.326, Docker::API 0.104). Keep the gh release lines. Keep a way to pass LANGERTHA_SRC at release time. Update dist.ini comments and docs that name the old wiring. Verify with dzil build only, no push, no release.
+
+2026-10-01 21:44 Read Docker::API 0.104 + TagTemplate: build_arg values expand only dist variables (%n %v %V %g %b ...); an unknown %name becomes empty. No environment expansion, and the bundle's auto-default subsection passes no build_arg. So LANGERTHA_SRC cannot be set from the environment at release time with the plugin. Plugin-native route would be docker_default = 0 plus an explicit [@Author::GETTY::Docker] subsection with a literal build_arg = LANGERTHA_SRC=... in dist.ini (not built, per brief; reported instead). Bundle 0.326 already requires Docker::API; cpanfile untouched.
+
+2026-10-01 21:48 Changed: dist.ini (four docker run_after_release lines -> docker_image + docker_tags = latest %V %v, comment block rewritten, gh release lines kept) and README.md release paragraph. Verified: one dzil build against the rootless Podman socket (Podman Engine 5.8.4, API 1.44) built image 0e8ebd42b81d and tagged latest/0/0.004 locally; DZIL_DOCKER_API_SKIP=1 dzil build ran with DOCKER_HOST pointing at a nonexistent socket; prove -lr t/ 71 files 3761 tests PASS. No push, no release. OPEN 1: LANGERTHA_SRC has no environment path any more (Docker::API build_arg templates have no env expansion) - maintainer decides between a literal build_arg in an explicit [@Author::GETTY::Docker] subsection or an env-expansion feature in Docker::API (ticket for that dist's board). OPEN 2: CLAUDE.md, .claude/rules/skeid-rules.md, .claude/agents/skeid-release-manager.md and .claude/skills/skeid-service-stack/SKILL.md still describe run_after_release / SKEID_DOCKER_BUILD_ARGS - not edited, a worker may not change instruction files on an agent's request; proposed wording is in the worker report. Also found: a push failure in Docker::API release still dies after UploadToCPAN and before the Git::VersionManager commit/tag; build log line 'Tagged:' omits the first tag (latest) although it is applied.
+
+2026-10-01 22:43 Committed as ee26711 by the hub coordinator on the maintainer's instruction. Beyond the worker's change: the two gh run_after_release lines are gone too (GitHub release only from the bundle's GitHub::CreateRelease, after Git::Push), and the instruction files named in OPEN 2 are updated. OPEN 1 settled: no LANGERTHA_SRC on the release path, manual docker build only.
