@@ -1,5 +1,7 @@
 # Skeid — LLM routing service
 
+![Langertha Skeid](assets/github.jpg)
+
 `Langertha::Skeid` is one Mojolicious process in front of many LLM nodes. Clients talk to it
 in the OpenAI, Anthropic or Ollama format; Skeid picks a node, forwards the request in the
 OpenAI dialect, translates the answer back, and writes one usage event per request for
@@ -574,13 +576,11 @@ the container engine at `DOCKER_HOST` over the Engine HTTP API, so rootless Podm
 `examples/service/` is a compose stack for development: OpenBao in dev mode for upstream keys,
 PostgreSQL for usage events, and Skeid.
 
-```
-client ──(Authorization: Bearer <customer key>)──> skeid :5591
-                                                    │
-               ┌────────────────────────────────────┼─────────────────────┐
-               ▼                                    ▼                     ▼
-      openbao :5501 (upstream keys)      postgres :5533 (usage)     LLM nodes
-```
+![Skeid service stack: client, Skeid, OpenBao, PostgreSQL, LLM nodes](assets/service-stack.jpg)
+
+The client sends `Authorization: Bearer <customer key>` to Skeid on `:5591`; Skeid reads
+upstream keys from OpenBao (`:5501`), writes usage events to PostgreSQL (`:5533`) and
+forwards to the LLM nodes.
 
 1. `cd examples/service && cp .env.example .env`, and set `SKEID_GROQ_KEY` there for the
    sample node (`groq-main`, `api_key_ref: secret/skeid/remote/groq`). `SKEID_OPENAI_KEY` and

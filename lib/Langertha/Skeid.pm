@@ -35,6 +35,12 @@ use Langertha::UsageRecord;
 
 =head1 DESCRIPTION
 
+=begin html
+
+<p><img src="/assets/github.jpg" alt="Langertha Skeid" width="100%"></p>
+
+=end html
+
 Langertha::Skeid is a routing control-plane for provider-style LLM operations.
 It keeps a live node table, routes by model/health/capacity, and records
 normalized token/cost usage.
