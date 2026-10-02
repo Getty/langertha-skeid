@@ -46,7 +46,8 @@ blocks the loop.
 
 =head2 Client routes
 
-No Skeid credential is needed on these; see L</Customer identity>.
+No Skeid credential is needed on these unless the config has a C<client_auth> section; then
+every one but C</health> answers C<401> to a key not on its list. See L</Customer identity>.
 
   GET  /health                     {status: ok, proxy: skeid, config_reload: {...}}
   GET  /.well-known/langertha.json provider manifest for the presented key
@@ -95,11 +96,22 @@ them, and under C<--workers> each write reaches one worker (ADR 0010).
 
 =head2 Customer identity
 
-Skeid does not authenticate customers. The key a client presents (C<Authorization: Bearer>, else
+Skeid does not authenticate customers unless the config has a C<client_auth> section
+(L<Langertha::Skeid/client_auth>). The key a client presents (C<Authorization: Bearer>, else
 C<x-api-key>) derives the customer key id (L<Langertha::Skeid/key_id_for_key>; no key is
 C<anonymous>), which selects the routing policy and is recorded on the usage event. With
 C<routing.trust_key_id_header> a C<x-skeid-key-id> (or C<x-api-key-id>) header names the key id
 instead.
+
+With C<client_auth>, that key id has to be on the section's list. Every client route checks it
+first -- C</v1/models>, C</v1/chat/completions>, C</v1/embeddings>, C</v1/messages>, every
+C</api/*> route and C</.well-known/langertha.json> -- after picking up a changed config
+(L<Langertha::Skeid/maybe_reload_config>), so a list change holds from the next request.
+No key is C<401> C<Missing API key>, a key whose id is not listed C<401> C<Invalid API key>,
+both with C<WWW-Authenticate: Bearer realm="skeid">, and nothing else happens for that request:
+the body is not parsed, no node is admitted or called, no usage event is written, and Skeid logs
+nothing about it. The answer names neither the key nor its id. C</health> and the C</skeid/*> routes are not checked;
+they have their own rules. Being let in widens nothing: the key's routing policy still applies.
 
 =head2 The upstream call
 
@@ -135,7 +147,9 @@ out, the request stays what it was: finished and metered by the node's answer.
 
 =head2 Errors
 
-A request no node may serve for this key is C<403 permission_error>; a model no healthy node
+A key the C<client_auth> list does not let in is C<401> (OpenAI: type C<invalid_request_error>,
+code C<invalid_api_key>; Anthropic: C<authentication_error>; see L</Customer identity>). A
+request no node may serve for this key is C<403 permission_error>; a model no healthy node
 serves is C<503 model_not_found>; eligible nodes that stay full past the wait are
 C<429 rate_limit_error>; an upstream failure is its status (or C<502>) with type
 C<upstream_error>; a node whose own key cannot be resolved is
@@ -310,14 +324,29 @@ sub build_app {
     $c->render(json => { status => 'ok', proxy => 'skeid', config_reload => $reload });
   });
 
+  # Client routes sit behind _authorize_client (skeid k90): a bridge, so only these routes are
+  # gated and an unknown path stays a 404. Each face's bridge sets what its 401 needs before the
+  # gate can render it -- the error dialect, the manifest's cache headers.
+
   # Provider manifest (skeid #29, ADR 0015): per customer key, never the whole catalog.
-  $r->get('/.well-known/langertha.json' => sub {
+  my $manifest = $r->under(sub {
+    my ($c) = @_;
+    _manifest_cache_headers($c);
+    return _authorize_client($c);
+  });
+
+  $manifest->get('/.well-known/langertha.json' => sub {
     my ($c) = @_;
     _handle_manifest($c);
   });
 
   # OpenAI format
-  $r->get('/v1/models' => sub {
+  my $openai = $r->under(sub {
+    my ($c) = @_;
+    return _authorize_client($c);
+  });
+
+  $openai->get('/v1/models' => sub {
     my ($c) = @_;
     my @data = map {
       +{
@@ -330,22 +359,26 @@ sub build_app {
     $c->render(json => { object => 'list', data => \@data });
   });
 
-  $r->post('/v1/chat/completions' => sub {
+  $openai->post('/v1/chat/completions' => sub {
     my ($c) = @_;
     _handle_openai_chat($c);
   });
 
-  $r->post('/v1/embeddings' => sub {
+  $openai->post('/v1/embeddings' => sub {
     my ($c) = @_;
     _handle_openai_embeddings($c);
   });
 
-  # Anthropic format
-  $r->post('/v1/messages' => sub {
+  # Anthropic format. Every error this request produces, wherever it is rendered -- the gate's
+  # 401 included -- has to be Anthropic-shaped (core karr #224). _render_error reads this.
+  my $anthropic = $r->under(sub {
     my ($c) = @_;
-    # Every error this request produces, wherever it is rendered, has to be Anthropic-shaped
-    # (core karr #224). _render_error reads this.
     $c->stash('skeid.error_format' => 'anthropic');
+    return _authorize_client($c);
+  });
+
+  $anthropic->post('/v1/messages' => sub {
+    my ($c) = @_;
     _handle_anthropic_messages($c);
   });
 
@@ -355,7 +388,7 @@ sub build_app {
   my $ollama = $r->under('/api' => sub {
     my ($c) = @_;
     $c->stash('skeid.error_format' => 'ollama');
-    return 1;
+    return _authorize_client($c);
   });
 
   $ollama->post('/chat' => sub {
@@ -540,20 +573,53 @@ sub _authorize_registry_read {
   return undef;
 }
 
+# The client routes' gate (skeid k90), run by their bridges before anything else of the request:
+# before the body is parsed, a node is admitted (request.start), a key resolved, an upstream
+# called or a usage event written -- a refused request has nothing to give back. It reloads the
+# config first, so switching client authentication on or off or rotating an id holds from the
+# next request on every client route, a GET included. That is what the reload throttle
+# (config_reload_interval) and the no-op on an unchanged config are for: an anonymous GET does
+# not rerun the loader, nor restart the node probes, per request. Off without client_auth.
+# The identity is the one routing uses, so with routing.trust_key_id_header the header's id is
+# what must be on the list. A refusal is not logged -- the routes are public, and a line per
+# rejected request would be anybody's to flood -- and its body names neither the key nor its id.
+sub _authorize_client {
+  my ($c) = @_;
+  my $skeid = $c->skeid;
+  $skeid->maybe_reload_config;
+  return 1 unless $skeid->client_auth_enabled;
+
+  my $api_key_id = _request_api_key_id($c);
+  return 1 if $skeid->client_key_allowed($api_key_id);
+
+  my $missing = !defined($api_key_id) || $api_key_id eq 'anonymous';
+  $c->res->headers->header('WWW-Authenticate' => 'Bearer realm="skeid"');
+  _render_error($c, 401, ($missing ? 'Missing API key' : 'Invalid API key'),
+    'invalid_request_error', 'invalid_api_key');
+  return undef;
+}
+
 # What a key is shown depends on who presents it, so no cache may hand one key's answer to
-# another: every answer -- 404/401/403 included -- is private, not stored, and varies on each
-# header that can carry the identity. It does not reload the config: a public route anybody can
-# hit must not be a way to rerun the loader (and restart the node probes) per anonymous GET;
-# like /v1/models it serves what the last load resolved. 404 when nothing is published (disabled, or a Langertha without
-# Langertha::Manifest), 401 without a key (ADR 0015: no anonymous manifest, not even a minimal
-# one), 403 for a key without a manifest: grant, else the manifest built for that key id.
+# another: every answer -- the client gate's 401 included -- is private, not stored, and varies on
+# each header that can carry the identity. Set by the route's bridge, before the gate.
+sub _manifest_cache_headers {
+  my ($c) = @_;
+  my $headers = $c->res->headers;
+  $headers->header('Cache-Control' => 'private, no-store');
+  $headers->header(Vary => 'Authorization, X-Api-Key, X-Skeid-Key-Id, X-Api-Key-Id');
+  return;
+}
+
+# The config is reloaded by the client gate before this runs (see _authorize_client), throttled
+# by config_reload_interval and a no-op when nothing changed. 404 when nothing is published
+# (disabled, or a Langertha without Langertha::Manifest), 401 without a key (ADR 0015: no
+# anonymous manifest, not even a minimal one), 403 for a key without a manifest: grant, else the
+# manifest built for that key id.
 sub _handle_manifest {
   my ($c) = @_;
   my $skeid = $c->skeid;
 
   my $headers = $c->res->headers;
-  $headers->header('Cache-Control' => 'private, no-store');
-  $headers->header(Vary => 'Authorization, X-Api-Key, X-Skeid-Key-Id, X-Api-Key-Id');
 
   unless ($skeid->manifest_enabled && $skeid->manifest_available) {
     $c->render(status => 404,
@@ -1576,10 +1642,11 @@ sub _proxy_openai_stream {
 # the HTTP status, because that is what an Anthropic SDK parses and raises on (core karr #224).
 # The Ollama face gets Ollama's {error: "<message>"}, a plain string, because that is what the
 # Ollama clients decode (skeid #47). Every other face keeps the OpenAI shape it always had, with
-# $openai_type as its type. The face is read off the stash, which the /v1/messages and /api/*
-# routes set; a controller without one (a unit test's stand-in) is an OpenAI face.
+# $openai_type as its type and $openai_code, when given, as its code (OpenAI's own 401 carries
+# invalid_api_key). The face is read off the stash, which the /v1/messages and /api/* bridges
+# set; a controller without one (a unit test's stand-in) is an OpenAI face.
 sub _render_error {
-  my ($c, $status, $message, $openai_type) = @_;
+  my ($c, $status, $message, $openai_type, $openai_code) = @_;
   my $format = $c->can('stash') ? ($c->stash('skeid.error_format') // '') : '';
   if ($format eq 'anthropic') {
     $c->render(json => Langertha::Skeid::Protocol::Anthropic->error_body($status, $message),
@@ -1590,7 +1657,11 @@ sub _render_error {
     $c->render(json => Langertha::Skeid::Protocol::Ollama->error_body($message), status => $status);
     return;
   }
-  $c->render(json => { error => { message => $message, type => $openai_type } }, status => $status);
+  $c->render(json => { error => {
+    message => $message,
+    type    => $openai_type,
+    defined($openai_code) ? ( code => $openai_code ) : (),
+  } }, status => $status);
   return;
 }
 

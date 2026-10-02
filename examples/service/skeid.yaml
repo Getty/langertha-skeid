@@ -89,6 +89,17 @@ routing:
 # Unlisted keys take default_policy, so a deployment where every customer is configured the
 # same way carries no key entries at all.
 
+# Client authentication. Skeid does not check client keys unless this section is here: behind
+# another gateway that authenticates, leave it out. When Skeid itself is the public entry, list
+# the key ids that may come in -- every /v1/* and /api/* route and the provider manifest then
+# answer 401 to a missing key or one not listed; /health and the admin API keep their own rules.
+# Entries are key ids from `skeid keyid <key>` or names: entries, never the keys themselves.
+# One shared client key today is one id; give clients keys of their own later by adding names:
+# entries here, and taking a name out locks that client out on the next request.
+#
+# client_auth:
+#   keys: [shared]          # with names: { shared: k_... } above, or the k_... id directly
+
 # Capacity probes (ADR 0009). inflight counts only what THIS Skeid sent, so two frontends in
 # front of the same GPU each think it is half as busy as it is. A probe reads what the node
 # itself reports, including traffic Skeid never saw.

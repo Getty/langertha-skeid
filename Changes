@@ -2,6 +2,16 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - An optional client_auth: { keys: [...] } section turns the client routes
+      into an allowlist. Each entry is a names: entry or a key id (k_...),
+      never a key. With it, a missing key or one that is not listed gets 401
+      with WWW-Authenticate: Bearer realm="skeid" in the dialect of the route
+      (OpenAI invalid_api_key, Anthropic authentication_error, Ollama error
+      string) on every /v1/*, /api/* route and /.well-known/langertha.json,
+      before the body is read or any node is touched. /health and /skeid/*
+      stay open. Without the section nothing is checked. The section is hot
+      reloaded; keys: [] lets nobody in. GET /v1/models, /api/tags, /api/ps and
+      the manifest now pick up a changed config themselves.
     - The release builds, tags and pushes the Docker image through
       Dist::Zilla::Plugin::Docker::API (docker_image in dist.ini) over the
       container engine's HTTP API instead of shelling out to docker build /

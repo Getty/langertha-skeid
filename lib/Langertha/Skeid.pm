@@ -217,8 +217,8 @@ once and stored under the key id, so a request costs one hash lookup and one key
 cannot be served for another. The load croaks on a model the key's routing policy does not
 let it reach (not granted, or served only by nodes it is denied), on an unknown capability,
 one no face carries, an unknown face, and an enabled manifest without C<public_url>. A config
-that fails to load keeps the previous one in force, manifests included. The route never
-reloads the config itself; the request paths that already do pick up a change.
+that fails to load keeps the previous one in force, manifests included. Like every client route,
+it runs L</maybe_reload_config> before it answers, so a changed config is in force for it too.
 Without a key the route answers C<401>. Needs a Langertha with L<Langertha::Manifest>; on an
 older one the route answers C<404>. See ADR 0015 in the distribution repository.
 
@@ -246,6 +246,8 @@ L</ENVIRONMENT>, else built in.
 =item * The admin key: absent falls back to C<SKEID_ADMIN_API_KEY>, else off -- see L</admin>.
 
 =item * C<registry> and C<manifest>: absent means off.
+
+=item * C<client_auth>: removed from the file, client authentication is off again.
 
 =back
 
@@ -346,6 +348,32 @@ C<default_policy> or a C<keys> entry naming an undefined policy, on a C<names> v
 a non-empty string, and on two entries that resolve to one key id -- including a short
 (pre-ADR 0016) id beside the full id it is the prefix of. Short ids still match, with a one-time
 warning.
+
+=head2 client_auth
+
+  names:
+    shared: k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b   # `skeid keyid <key>` -- never the key
+  client_auth:
+    keys: [shared, k_9c8b7a6f5e4de5f60718293a4b5c6d7e8f901a2b]
+
+Client authentication (skeid k90), for a Skeid that is itself the public entry rather than
+sitting behind a gateway that authenticates. With the section, the client routes -- C</v1/*>,
+C</api/*> and the provider manifest -- answer C<401> to a request without a key or with a key
+whose id is not on the list, before anything is routed, forwarded or metered; C</health> and
+the C</skeid/*> routes keep their own rules. Without it nothing is checked, as before. See
+L<Langertha::Skeid::Proxy/Customer identity>.
+
+C<keys> lists customer key ids from C<skeid keyid>, or C<names:> entries that map to one; a
+single id may stand without the list. A short (pre-ADR 0016) id matches the full id it is the
+prefix of, with the same deprecation warning as in C<keys:>. The load fails on a section without
+C<keys>, an unknown key in the section, and an entry that is neither a name nor a key id --
+C<anonymous> included; that message names the entry by its position, never by its value, since
+a value that is neither is most likely a key pasted where its id belongs (ADR 0003). An empty
+list loads, lets no key in, and says so once. The list is independent of C<keys:> and
+C<default_policy>: being let in does not widen what a key's policy routes it to.
+
+The check takes the same identity routing does: with C<routing.trust_key_id_header> the header's
+key id is what has to be on the list.
 
 =head2 routing
 
@@ -596,6 +624,21 @@ has manifest_available => (
 has key_manifests => (
   is      => 'rw',
   default => sub { {} },
+);
+
+=attr client_auth_keys
+
+The customer key ids allowed onto the client routes, as a hashref of id to 1, built from the
+config's C<client_auth> section (default undef: client authentication is off). An empty hash
+lets no key in. Read through L</client_auth_enabled> and L</client_key_allowed>.
+
+=cut
+
+# Key id -> 1, from client_auth.keys (skeid k90). Undef is off -- every caller gets in, as
+# before the section existed -- and is a different thing from {}, which lets nobody in.
+has client_auth_keys => (
+  is      => 'rw',
+  default => sub { undef },
 );
 
 =attr trust_key_id_header
@@ -1453,7 +1496,7 @@ my @CONFIG_STATE = qw(
   model_aliases policies default_policy key_policies key_names nodes
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
   admin_api_key _config_admin_api_key
-  manifest_enabled manifest_available key_manifests
+  manifest_enabled manifest_available key_manifests client_auth_keys
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
 
@@ -1698,6 +1741,16 @@ sub _apply_config {
     $self->_load_policies($cfg);
   } elsif ($before->{policies}) {
     $self->_load_policies({});
+  }
+
+  # After the policies: client_auth entries may be names: names, resolved through key_names.
+  # Removed from the file, client authentication is off again -- as a restart without the
+  # section would have it (skeid k90).
+  if (exists $cfg->{client_auth}) {
+    $declared{client_auth} = 1;
+    push @notices, $self->_load_client_auth($cfg->{client_auth});
+  } elsif ($before->{client_auth}) {
+    $self->client_auth_keys(undef);
   }
 
   if (exists $cfg->{aliases}) {
@@ -3140,6 +3193,76 @@ sub key_id_for_name {
   my ($self, $name) = @_;
   return undef unless defined($name) && length($name);
   return $self->key_names->{$name};
+}
+
+# The client_auth section (skeid k90), resolved once at config load into a key id set. An entry
+# is a names: name or a key id; anything else fails the load. The message names the entry by
+# its position and never by its value: a value that is neither is most likely a key someone
+# pasted, and a reload error ends up in the log and on /skeid/config (ADR 0003). Returns the
+# notices to log once the config applied.
+sub _load_client_auth {
+  my ($self, $section) = @_;
+  croak 'client_auth must be a hash with a keys list' unless ref($section) eq 'HASH';
+  for my $key (sort keys %$section) {
+    croak "client_auth: unknown key '$key' (known: keys)" unless $key eq 'keys';
+  }
+  my $list = $section->{keys};
+  croak 'client_auth needs a keys list: the key ids (or names: entries) that may use the '
+    . 'client routes' unless defined $list;
+  $list = [ $list ] unless ref $list;
+  croak 'client_auth.keys must be a list of key ids or names: entries' unless ref($list) eq 'ARRAY';
+
+  my (%allowed, @legacy);
+  my $position = 0;
+  for my $entry (@$list) {
+    $position++;
+    my $name = (defined($entry) && !ref($entry) && exists $self->key_names->{$entry}) ? $entry : undef;
+    my $id   = defined($name) ? $self->key_names->{$name} : $entry;
+    my $full = defined($id) && !ref($id) && $id =~ /\Ak_[0-9a-f]{40}\z/;
+    unless ($full || _is_legacy_key_id($id)) {
+      croak defined($name)
+        ? "client_auth.keys entry $position is the names: entry '$name', which does not map to a "
+          . 'key id (k_ + 40 hex from `skeid keyid`)'
+        : "client_auth.keys entry $position is neither a names: entry nor a key id (k_ + 40 hex "
+          . 'from `skeid keyid`); a key itself never goes into the config';
+    }
+    push @legacy, $id unless $full;
+    $allowed{$id} = 1;
+  }
+  _warn_legacy_key_id($_) for @legacy;
+
+  $self->client_auth_keys(\%allowed);
+  return %allowed ? () : ('client_auth.keys is empty: no key can use the client routes, every '
+    . 'request on them answers 401');
+}
+
+=method client_auth_enabled
+
+  if ($skeid->client_auth_enabled) { ... }
+
+Whether the config has a C<client_auth> section, so that the client routes answer C<401> to a
+key not on its list. See L</client_auth>.
+
+=cut
+
+sub client_auth_enabled { defined $_[0]->client_auth_keys ? 1 : 0 }
+
+=method client_key_allowed
+
+  my $ok = $skeid->client_key_allowed($key_id);   # k_5f0e...
+
+Whether a customer key id may use the client routes: always true while client authentication
+is off, otherwise true only for an id on the C<client_auth> list -- one hash lookup. A short
+(pre-ADR 0016) id on the list matches the full id it is the prefix of, as in C<keys:>.
+C<anonymous> -- no key presented -- is never on the list.
+
+=cut
+
+sub client_key_allowed {
+  my ($self, $api_key_id) = @_;
+  my $allowed = $self->client_auth_keys;
+  return 1 unless defined $allowed;
+  return defined($self->_configured_key_id($allowed, $api_key_id)) ? 1 : 0;
 }
 
 =method route_plan
