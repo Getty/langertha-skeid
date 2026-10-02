@@ -1,0 +1,43 @@
+---
+claimed_at: 2026-10-02T22:55:25Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-10-02T22:55:25Z
+created: 2026-10-02T22:28:53Z
+id: 90
+priority: high
+started: 2026-10-02T22:42:17Z
+status: done
+tags:
+- auth
+- proxy
+title: 'Client authentication: a keys allowlist that answers 401'
+updated: 2026-10-02T22:55:25Z
+---
+
+Skeid identifies a client key (key_id_for_key gives k_<sha1 prefix>) but never rejects one: nothing reads a list of allowed client keys at request time, so a proxy facing the internet has no way to say "this key may not come in".
+
+Today the only way is the policy mechanics as an allowlist (default_policy with models: [] and the known key ids set to open). That works, but:
+
+- an unknown or missing key gets 403, not 401
+- /v1/models (and the other listing routes) stay open to everyone
+- the intent is not visible in the config: it reads as a model policy, not as authentication
+
+Wanted:
+
+- a keys: section (or equivalent) in skeid.yaml that lists the allowed client keys by key id, never the key itself; resolved through the KeyBroker or an env/file source like the upstream keys
+- with it configured, every /v1/* route answers 401 with a WWW-Authenticate header for a missing or unknown key, in the dialect of the route (OpenAI, Anthropic, Ollama error shapes)
+- /health stays open
+- without the section nothing changes (today's behaviour, for a Skeid behind another gateway)
+- hot reload like the rest of the config
+- the key never reaches logs or usage events (already the rule for key ids)
+
+Found while drafting an edge deployment where Skeid is the public entry in place of another proxy. Related, small: the healthcheck in the compose example calls curl, which the image (perl:5.38-slim) does not have; use perl -MHTTP::Tiny or add curl.
+
+2026-10-02 22:46 Implemented: Skeid.pm client_auth section (_load_client_auth after policies, declared-section tracking, client_auth_keys in CONFIG_STATE for rollback, client_auth_enabled/client_key_allowed); Proxy.pm: per-face under bridges with _authorize_client (maybe_reload_config first), OpenAI 401 with code invalid_api_key via _render_error 5th arg. Writing t/67-client-auth.t next.
+
+2026-10-02 22:52 Also found (card body, not in the brief): the compose healthcheck calls curl, which perl:5.38-slim lacks -- left untouched, belongs on this board as its own card if wanted.
+
+2026-10-02 22:52 Done: client_auth section (keys: names: entries or key ids, legacy short ids by prefix; absent/removed = off; empty list = nobody, warned once) in Langertha::Skeid; Proxy gates every client route (/v1/models, chat, embeddings, messages, /api/*, manifest) via per-face under bridges that reload the config first and answer 401 + WWW-Authenticate: Bearer realm="skeid" in the route's dialect, before body parse/request.start/upstream/usage. /health, /skeid/* untouched. t/67-client-auth.t (675 tests, 10 mutations each caught). prove -lr t/: Files=72, Tests=4436, PASS.
+
+2026-10-02 22:55 Committed 1894a3c (code, tests, Changes) and 2b0c049 (docs). Compose healthcheck already fixed in 2ac34be (k63): uses perl -MHTTP::Tiny, nothing to change.
