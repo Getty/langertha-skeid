@@ -1,6 +1,6 @@
 package Langertha::Skeid::UsageStore::JsonLog;
 our $VERSION = '0.004';
-# ABSTRACT: Append-only JSON usage store — one file per event, or one line per event
+# ABSTRACT: Append-only JSON usage store - one file per event, or one line per event
 use Moo;
 use strict;
 use warnings;

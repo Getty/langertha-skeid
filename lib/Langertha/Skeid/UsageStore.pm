@@ -1,6 +1,6 @@
 package Langertha::Skeid::UsageStore;
 our $VERSION = '0.004';
-# ABSTRACT: Usage event sink — config normalization and backend factory
+# ABSTRACT: Usage event sink - config normalization and backend factory
 use strict;
 use warnings;
 use Carp qw(croak);
