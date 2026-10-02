@@ -228,6 +228,13 @@ A readable label the config maps to a **Customer key ID**, so `keys:` entries ca
 never an identity on the request path.
 _Avoid_: username, account name, key alias.
 
+**Client authentication** (`client_auth:`):
+The optional allowlist of **Customer key IDs** that may use the client routes (ADR 0020). With
+it, a missing key or a key whose id is not listed is answered `401` before anything is routed or
+metered; without it Skeid identifies callers but lets every key in. It decides *whether* a key
+comes in, never *what* it reaches — that stays the **Policy**.
+_Avoid_: login, access control, key check, refusal (that word means the policy's 403).
+
 **Provider manifest**:
 The `/.well-known/langertha.json` document telling one customer key which endpoints, faces and
 models it may use (ADR 0015). Opt-in per key (`keys: <id>: {manifest: {models: [...]}}`),
@@ -309,6 +316,10 @@ _Avoid_: hot reload, restart, refresh.
 - A **Policy** attaches to a **Customer key ID**, and that id is derived from what the caller
   presented. Anything a client can set freely must never name it: the policy would be advice,
   not a boundary.
+- **Client authentication** comes before everything else on a client route: a key it turns away
+  is `401` and never reaches **Policy**, **Routing**, `request.start` or a **Usage event**. A
+  key it lets in is still bound by its **Policy** — being on the list grants no model and no
+  node.
 - A **Policy** narrows **Eligibility**, never **Admission**. A denied node is not a busy node,
   so a policy failure is a **Refusal**, and running out of permitted capacity stays a 429 —
   falling through to a denied node "because everything else is full" is the failure this

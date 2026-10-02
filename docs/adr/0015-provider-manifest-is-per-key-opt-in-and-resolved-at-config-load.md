@@ -1,6 +1,6 @@
 # ADR 0015 — The provider manifest is per key, opt-in, and resolved at config load
 
-- Status: accepted — implemented (skeid #29); Ollama face carries `format` since skeid #46 (see Update)
+- Status: accepted — implemented (skeid #29); Ollama face carries `format` since skeid #46 (see Update); reloads the config since skeid k90 (ADR 0020)
 - Date: 2026-09-25
 - Tags: manifest, provider-discovery, policy, config, security
 
@@ -103,3 +103,13 @@ so the Ollama face publishes `response_format_json_object` and `response_format_
 Every face may publish `image_input` since images are translated on the Anthropic and Ollama
 faces. `options.seed` is still not carried. The per-face lists stay in each translator's
 `manifest_endpoint`, as decided.
+
+## Update (skeid k90, ADR 0020): the route reloads the config
+
+"The route never reloads the config" is superseded. Every client route, this one included, now
+sits behind the client authentication gate, and the gate runs `maybe_reload_config` first, so a
+change to `client_auth` holds from the next request. The concern behind the old rule does not
+arise: a config file costs a `stat` per request and is loaded only when its mtime changed, a
+`config_loader` runs at most once per `config_reload_interval`, an unchanged result is a no-op,
+and the node probes restart only when the inventory changed. An anonymous GET cannot make the
+loader or the probes run per request.

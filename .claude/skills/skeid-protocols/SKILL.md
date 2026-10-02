@@ -30,7 +30,7 @@ in and out. Consequences that are not negotiable:
 | Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
 | Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
 
-`GET /health` is unauthenticated and cheap; `/skeid/*` is the admin surface (skill
+`GET /health` is unauthenticated and cheap (also with `client_auth`); `/skeid/*` is the admin surface (skill
 `skeid-core`). `GET /.well-known/langertha.json` serves the per-key provider manifest (ADR 0015).
 
 Streams on every face are metered and priced like non-streamed requests (the verbatim upstream
@@ -119,6 +119,13 @@ stored, logged, or reported — the hash exists precisely so metering works with
 sees them. Do not make it the default and do not add a second way in: the routing policy of
 ADR 0008 hangs off this id, so anything a client can set freely turns permissions into a
 suggestion. `t/26-key-policies.t` fails if that check goes away.
+
+**Client authentication** (`client_auth:`, ADR 0020) is the only place a key is refused for
+*who* it is: with the section, every client route's `under` bridge (`_authorize_client`) reloads
+the config, then answers `401` + `WWW-Authenticate` in the face's dialect to an id not on the
+list — before body parsing, `request.start`, broker, upstream or usage event. A new client
+route goes behind the bridge of its face, or it is an open door. `/health` and `/skeid/*` stay
+outside. `t/67-client-auth.t`.
 
 `x-request-id` is honoured if present, otherwise a `req_<ms>_<rand>` id is generated.
 

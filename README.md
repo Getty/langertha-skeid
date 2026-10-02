@@ -232,11 +232,12 @@ aliases:
 ### Customer key ids and per-key policy
 
 Skeid identifies the caller by the key it presents (`Authorization: Bearer ...` or
-`x-api-key`). It does not check that key against a list: every key derives a **customer key
-id**, `k_` + the full SHA-1 hex of the key, and a request with no key is `anonymous`. The id
-selects the routing policy and is what the usage event is billed under. Authenticate callers
-in front of Skeid, or rely on the upstream checking the forwarded key, if unknown keys must
-be refused.
+`x-api-key`). Every key derives a **customer key id**, `k_` + the full SHA-1 hex of the key,
+and a request with no key is `anonymous`. The id selects the routing policy and is what the
+usage event is billed under. Skeid does not check the key against a list unless the config
+has a `client_auth` section (see [Client authentication](#client-authentication)); without
+one, authenticate callers in front of Skeid or rely on the upstream checking the forwarded
+key.
 
 ```bash
 bin/skeid keyid sk-alice-secret-key     # prints k_28f8389e824f2273c846b9562cffc72a4f10a651
@@ -279,6 +280,38 @@ keys:
   `x-api-key-id`). Only turn it on when a gateway in front of Skeid authenticates the caller
   and sets that header; otherwise any client can name itself into another customer's policy
   and invoice.
+
+### Client authentication
+
+When Skeid is the public entry itself -- nginx in front for TLS, nothing that checks keys --
+list the customer key ids that may come in
+([ADR 0020](docs/adr/0020-client-authentication-is-an-allowlist-of-key-ids.md)):
+
+```yaml
+names:
+  shared: k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b   # bin/skeid keyid <key> -- never the key
+client_auth:
+  keys: [shared]          # names: entries or raw key ids
+```
+
+- Every client route -- `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`,
+  `/v1/messages`, every `/api/*` route and `/.well-known/langertha.json` -- answers `401` with
+  `WWW-Authenticate: Bearer realm="skeid"` to a request without a key (`Missing API key`) or
+  with a key whose id is not listed (`Invalid API key`). The body is in the route's dialect:
+  OpenAI `{"error":{"type":"invalid_request_error","code":"invalid_api_key",...}}`, Anthropic
+  `authentication_error`, Ollama `{"error":"..."}`.
+- A refused request is not routed, forwarded, metered or logged, and the answer names neither
+  the key nor its id. `/health` and the `/skeid/*` routes keep their own rules.
+- Without the section nothing is checked, as before. Being let in widens nothing: the key's
+  routing policy still applies.
+- The list is hot-reloaded like the rest of the config, on every client route: adding,
+  rotating or removing an id holds from the next request (within
+  `SKEID_CONFIG_RELOAD_INTERVAL`). Start with one shared key, one id; give clients keys of
+  their own later by adding `names:` entries.
+- An entry that is neither a `names:` entry nor a key id fails the load, and the error names
+  it by position only -- it is most likely a key pasted where its id belongs. `keys: []` lets
+  nobody in.
+- With `routing.trust_key_id_header` the header's id is what has to be on the list.
 
 ### Pricing
 
@@ -367,7 +400,8 @@ balancer in front of Skeid needs a read timeout at least as long.
 | `GET /health` | — | `{status, proxy, config_reload}`; no auth |
 | `GET /.well-known/langertha.json` | — | provider manifest for the calling key |
 
-All faces use the same routing, policy, usage event and pricing. Errors come back in the
+All faces use the same routing, policy, usage event and pricing, and the same
+[client authentication](#client-authentication) when it is configured. Errors come back in the
 client's format: OpenAI error objects on the OpenAI face, `{"type":"error","error":{...}}` on
 `/v1/messages`, `{"error":"<message>"}` on `/api/*`. An upstream error carries the upstream's
 own message.
