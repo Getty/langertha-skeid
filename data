@@ -1,0 +1,33 @@
+---
+claimed_at: 2026-10-03T20:40:07Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-10-03T20:40:07Z
+created: 2026-10-03T20:30:05Z
+id: 100
+priority: high
+started: 2026-10-03T20:31:13Z
+status: done
+tags:
+- anthropic
+- translation
+- claude-code
+title: 'Anthropic route: a system message after the first turn breaks chat templates
+  (Claude Code mid-conversation-system)'
+updated: 2026-10-03T20:40:07Z
+---
+
+Claude Code 2.1.288 (beta mid-conversation-system-2026-04-07) sends /v1/messages with messages like [user, system, ...]: a message with role system after the conversation started. Skeid passes it on as an OpenAI system message at that position; vLLM's Qwen3.x template answers 400 'System message must be at the beginning.' (seen through llm.citilan.de with qwen3.8-27b), other templates (Gemma: strict role alternation) are likely to fail as well.
+
+Translate such a message so every template accepts it and the prompt prefix stays stable for prefix caching:
+- leading system content (top-level system plus any system messages before the first user/assistant message) stays the OpenAI system message
+- a later system message becomes text of the adjacent user turn: appended to the preceding user message if there is one, else prepended to the following user message, else its own user message; wrapped so the model can tell it apart (e.g. <system-reminder>...</system-reminder>, the convention Claude Code itself uses)
+- never move it into the leading system message (would change the prefix every turn and defeat prefix caching on slow-prefill hardware)
+- string and block-list content both handled; no change for requests without such messages
+Tests with a fake node checking the forwarded OpenAI messages.
+
+2026-10-03 20:34 Cause confirmed: Protocol::Anthropic->request_to_openai copies a message's role through, so role system inside messages reaches the node at its position. Nothing else on the route reads message roles (no count_tokens route, content_bytes is counted off the answer). Red test written: t/71-anthropic-mid-conversation-system.t (37 of 93 assertions fail on the unchanged translator; the no-system-message case passes).
+
+2026-10-03 20:36 Done: Protocol::Anthropic->request_to_openai no longer forwards a role system message where it stands. Leading ones (before the first non-system message) join the top-level system in the one system message at index 0, pieces separated by a blank line; a later one is wrapped in <system-reminder> and appended to the last OpenAI message when that is a user message, else held and put in front of the next user message, else emitted as its own user message before the next non-user/non-tool message or at the end. Tool messages neither take nor flush. Helpers in the same file: _system_text, _add_reminder, _push_message (every message push goes through it; the end flush is one line after the loop). POD of request_to_openai states the rule. Verified: new t/71-anthropic-mid-conversation-system.t (108 assertions, red before: 37 of 93 failed; 8 mutations of the logic each fail it), full prove -lr t/: Files=76, Tests=4600, Result: PASS. Not committed. Also found (not changed): a top-level system that is an empty string still yields an empty system message when messages holds no leading system message -- kept for the byte-identical rule; a message of an unknown role is treated like an assistant one for waiting reminders (they become a user message in front of it).
+
+2026-10-03 20:40 Committed: 22c371e (code, test, Changes), 14275fe (README, skeid-protocols skill)
