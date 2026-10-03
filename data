@@ -1,0 +1,38 @@
+---
+class: standard
+created: 2026-10-03T03:30:59Z
+id: 94
+priority: low
+status: backlog
+tags:
+- ocr
+- design
+title: 'OCR through Skeid: docling-serve face or a vision model over the chat route
+  (decision card)'
+updated: 2026-10-03T03:30:59Z
+---
+
+Card only -- nothing is built yet. An OCR service joins the cluster later and should be reachable through Skeid like everything else (client_auth, routing over nodes, usage). Which backend is still open; this card describes both ways and what Skeid would need for each, so the decision can be made with the cost in view.
+
+Way A -- docling-serve behind its own HTTP API
+- the API (verify against the deployed version): POST /v1/convert/source (JSON: sources by URL or base64, options), POST /v1/convert/file (multipart: files, options), the async twins /v1/convert/source/async and /v1/convert/file/async with GET /v1/status/poll/{task_id} and GET /v1/result/{task_id}; key in the X-Api-Key header. The answer carries the document (markdown / JSON / HTML), status, errors, processing_time.
+- what Skeid needs:
+  1. a face of its own. It is not an OpenAI route and has no `model` field, so routing needs a key that is not the body's model: a fixed model name per route (node `model: docling`) or a node kind.
+  2. multipart relay with the upload limit -- built for audio (k91), reusable as is; documents are larger than audio, so the limit has to be per route or raised.
+  3. upstream auth by another header: _inject_node_auth_async sets Authorization: Bearer only; a node needs to name its header (X-Api-Key).
+  4. task affinity for the async calls: status and result must reach the node that took the task. Skeid routes every request on its own today; this is a new concept (task id -> node, in memory, lost on restart, not shared between workers). Without it only the synchronous calls can be offered, and a long conversion holds a slot and a client connection for minutes (the upstream timeout is 300 s by default).
+  5. a usage unit: pages. An optional `pages` field on the usage event, read from the answer if docling reports it, else nothing but duration.
+  6. capacity: docling has no Prometheus running/waiting metrics Skeid knows; inflight admission with a small max_conns.
+- cost: a new face, a header option, a usage field, and the affinity question. Medium; the affinity table is the part that needs an ADR.
+
+Way B -- a vision model over the chat route
+- an OCR-capable VLM (olmOCR, DeepSeek-OCR, PaddleOCR-VL, dots.ocr, a Qwen-VL ...) served by vLLM, called as POST /v1/chat/completions with image_url parts.
+- what Skeid needs: nothing for routing, admission, streaming, client_auth and usage -- it is a chat node, metered in tokens and priced by `pricing`. Images already pass the OpenAI face untouched and are translated on the Anthropic and Ollama faces (k42).
+- what is missing around it:
+  1. request size: a base64 page image sits in the JSON body, under Mojolicious' 16 MiB message limit. A configurable limit for the JSON routes (beside uploads.max_bytes from k91).
+  2. PDFs: a VLM takes images. Somebody has to rasterise -- the client, or a convenience route in Skeid (for instance Mistral's POST /v1/ocr shape: document in, pages[].markdown and usage_info.pages_processed out) that splits a PDF into page images and fans out chat calls. That is a PDF renderer as a dependency and a fan-out of N upstream requests behind one client request: admission, partial failure and one usage event for N calls all need deciding. Large, and nothing Skeid does today.
+- cost: almost nothing if clients send page images; large if Skeid is to take PDFs.
+
+Recommendation: B without the convenience route first -- it works the day the model is deployed, and the only change is the JSON size limit. A when layout, tables and reading order of whole documents matter more than tokens per page; then start with the synchronous calls and decide task affinity in an ADR before the async ones.
+
+Decide before building: backend (A, B, or both); who rasterises PDFs; whether pages become a usage unit beside tokens, audio_seconds and documents.
