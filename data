@@ -1,0 +1,16 @@
+---
+class: standard
+created: 2026-10-03T04:15:01Z
+id: 97
+priority: low
+status: backlog
+tags:
+- usage
+- bug
+title: 'jsonlog usage report: rows of equal cost come out in hash order'
+updated: 2026-10-03T04:15:01Z
+---
+
+Found while building the audio routes (k91), present on main before it. The jsonlog store's report sorts by_key and by_model by cost only; rows of equal cost (all zero on a deployment without pricing) come out in Perl hash order, so `skeid usage` and GET /skeid/usage list them in a different order on every run.
+
+Wanted: a stable second sort key (the key id resp. the model name), the same in the DBI store's ORDER BY if it has the same gap, and a test that runs the report twice over events of equal cost.
