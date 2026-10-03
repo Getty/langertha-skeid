@@ -22,6 +22,10 @@ own translator and nowhere else. Routing, admission, usage accounting and the up
 builder never learn that Anthropic calls it C<system> or that Ollama calls it
 C<prompt_eval_count>. See F<docs/adr/0001-one-upstream-call-shape-all-client-formats-translated.md>.
 
+One module here translates nothing: L<Langertha::Skeid::Protocol::Audio>. The audio routes of
+the OpenAI face are relayed to the node's own endpoint in their own shape (ADR 0021), and that
+module holds what Skeid knows of their wire, under the same rule.
+
 This module itself holds only the handful of helpers the translators share. They are plain
 functions, called fully qualified (C<Langertha::Skeid::Protocol::utf8_length($text)>) and not
 exported; only L</openai_manifest_endpoint> is a class method.
@@ -190,6 +194,8 @@ sub openai_manifest_endpoint {
 =item * L<Langertha::Skeid::Protocol::Anthropic>, L<Langertha::Skeid::Protocol::Anthropic::Stream>
 
 =item * L<Langertha::Skeid::Protocol::Ollama>, L<Langertha::Skeid::Protocol::Ollama::Stream>
+
+=item * L<Langertha::Skeid::Protocol::Audio> -- the relayed audio routes
 
 =item * L<Langertha::Skeid::Proxy> -- the routes that use them
 

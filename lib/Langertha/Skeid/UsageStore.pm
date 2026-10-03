@@ -40,16 +40,18 @@ returns
     db_path  => '...',                  # DBI stores: the SQLite file, '' for postgresql
     log_path => '...',                  # jsonlog: the event directory or file
     totals   => { requests, input_tokens, output_tokens, total_tokens, cached_tokens,
-                  cache_write_tokens, tool_calls, total_cost_usd },
-    by_key   => [ { api_key_id, requests, total_tokens, total_cost_usd }, ... ],
-    by_model => [ { model, requests, total_tokens, total_cost_usd }, ... ],
+                  cache_write_tokens, tool_calls, audio_seconds, total_cost_usd },
+    by_key   => [ { api_key_id, requests, total_tokens, audio_seconds, total_cost_usd }, ... ],
+    by_model => [ { model, requests, total_tokens, audio_seconds, total_cost_usd }, ... ],
     recent   => [ { id, created_at, api_format, endpoint, api_key_id, model, requested_model,
                     node_id, status_code, ok, input_tokens, output_tokens, total_tokens,
                     cached_tokens, cache_write_tokens, tool_calls, cost_total_usd }, ... ],
   }
 
 or C<< { ok => 0, enabled => 0, error => $message } >>. The breakdowns are ordered by cost,
-highest first; C<recent> is newest first.
+highest first; C<recent> is newest first. C<audio_seconds> sums what the events of the audio
+routes carry (L<Langertha::Skeid/Pluggable Usage Storage>); an event without the field adds
+nothing, so the sum is C<0> where no node reported any.
 
 =method normalize_config
 

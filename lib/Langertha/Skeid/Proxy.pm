@@ -8,6 +8,7 @@ use Mojo::IOLoop;
 use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
 use Scalar::Util qw(blessed weaken);
+use Mojo::Util qw(decode encode);
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::Registry;
@@ -16,6 +17,7 @@ use Langertha::Skeid::Proxy::RelayContent;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Anthropic::Stream;
+use Langertha::Skeid::Protocol::Audio;
 use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Ollama::Stream;
 use Langertha::ToolCall;
@@ -54,6 +56,8 @@ every one but C</health> answers C<401> to a key not on its list. See L</Custome
   GET  /v1/models                  OpenAI: node models and alias names, once each
   POST /v1/chat/completions        OpenAI chat; a stream is relayed byte for byte
   POST /v1/embeddings              OpenAI embeddings
+  POST /v1/audio/transcriptions    OpenAI audio: multipart upload, relayed as the node answers
+  POST /v1/audio/translations      the same, to the node's translations endpoint
   POST /v1/messages                Anthropic Messages, streamed or not
   POST /api/chat                   Ollama chat; streams unless "stream": false
   POST /api/generate               Ollama generate; streams unless "stream": false
@@ -69,6 +73,64 @@ serve are left out. Unhealthy nodes are included. A node without a C<model> is n
 requested name, so no name reaches it in particular. The manifest route answers C<404> unless
 the config enables it, C<401> without a key and C<403> for a key without a grant; see
 L<Langertha::Skeid/Provider Manifest>.
+
+=head2 Audio routes
+
+C</v1/audio/transcriptions> and C</v1/audio/translations> take OpenAI's C<multipart/form-data>
+upload -- C<file>, C<model> and whatever else the client sends -- and relay it to
+C<{node url}/audio/transcriptions> or C</audio/translations>, the endpoint vLLM (Whisper) and
+speaches both serve. Nothing is translated in either direction (ADR 0021): there is one dialect
+for the request, and the answer is the node's own. What Skeid knows of that wire is in
+L<Langertha::Skeid::Protocol::Audio>.
+
+The request is routed like a chat request -- by the form's C<model> field, through aliases,
+tiers, the key's policy, eligibility and admission -- and the form goes upstream part for part:
+each part with its own headers and content, in the client's order, under the client's boundary.
+Fields Skeid does not know and fields that repeat (C<timestamp_granularities[]>) pass through.
+One part is rewritten: C<model>, when an alias tier serves another model than the one asked
+for. The upload itself is never copied: the server spools a part above 256 KiB to a temporary
+file, and the upstream request is sent from that file. The client's C<Expect> header is not
+passed on.
+
+Skeid reads two fields. C<model> has to be there exactly once, as a non-empty value of at most
+1024 bytes; anything else is a C<400> before a node is touched -- with two, Skeid would route by
+one while the node may serve the other. C<stream> picks the relay: the last one in the form
+decides, and it is on for C<true>, C<1>, C<on>, C<yes>, C<t> and C<y> in any case, which is what
+the nodes read as true. A part's name is taken from its C<Content-Disposition> however it is
+written (quoted or bare, any case); a name in the extended C<name*> notation is refused.
+
+The answer comes back as the node gave it -- its status, its headers but for the framing ones,
+its body untouched: JSON, C<verbose_json>, plain C<text>, C<srt>, C<vtt>. A stream is relayed byte for byte like a chat stream, in whichever
+event dialect the node speaks -- OpenAI's and speaches' C<transcript.text.delta> /
+C<transcript.text.done>, or vLLM's C<transcription.chunk> frames ending in C<[DONE]> -- and
+nothing is added to the form to make the node report usage: a vLLM node sends its usage frame
+when the client's form carries C<stream_include_usage=true>.
+
+The usage event has C<api_format> C<openai> and the route as its C<endpoint>. Tokens are
+recorded when the node reports them (OpenAI's C<usage.type: tokens>, vLLM's stream usage
+frame); C<audio_seconds> when it reports a duration -- C<usage.seconds> of a C<usage.type:
+duration> block, else the top-level C<duration> of a C<verbose_json> answer; a streamed request
+also has C<content_bytes>, the UTF-8 bytes of the text relayed. A node that reports neither
+count leaves an event with a status and a duration and no C<audio_seconds> key: not measured,
+which is not zero. See L<Langertha::Skeid/Pluggable Usage Storage>.
+
+=head2 Uploads
+
+The audio routes are the upload routes: their request limit is the config's
+C<uploads.max_bytes> (L<Langertha::Skeid/uploads>, default 26214400), not the server's own
+(Mojolicious' 16 MiB, which every other route keeps). A larger body is answered C<413> in the
+OpenAI error shape, with no node touched and no usage event.
+
+The limit is applied when the request's head has arrived, before its body is read. A request
+that declares a larger C<Content-Length> is answered at once and its connection closed; a body
+of undeclared length (chunked) is cut off once it is 1 MiB past the limit, and measured exactly
+if it ends before that. With C<client_auth>, a caller the list does not let in is cut off the
+same way -- its C<401> does not wait for, or store, the upload. The limit is read per request,
+so a changed C<uploads.max_bytes> holds from the next one.
+
+A client that sends C<Expect: 100-continue> (curl does, above 1 MiB) gets no C<100 Continue>:
+the server underneath does not send one. It gets a C<401> or C<413> right away, and otherwise
+sends the body after its own timeout.
 
 =head2 Registry route
 
@@ -104,8 +166,9 @@ C<routing.trust_key_id_header> a C<x-skeid-key-id> (or C<x-api-key-id>) header n
 instead.
 
 With C<client_auth>, that key id has to be on the section's list. Every client route checks it
-first -- C</v1/models>, C</v1/chat/completions>, C</v1/embeddings>, C</v1/messages>, every
-C</api/*> route and C</.well-known/langertha.json> -- after picking up a changed config
+first -- C</v1/models>, C</v1/chat/completions>, C</v1/embeddings>, the C</v1/audio/*> routes,
+C</v1/messages>, every C</api/*> route and C</.well-known/langertha.json> -- after picking up a
+changed config
 (L<Langertha::Skeid/maybe_reload_config>), so a list change holds from the next request.
 No key is C<401> C<Missing API key>, a key whose id is not listed C<401> C<Invalid API key>,
 both with C<WWW-Authenticate: Bearer realm="skeid">, and nothing else happens for that request:
@@ -116,8 +179,9 @@ they have their own rules. Being let in widens nothing: the key's routing policy
 =head2 The upstream call
 
 The node URL gets C</v1> added unless it ends in it, then C</chat/completions> or
-C</embeddings>; the body carries the served model (an alias tier's C<model>), everything else as
-the client sent it or as translated. The client's headers go upstream except the hop-by-hop
+C</embeddings> (an audio route: C</audio/transcriptions> or C</audio/translations>, see
+L</Audio routes>); the body carries the served model (an alias tier's C<model>), everything else
+as the client sent it or as translated. The client's headers go upstream except the hop-by-hop
 ones, C<Host>, C<Content-Length> and C<Accept-Encoding>. When the node has a key of its own --
 C<api_key_ref> through the key broker, else C<api_key_env> -- it replaces C<Authorization> and
 the client's C<Authorization> and C<x-api-key> are dropped, however the client spelled them. A
@@ -148,7 +212,9 @@ out, the request stays what it was: finished and metered by the node's answer.
 =head2 Errors
 
 A key the C<client_auth> list does not let in is C<401> (OpenAI: type C<invalid_request_error>,
-code C<invalid_api_key>; Anthropic: C<authentication_error>; see L</Customer identity>). A
+code C<invalid_api_key>; Anthropic: C<authentication_error>; see L</Customer identity>). An
+upload over C<uploads.max_bytes> is C<413 invalid_request_error>; an audio request that is not a
+multipart form, or whose form has no usable C<model> field, is C<400 invalid_request_error>. A
 request no node may serve for this key is C<403 permission_error>; a model no healthy node
 serves is C<503 model_not_found>; eligible nodes that stay full past the wait are
 C<429 rate_limit_error>; an upstream failure is its status (or C<502>) with type
@@ -208,6 +274,11 @@ C<< $app->ua->inactivity_timeout >> to match.
 The app has a C<skeid> helper returning the control plane.
 
 =cut
+
+# What the request limit of an upload route allows on top of uploads.max_bytes (skeid k91): the
+# request's head, which the server counts into its message size and caps well below this itself
+# (100 lines of 8 KiB). The body alone is checked exactly when the route runs.
+my $UPLOAD_HEAD_ALLOWANCE = 1048576;
 
 sub build_app {
   my ($class, %opts) = @_;
@@ -312,6 +383,16 @@ sub build_app {
     $c->res->headers->header('x-request-id' => $id);
   });
 
+  # The upload routes get their own request limit (uploads.max_bytes, skeid k91), set the moment
+  # the request's head is parsed and before any of its body is: see _limit_upload. The
+  # transaction is held weakly -- the listener sits on its own request content, and a connection
+  # that closes before the head is complete would otherwise keep both alive.
+  $app->hook(after_build_tx => sub {
+    my ($tx, $app) = @_;
+    weaken $tx;
+    $tx->req->content->once(body => sub { _limit_upload($app, $tx) if $tx });
+  });
+
   my $r = $app->routes;
 
   # Still 'ok' while a config reload is failing: the proxy serves under the config it kept, so
@@ -368,6 +449,14 @@ sub build_app {
     my ($c) = @_;
     _handle_openai_embeddings($c);
   });
+
+  # Audio (skeid k91): relayed in the upstream's own shape, not translated (ADR 0021).
+  for my $endpoint (Langertha::Skeid::Protocol::Audio->routes) {
+    $openai->post($endpoint => sub {
+      my ($c) = @_;
+      _handle_openai_audio($c, $endpoint);
+    });
+  }
 
   # Anthropic format. Every error this request produces, wherever it is rendered -- the gate's
   # 401 included -- has to be Anthropic-shaped (core karr #224). _render_error reads this.
@@ -750,6 +839,152 @@ sub _handle_openai_embeddings {
   });
 }
 
+# Runs once per request, when its head is parsed and its body is still on the wire (the request
+# content's `body` event). An upload route gets its own limit there, because afterwards is too
+# late for either thing it is for (skeid k91):
+#
+# - uploads.max_bytes replaces the server's request limit, which is 16 MiB and so below the
+#   default upload limit. A request that declares a larger body is cut off at once: the limit is
+#   set below what was already read, the parser stops, and the route answers 413 without the body
+#   having been received. A body of undeclared length (chunked) is cut off when it passes the
+#   limit plus the head allowance, so it is never buffered whole either.
+# - A caller the client gate is going to refuse is cut off the same way, so its 401 does not
+#   cost an upload spooled to disk first. The gate itself still runs and renders the 401.
+#
+# The limit is read off the Skeid here, after picking up a changed config, so a reload holds
+# from the next upload. Every other route keeps the server's own limit: nothing is set for it.
+# A failure here leaves the server's limit in force and the route's own checks to decide.
+sub _limit_upload {
+  my ($app, $tx) = @_;
+  my $req = $tx->req;
+  return unless uc($req->method // '') eq 'POST';
+  (my $path = $req->url->path->to_route) =~ s{/\z}{};
+  return unless Langertha::Skeid::Protocol::Audio->upstream_path($path);
+
+  my $done = eval {
+    my $c = $app->build_controller($tx);
+    my $skeid = $c->skeid;
+    $skeid->maybe_reload_config;
+
+    if ($skeid->client_auth_enabled && !$skeid->client_key_allowed(_request_api_key_id($c))) {
+      $req->max_message_size(1);
+      return 1;
+    }
+
+    my $max = $skeid->upload_max_bytes;
+    my $declared = $req->headers->content_length;
+    if (!$req->content->is_chunked && defined($declared) && $declared =~ /\A[0-9]+\z/ && $declared > $max) {
+      $req->max_message_size(1);
+      return 1;
+    }
+    $req->max_message_size($max + $UPLOAD_HEAD_ALLOWANCE);
+    1;
+  };
+  $app->log->error('Setting the upload limit failed: ' . ($@ || 'unknown error')) unless $done;
+  return;
+}
+
+# POST /v1/audio/transcriptions and /v1/audio/translations (skeid k91). The request is a
+# multipart form and the answer is whatever the node's transcription endpoint says -- JSON, plain
+# text, subtitles or an event stream. Neither is translated (ADR 0021): the form goes upstream
+# part for part as the client sent it, the answer comes back byte for byte. Skeid reads two
+# fields of the form, `model` to route by and `stream` to pick the relay, and writes one, `model`
+# again, when an alias tier serves another model than the one asked for (ADR 0008). What the
+# form and the answers look like on the wire is Langertha::Skeid::Protocol::Audio's to know.
+sub _handle_openai_audio {
+  my ($c, $endpoint) = @_;
+  my $audio = 'Langertha::Skeid::Protocol::Audio';
+  _extend_client_timeout($c);
+  my $req = $c->req;
+
+  # Before anything is read off the body: a request cut off by _limit_upload has no complete
+  # form. The body size is checked again, exactly, for what the limit set there lets through.
+  my $max = $c->skeid->upload_max_bytes;
+  if ($req->is_limit_exceeded || ($req->body_size // 0) > $max) {
+    _render_error($c, 413, "Maximum content size limit ($max bytes) exceeded", 'invalid_request_error');
+    return;
+  }
+
+  my $content = $req->content;
+  unless ($content->is_multipart) {
+    _render_error($c, 400, 'Expected a multipart/form-data body', 'invalid_request_error');
+    return;
+  }
+
+  # One `model` field, no more: with two, Skeid would route -- and apply the key's policy -- by
+  # one while the node may well serve the other.
+  my ($field, $problem) = $audio->form_fields($content);
+  my @models = @{$field->{model} || []};
+  my $model = @models == 1 ? $models[0]{value} : undef;
+  $model = decode('UTF-8', $model) // $model if defined $model;
+  $problem //= !@models                           ? "The 'model' form field is required"
+             : @models > 1                        ? "The 'model' form field may be given only once"
+             : !(defined($model) && length($model)) ? "The 'model' form field is empty or too long"
+             :                                      undef;
+  if (defined $problem) {
+    _render_error($c, 400, $problem, 'invalid_request_error');
+    return;
+  }
+
+  # The last `stream` field decides, as it does for the node that parses the same form.
+  my $streamed = @{$field->{stream} || []} ? $audio->is_true($field->{stream}[-1]{value}) : 0;
+
+  my $api_key_id = _request_api_key_id($c);
+  _begin_route_async($c, $model, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
+    return unless $route;
+
+    # Requested and served model are two strings once an alias is in play (ADR 0008): the form
+    # that goes upstream carries the served one, the usage event carries both.
+    my $served_model = _served_model($tier, $model);
+    my %replace = $served_model eq $model ? () : ($models[0]{index} => encode('UTF-8', $served_model));
+
+    my $url = _endpoint_url_for_node($route->{url}, $audio->upstream_path($endpoint));
+    my $meta = {
+      api_format => 'openai',
+      endpoint   => $endpoint,
+      api_key_id => $api_key_id,
+      provider   => 'skeid',
+      engine     => ($route->{engine} // 'openaibase'),
+      model            => $served_model,
+      requested_model  => $model,
+      route_url        => ($route->{url} // ''),
+    };
+    my $relay = {
+      # The upstream form is built from the parts the server already parsed: a part is its
+      # headers and an asset, and an upload above 256 KiB is an asset on disk, so the file is
+      # streamed from there and never copied into memory. The client's Content-Type travels in
+      # the forwarded headers and its boundary is the one the body is written with.
+      #
+      # The client's `Expect: 100-continue` (curl sends one with every upload above 1 MiB) is
+      # not forwarded: the body is in hand, so nothing is expected of the node any more, and a
+      # node that answered the header with its `100 Continue` would have the user agent start
+      # a fresh response object -- one the stream relay is not listening on.
+      request => sub {
+        my ($ua, $url, $headers) = @_;
+        delete @{$headers}{ grep { lc($_) eq 'expect' } keys %$headers };
+        return $ua->build_tx(POST => $url, $headers,
+          multipart => $audio->upstream_parts($content, \%replace));
+      },
+      units      => sub { $audio->usage_units(@_) },
+      delta_text => sub { $audio->delta_text(@_) },
+    };
+    my $body = { model => $served_model };
+
+    if ($streamed) {
+      _proxy_openai_stream($c, $url, $body, $node_id, $started, $meta, undef, $relay);
+      return;
+    }
+
+    $c->render_later;
+    _proxy_openai_json_async($c, $url, $body, $node_id, $started, $meta, sub {
+      my ($res, $err, $status) = @_;
+      return if $err;
+      _render_upstream_response($c, $res, $node_id);
+    }, undef, $relay);
+  });
+}
+
 sub _handle_anthropic_messages {
   my ($c) = @_;
   _extend_client_timeout($c);
@@ -1105,10 +1340,17 @@ sub _client_abort_event {
 # gets. It runs before the request is finished and metered, so a translator that dies is one
 # failed request -- one usage event with ok => 0, an error in the face's own shape -- and the
 # callback gets the translated payload as its fifth argument, or nothing after an error.
+#
+# $relay is what a route relayed in the upstream's own shape brings (ADR 0021), all optional:
+# `request`, a code ref called with the user agent, the URL and the upstream headers that builds
+# the upstream transaction instead of the JSON one made from $body; `units`, a code ref that
+# reads the route's own usage units off the decoded answer and returns them as event fields;
+# and, for a stream, `delta_text`, which returns the text of a frame in the route's own dialect.
 sub _proxy_openai_json_async {
-  my ($c, $url, $body, $node_id, $started, $meta, $cb, $translate) = @_;
+  my ($c, $url, $body, $node_id, $started, $meta, $cb, $translate, $relay) = @_;
   $meta ||= {};
   $cb ||= sub { };
+  $relay ||= {};
 
   my %fwd_headers = _forward_headers($c);
   _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
@@ -1133,7 +1375,7 @@ sub _proxy_openai_json_async {
     $cb->(undef, 1, 503);
     return;
   }
-  my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
+  my $tx = _upstream_tx($c, $url, \%fwd_headers, $body, $relay);
 
   # Set by whichever comes first, the upstream's completion or the client hanging up, so that
   # request.finish and the usage event happen once.
@@ -1243,6 +1485,7 @@ sub _proxy_openai_json_async {
       ok           => ($status < 500) ? 1 : 0,
       duration_ms  => $duration_ms,
       metrics      => $metrics,
+      ($relay->{units} ? $relay->{units}->($payload) : ()),
     });
 
     $cb->($res, 0, $status, (ref($payload) eq 'HASH' ? $payload : {}), $translated);
@@ -1256,9 +1499,11 @@ sub _proxy_openai_json_async {
 # relayed untouched, which is what an OpenAI client wants and the only path that cannot lose
 # anything in translation. With one, each OpenAI chunk is decoded and re-emitted in the
 # client's own format -- the same edge-translation seam as the non-streaming path (ADR 0001).
+# $relay is as for _proxy_openai_json_async.
 sub _proxy_openai_stream {
-  my ($c, $url, $body, $node_id, $started, $meta, $stream) = @_;
+  my ($c, $url, $body, $node_id, $started, $meta, $stream, $relay) = @_;
   $meta ||= {};
+  $relay ||= {};
 
   my %fwd_headers = _forward_headers($c);
 
@@ -1284,7 +1529,7 @@ sub _proxy_openai_stream {
   }
 
   return _refuse_unkeyed_node($c, $node_id, $started, $meta, $no_key) if defined $no_key;
-  my $tx = $c->app->ua->build_tx(POST => $url, \%fwd_headers, json => $body);
+  my $tx = _upstream_tx($c, $url, \%fwd_headers, $body, $relay);
   # Mojolicious would parse an unchunked, exactly-text/event-stream body into its own `sse`
   # events and never emit `read` -- the relay would forward nothing (skeid karr #30).
   $tx->res->content(Langertha::Skeid::Proxy::RelayContent->new);
@@ -1310,6 +1555,12 @@ sub _proxy_openai_stream {
   # translator's own count -- the text it actually wrote in the client's format. An observation
   # recorded beside the token counts, never a substitute for them.
   my $content_bytes = sub { $stream ? 0 + ((($stream->usage)[2]) // 0) : $accumulated_content_bytes };
+  # The route's own usage units (ADR 0021), read off the usage the stream carried so far -- the
+  # same block a non-streamed answer would have carried. Nothing until a frame had one.
+  my $units = sub {
+    return () unless $relay->{units} && ref($upstream_usage) eq 'HASH';
+    return $relay->{units}->({ usage => $upstream_usage });
+  };
 
   # Upstream chunks arrive faster than they can be written out, so they are queued and drained
   # one at a time. Writing each chunk directly would end the response after the first one:
@@ -1375,6 +1626,7 @@ sub _proxy_openai_stream {
       error_message => 'Stream translation failed',
       content_bytes => $content_bytes->(),
       metrics       => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
+      $units->(),
     });
     _cancel_upstream($tx);
     $upstream_done = 1;
@@ -1445,6 +1697,11 @@ sub _proxy_openai_stream {
           $accumulated_content_bytes += Langertha::Skeid::Protocol::utf8_length($delta_content);
         }
       }
+      if ($relay->{delta_text}) {
+        my $text = $relay->{delta_text}->($json);
+        $accumulated_content_bytes += Langertha::Skeid::Protocol::utf8_length($text)
+          if defined($text) && length($text);
+      }
 
       if (ref($json->{usage}) eq 'HASH') {
         $upstream_usage = _merge_usage($upstream_usage, $json->{usage});
@@ -1503,6 +1760,7 @@ sub _proxy_openai_stream {
       duration_ms   => $duration_ms,
       content_bytes => $content_bytes->(),
       metrics       => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
+      $units->(),
     });
     _cancel_upstream($tx);
   });
@@ -1543,6 +1801,7 @@ sub _proxy_openai_stream {
           error_message => ($err->{message} // 'unknown'),
           content_bytes => $content_bytes->(),
           metrics       => _stream_metrics($c, $meta, $body, _duration_ms($started), $upstream_usage),
+          $units->(),
         });
         _render_error($c, $err_status,
           'Upstream error: ' . _upstream_error_message($err, $upstream_error_body), 'upstream_error');
@@ -1623,6 +1882,7 @@ sub _proxy_openai_stream {
       duration_ms  => $duration_ms,
       content_bytes => $content_bytes->(),
       metrics      => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
+      $units->(),
     });
 
     # Only finish once the queue has drained, or the tail of the stream is cut off. If the
@@ -1635,6 +1895,15 @@ sub _proxy_openai_stream {
     }
   });
   });
+}
+
+# The upstream request of an admitted call: the one JSON POST every translated route makes (ADR
+# 0001), or what a relayed route's own `request` builder returns (ADR 0021).
+sub _upstream_tx {
+  my ($c, $url, $headers, $body, $relay) = @_;
+  my $ua = $c->app->ua;
+  return $relay->{request}->($ua, $url, $headers) if $relay && $relay->{request};
+  return $ua->build_tx(POST => $url, $headers, json => $body);
 }
 
 # Renders an error in the shape of the face the client called. The Anthropic Messages face
@@ -1952,6 +2221,8 @@ sub _record_usage_event {
       error_message => ($args->{error_message} // ''),
       # Streamed requests only; absent otherwise, so the event says "not measured" (skeid #36).
       (defined($args->{content_bytes}) ? (content_bytes => 0 + $args->{content_bytes}) : ()),
+      # Audio routes only, and only when the node reported it (skeid k91, ADR 0021).
+      (defined($args->{audio_seconds}) ? (audio_seconds => 0 + $args->{audio_seconds}) : ()),
       metrics       => $safe_metrics,
     });
   };
@@ -2131,6 +2402,8 @@ sub _duration_ms {
 
 =item * L<Langertha::Skeid::Protocol::Anthropic>, L<Langertha::Skeid::Protocol::Ollama> -- the
 translated faces
+
+=item * L<Langertha::Skeid::Protocol::Audio> -- the wire of the relayed audio routes
 
 =item * L<Langertha::Skeid::KeyBroker::OpenBao> -- upstream keys from OpenBao
 

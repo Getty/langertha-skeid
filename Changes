@@ -2,6 +2,29 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - POST /v1/audio/transcriptions and /v1/audio/translations on the OpenAI
+      face, for Whisper nodes (vLLM, speaches). The multipart form is routed by
+      its model field like a chat request (aliases, tiers, key policy,
+      max_conns, health, client_auth) and relayed to the node's own
+      /audio/... endpoint part for part; only model is rewritten when an alias
+      tier serves another one. The upload is sent from the spooled file, never
+      copied in memory. The answer comes back as the node gave it: json,
+      verbose_json, text, srt, vtt, or with stream=true the node's event
+      stream byte for byte, in whichever dialect it speaks. Nothing is
+      translated (ADR 0021).
+    - uploads: { max_bytes: N } limits the body of the upload routes (default
+      26214400, 25 MiB; hot reloaded). Over it: 413, no node touched, no usage
+      event. The limit holds while the body arrives, and with client_auth a
+      caller that is not on the list gets its 401 before the upload is
+      received. Every other route keeps the server's own request limit.
+    - Usage events of the audio routes carry audio_seconds when the node
+      reports a duration (usage.seconds of a usage.type duration block, else
+      the duration of a verbose_json answer) and no such key when it does not.
+      Tokens are recorded when the node reports them. jsonlog writes the field,
+      the DBI stores get a nullable audio_seconds column (added to an existing
+      table on start), reports sum it in totals, by_key and by_model, and
+      skeid usage prints it where there is some. Seconds are recorded, not
+      priced.
     - An optional client_auth: { keys: [...] } section turns the client routes
       into an allowlist. Each entry is a names: entry or a key id (k_...),
       never a key. With it, a missing key or one that is not listed gets 401

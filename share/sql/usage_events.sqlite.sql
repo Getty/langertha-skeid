@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   cached_tokens INTEGER,
   cache_write_tokens INTEGER,
   content_bytes INTEGER,
+  audio_seconds REAL,
   tool_calls INTEGER NOT NULL DEFAULT 0,
   cost_input_usd REAL NOT NULL DEFAULT 0,
   cost_output_usd REAL NOT NULL DEFAULT 0,

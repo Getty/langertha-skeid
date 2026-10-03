@@ -8,6 +8,7 @@ my @modules = qw(
   Langertha::Skeid::Proxy::RelayContent
   Langertha::Skeid::Protocol
   Langertha::Skeid::Protocol::Anthropic
+  Langertha::Skeid::Protocol::Audio
   Langertha::Skeid::Protocol::Ollama
   Langertha::Skeid::UsageStore
   Langertha::Skeid::UsageStore::JsonLog

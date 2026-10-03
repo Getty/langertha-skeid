@@ -125,6 +125,14 @@ there. It is an observation, not a billing quantity: Skeid never derives token c
 or cost from it. The DBI stores keep it in a nullable C<content_bytes> column (C<NULL>
 for a non-streamed or pre-existing row); C<jsonlog> writes it as part of the event.
 
+An audio route's event (C</v1/audio/transcriptions>, C</v1/audio/translations>) carries
+C<audio_seconds> when the node said how much audio it worked on: C<usage.seconds> of an answer
+whose C<usage.type> is C<duration>, else the C<duration> of a C<verbose_json> answer. A node that
+reports neither -- a plain C<json>, C<text>, C<srt> or C<vtt> answer, most streams -- leaves the
+key out: not measured, never a zero. It is recorded as the node reported it and is not priced
+(ADR 0021); the DBI stores keep it in a nullable C<audio_seconds> column, C<jsonlog> writes it
+as part of the event, and a report sums it in C<totals>, C<by_key> and C<by_model>.
+
 When a callback or override is provided, the configured store is bypassed entirely
 and no database connection is created.  DBI, DBD::SQLite and DBD::Pg are C<recommends>
 dependencies — they are not required for C<jsonlog> or when usage is handled externally.
@@ -248,6 +256,8 @@ L</ENVIRONMENT>, else built in.
 =item * C<registry> and C<manifest>: absent means off.
 
 =item * C<client_auth>: removed from the file, client authentication is off again.
+
+=item * C<uploads>: removed from the file, the upload limit is the built-in default again.
 
 =back
 
@@ -374,6 +384,19 @@ C<default_policy>: being let in does not widen what a key's policy routes it to.
 
 The check takes the same identity routing does: with C<routing.trust_key_id_header> the header's
 key id is what has to be on the list.
+
+=head2 uploads
+
+  uploads:
+    max_bytes: 26214400   # default 26214400 (25 MiB); an integer of at least 1
+
+The largest request body the upload routes take -- C</v1/audio/transcriptions> and
+C</v1/audio/translations>, the routes with a C<multipart/form-data> body: the file plus the form
+around it. A larger one is answered C<413> before any node is asked and without a usage event;
+see L<Langertha::Skeid::Proxy/Uploads>. Every other route keeps the server's own request limit
+(Mojolicious' C<MOJO_MAX_MESSAGE_SIZE>, 16 MiB), whatever this says. The load fails on a section
+that is not a hash, an unknown key in it, and a C<max_bytes> that is not an integer of at least
+1 -- there is no "unlimited". A changed value holds from the next request.
 
 =head2 routing
 
@@ -639,6 +662,23 @@ lets no key in. Read through L</client_auth_enabled> and L</client_key_allowed>.
 has client_auth_keys => (
   is      => 'rw',
   default => sub { undef },
+);
+
+=attr upload_max_bytes
+
+The largest request body, in bytes, the upload routes accept (default 26214400, 25 MiB; config
+C<uploads.max_bytes>). See L</uploads>.
+
+=cut
+
+# uploads.max_bytes (skeid k91): the body limit of the multipart routes, read per request by
+# the proxy, so a reload holds from the next upload. The default is OpenAI's own limit for an
+# audio file, 25 MiB.
+my $UPLOAD_MAX_BYTES = 26214400;
+
+has upload_max_bytes => (
+  is      => 'rw',
+  default => sub { $UPLOAD_MAX_BYTES },
 );
 
 =attr trust_key_id_header
@@ -1496,7 +1536,7 @@ my @CONFIG_STATE = qw(
   model_aliases policies default_policy key_policies key_names nodes
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
   admin_api_key _config_admin_api_key
-  manifest_enabled manifest_available key_manifests client_auth_keys
+  manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
 
@@ -1751,6 +1791,15 @@ sub _apply_config {
     push @notices, $self->_load_client_auth($cfg->{client_auth});
   } elsif ($before->{client_auth}) {
     $self->client_auth_keys(undef);
+  }
+
+  # The upload limit of the multipart routes (skeid k91). Removed from the file, it is the
+  # built-in default again.
+  if (exists $cfg->{uploads}) {
+    $declared{uploads} = 1;
+    $self->_load_uploads($cfg->{uploads});
+  } elsif ($before->{uploads}) {
+    $self->upload_max_bytes($UPLOAD_MAX_BYTES);
   }
 
   if (exists $cfg->{aliases}) {
@@ -2395,8 +2444,8 @@ C<route_url>, C<status_code>, C<ok>, C<duration_ms>, C<error_type>, C<error_mess
 C<metrics> the token counts (C<input_tokens>, C<output_tokens>, C<total_tokens>,
 C<cached_tokens>, C<cache_write_tokens>), C<tool_calls> and the costs (C<cost_input_usd>,
 C<cost_output_usd>, C<cost_total_usd>, C<cost_cache_read_usd>, C<cost_cache_write_usd>). Costs
-arrive already priced; nothing is priced here. C<content_bytes> is set only when given. The
-C<usage.record> function calls it.
+arrive already priced; nothing is priced here. C<content_bytes> and C<audio_seconds> are set
+only when given. The C<usage.record> function calls it.
 
 =cut
 
@@ -2473,6 +2522,10 @@ sub record_usage {
   # non-streamed event has no such key, which a store records as "not measured". An observation
   # beside the token counts -- never used to estimate or replace them.
   $event{content_bytes} = _num($args{content_bytes}) if defined $args{content_bytes};
+  # Seconds of audio an audio route's node reported (skeid k91, ADR 0021). Optional and additive
+  # like content_bytes: absent means the node did not say, which is not a measured zero. Recorded
+  # as reported, never priced here.
+  $event{audio_seconds} = _num($args{audio_seconds}) if defined $args{audio_seconds};
 
   return $self->_store_usage_event(\%event);
 }
@@ -3234,6 +3287,24 @@ sub _load_client_auth {
   $self->client_auth_keys(\%allowed);
   return %allowed ? () : ('client_auth.keys is empty: no key can use the client routes, every '
     . 'request on them answers 401');
+}
+
+# The uploads section (skeid k91). Strict like client_auth: a misspelled key or a limit that is
+# not a positive integer fails the load rather than leaving the default in force unnoticed --
+# and 0, which the server underneath reads as "no limit", is refused with the rest.
+sub _load_uploads {
+  my ($self, $section) = @_;
+  croak 'uploads must be a hash, as in uploads: { max_bytes: 26214400 }'
+    unless ref($section) eq 'HASH';
+  for my $key (sort keys %$section) {
+    croak "uploads: unknown key '$key' (known: max_bytes)" unless $key eq 'max_bytes';
+  }
+  my $max = $section->{max_bytes};
+  return $self->upload_max_bytes($UPLOAD_MAX_BYTES) unless exists $section->{max_bytes};
+  croak 'uploads.max_bytes must be an integer of at least 1 (bytes)'
+    unless defined($max) && !ref($max) && $max =~ /\A[0-9]+\z/ && $max >= 1;
+  $self->upload_max_bytes(0 + $max);
+  return;
 }
 
 =method client_auth_enabled

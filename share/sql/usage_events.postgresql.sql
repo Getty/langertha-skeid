@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   cached_tokens BIGINT,
   cache_write_tokens BIGINT,
   content_bytes BIGINT,
+  audio_seconds DOUBLE PRECISION,
   tool_calls BIGINT NOT NULL DEFAULT 0,
   cost_input_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   cost_output_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
