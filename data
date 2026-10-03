@@ -1,0 +1,21 @@
+---
+class: standard
+created: 2026-10-03T04:15:00Z
+id: 96
+priority: medium
+status: backlog
+tags:
+- proxy
+- bug
+title: 'Expect: 100-continue is forwarded upstream on the chat and JSON routes; a
+  node''s 100 Continue can empty the relayed answer'
+updated: 2026-10-03T04:15:00Z
+---
+
+Found while building the audio routes (k91). _forward_headers passes the client's `Expect` header upstream. curl sends `Expect: 100-continue` with every body above 1 MiB. A node that answers it with `100 Continue` makes Mojo::UserAgent start a fresh response object; the stream relay listens on the first one, so on the audio stream route the client got an empty 200 and the usage event said ok=1. k91 drops the header on the audio routes only.
+
+The chat stream relay and the JSON path build their upstream request from the same forwarded headers and have the same mechanics; nobody tested them. A chat body above 1 MiB (images, long histories) sent by curl is the case.
+
+Wanted:
+- reproduce on /v1/chat/completions (stream and non-stream) with a raw fake node that answers 100 Continue; if it fails the same way, drop `expect` in _forward_headers for every route -- Skeid holds the whole body by then, nothing is expected of the node -- and take the special case out of the audio handler
+- optional, separate: answer `100 Continue` to the client from _limit_upload once limit and client_auth are fine. Mojolicious sends none, so a curl upload above 1 MiB waits out curl's own one-second timeout before it sends the body.
