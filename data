@@ -1,0 +1,14 @@
+---
+class: standard
+created: 2026-10-03T20:39:15Z
+id: 101
+priority: low
+status: backlog
+tags:
+- anthropic
+- translation
+title: 'Anthropic route: system "" is forwarded as an empty system message'
+updated: 2026-10-03T20:39:15Z
+---
+
+Found while working k100. request_to_openai (lib/Langertha/Skeid/Protocol/Anthropic.pm) drops an empty system block array but forwards a top-level system: "" as { role => system, content => "" }. A strict chat template may dislike an empty system message, and it differs from the array case. k100 left it untouched to keep requests without a system message in messages byte-identical. Done: decide whether an empty top-level system string is dropped like the empty block array; test on the forwarded OpenAI messages.
