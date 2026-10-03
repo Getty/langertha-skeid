@@ -54,8 +54,9 @@ Revision history for Langertha-Skeid
       with WWW-Authenticate: Bearer realm="skeid" in the dialect of the route
       (OpenAI invalid_api_key, Anthropic authentication_error, Ollama error
       string) on every /v1/*, /api/* route and /.well-known/langertha.json,
-      before the body is read or any node is touched. /health and /skeid/*
-      stay open. Without the section nothing is checked. The section is hot
+      before the body is read or any node is touched. /health stays open;
+      the /skeid/* admin routes keep their own bearer authentication and are
+      not gated by it. Without the section nothing is checked. The section is hot
       reloaded; keys: [] lets nobody in. GET /v1/models, /api/tags, /api/ps and
       the manifest now pick up a changed config themselves.
     - The release builds, tags and pushes the Docker image through
