@@ -140,7 +140,8 @@ _Avoid_: liveness, readiness, up/down.
 
 **API format** (client protocol):
 The dialect the *client* speaks to Skeid: OpenAI (`/v1/chat/completions`, `/v1/embeddings`,
-`/v1/models`, and the **Relayed routes** `/v1/audio/transcriptions`, `/v1/audio/translations`),
+`/v1/models`, and the **Relayed routes** `/v1/audio/transcriptions`, `/v1/audio/translations`
+and `/v1/rerank` with its alias `/rerank`),
 Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/tags`, `/api/ps`). A property of the request. Code, config (`manifest.faces`) and ADRs call one API
 format's set of routes a **face** — "the Anthropic face".
 _Avoid_: engine, provider, frontend API.
@@ -152,13 +153,22 @@ only place a format-specific field name may appear.
 _Avoid_: adapter, shim, conversion layer.
 
 **Relayed route**:
-A route of the OpenAI **API format** that is not a chat call and has one dialect only — audio
-transcription and translation today. Its request goes to the node's endpoint of the same name
-in its own shape (a multipart form, part for part) and the answer comes back as the node gave
-it; there is nothing to translate from or into, so no **Translation** (ADR 0021). Routing,
-**Policy**, **Admission** and the **Usage event** are those of every other route; only the
-served model is written into the request.
+A route of the OpenAI **API format** that is not a chat call and has one client dialect only —
+audio transcription and translation, and rerank. Its request goes to the node's endpoint of the
+same name in its own shape (a multipart form, part for part; a rerank body, field for field) and
+the answer comes back as the node gave it; there is nothing to translate from or into, so no
+**Translation** (ADR 0021). Routing, **Policy**, **Admission** and the **Usage event** are those
+of every other route; only the served model is written into the request. The one exception is a
+node with a **Rerank format**.
 _Avoid_: passthrough (says nothing about routing and metering still applying), proxy route.
+
+**Rerank format** (`rerank_format`):
+A **Node** option naming the dialect its rerank endpoint speaks when that is not the one clients
+speak. Absent for a node that is relayed (vLLM, infinity, Jina, Cohere); `tei` for Hugging Face
+text-embeddings-inference, whose request and answer Skeid translates on the *upstream* side —
+the only translation that does not sit at the client edge, and not a **Translation** in the
+sense above: the client's **API format** does not change.
+_Avoid_: engine (the **Engine ID** never changes the call), rerank engine, backend type.
 
 **Upstream**:
 The node side of a request. The client side is the *client* or *caller* — never "backend".
@@ -183,7 +193,8 @@ _Avoid_: latency (unqualified), response time.
 
 **Usage event**:
 One record per forwarded request: identity, node, model, status, duration, tokens, cost, and
-where a route counts something else, its own usage unit (**Audio seconds**). The billing unit
+where a route counts something else, its own usage unit (**Audio seconds**, **Documents**). The
+billing unit
 and the reason Skeid exists between a client and a node.
 _Avoid_: log line, metric, sample.
 
@@ -193,6 +204,14 @@ route**. The first **usage unit** that is not a token count: an optional event f
 as the node reports it, absent when the node reports none — not measured, which is never `0`.
 Recorded, not priced (ADR 0021).
 _Avoid_: duration (that is the request's wall time, `duration_ms`), audio length, minutes.
+
+**Documents** (`documents`):
+How many documents a rerank request carried, on the **Usage event** of a request the node
+answered. Unlike **Audio seconds** Skeid counts it itself, off the request, so it does not depend
+on what the node reports; a failed request has no such field. Recorded, not priced. A reranker's
+tokens are not a unit of their own: they are input tokens, wherever the node reports them.
+_Avoid_: texts (TEI's word for them), passages, search units (Cohere's billing unit, not
+recorded), results (what comes back, cut to `top_n`).
 
 **Usage store**:
 The pluggable sink for usage events — `jsonlog` (recommended), `sqlite`, `postgresql`, or a
@@ -344,7 +363,8 @@ _Avoid_: hot reload, restart, refresh.
   distinction exists to prevent.
 - **API format** governs the client edge, **Engine ID** the upstream edge. A request can enter
   as Anthropic and leave as OpenAI; that crossing is **Translation** and it happens in exactly
-  one place. A **Relayed route** makes no crossing: it enters and leaves in the same shape.
+  one place. A **Relayed route** makes no crossing: it enters and leaves in the same shape —
+  unless its node has a **Rerank format**, which is a crossing on the upstream side.
 
 ## Example dialogue
 

@@ -18,6 +18,7 @@ Langertha::Skeid          nodes, routing, admission, config, pricing, usage, reg
   ::Protocol::Anthropic   /v1/messages <-> OpenAI (+ ::Stream)
   ::Protocol::Ollama      /api/chat, /api/generate <-> OpenAI (+ ::Stream)
   ::Protocol::Audio       /v1/audio/* relayed, not translated: form fields, usage units (ADR 0021)
+  ::Protocol::Rerank      /v1/rerank relayed; a rerank_format: tei node translated upstream (ADR 0021)
   ::UsageStore            config normalization + backend factory
   ::UsageStore::JsonLog   append-only JSON events (recommended default)
   ::UsageStore::DBI       sqlite + postgresql
@@ -43,7 +44,12 @@ tags: [local, gb10]    # grouping for selection; also accepts "local, gb10"
 api_key_ref: secret/…  # key reference resolved through the KeyBroker per request
 api_key_env: VAR       # fallback: key from this environment variable
 capacity: { probe: … } # optional capacity probe, see below
+rerank_format: tei     # optional: the node's rerank endpoint speaks TEI's dialect, not the client's
 ```
+
+`rerank_format` is validated by `Protocol::Rerank->normalize_format` in `add_node`: an unknown
+value croaks (a failed config load), like an unknown `engine`. Absent = the rerank route is
+relayed. It is a node option, not an engine branch — `engine` still changes no call.
 
 Mutating helpers: `add_node`, `remove_node`, `list_nodes`, `set_node_health`.
 
@@ -310,11 +316,12 @@ totals, never summed) and prices it through the same `metrics.normalize` call as
 non-streamed answer, on every face (skeid #41).
 
 Optional event fields say "not measured" by being absent, never by `0`: `content_bytes`
-(streams only) and `audio_seconds` (audio routes, only when the node reports a duration — ADR
-0021; recorded, not priced). Each is an argument of `record_usage`, a nullable column added
-through `@ADDED_COLUMNS` in `UsageStore::DBI`, a key `jsonlog` writes as is, and — for
-`audio_seconds` — a sum in the report's `totals` / `by_key` / `by_model` that `skeid usage`
-prints only when non-zero. A new usage unit follows the same path.
+(streams only), `audio_seconds` (audio routes, only when the node reports a duration) and
+`documents` (the rerank route, counted by Skeid off the request, on a request the node
+answered) — ADR 0021; the last two recorded, not priced. Each is an argument of `record_usage`,
+a nullable column added through `@ADDED_COLUMNS` in `UsageStore::DBI`, a key `jsonlog` writes as
+is, and — for `audio_seconds` and `documents` — a sum in the report's `totals` / `by_key` /
+`by_model` that `skeid usage` prints only when non-zero. A new usage unit follows the same path.
 
 Backend selection in `UsageStore->normalize_config` is inference-first: explicit `backend` wins,
 otherwise `sqlite_path`/`path`/`db_path` → sqlite, `dbi:Pg:` dsn → postgresql, `log_path` →

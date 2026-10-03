@@ -158,12 +158,14 @@ nodes:
     api_key_ref: secret/skeid/remote/gpu   # upstream key via the KeyBroker, or
     # api_key_env: GPU_API_KEY             # upstream key from this environment variable
     # capacity: { probe: prometheus, path: /metrics }   # see "Capacity"
+    # rerank_format: tei                   # a reranker that speaks TEI's dialect, see below
     # metadata: { ... }                    # free-form, returned by the admin API
 ```
 
 Every node is called in the OpenAI dialect: `POST {url}/chat/completions` or
 `{url}/embeddings` ([ADR 0001](docs/adr/0001-one-upstream-call-shape-all-client-formats-translated.md)),
-and `{url}/audio/transcriptions` or `{url}/audio/translations` for the audio routes
+and `{url}/audio/transcriptions` or `{url}/audio/translations` for the audio routes and
+`{url}/rerank` for the rerank route
 ([ADR 0021](docs/adr/0021-non-chat-routes-are-relayed-not-translated.md)).
 `engine` does not change the call. It must match an engine id of the installed Langertha
 (the lowercased class name: `OpenAI` → `openai`, `OpenAIBase` → `openaibase`,
@@ -211,6 +213,33 @@ aliases:
 ```
 
 Clients reach it through [`/v1/audio/transcriptions`](#client-protocols).
+
+**A reranker node** is a node like any other as well. vLLM, infinity, Jina and Cohere speak
+the request shape clients send and are relayed; a Hugging Face text-embeddings-inference (TEI)
+server speaks its own and needs `rerank_format: tei`:
+
+```yaml
+nodes:
+  - id: rerank-vllm                  # vllm serve BAAI/bge-reranker-v2-m3
+    url: http://gpu-4:8000/v1        # serves /v1/rerank
+    model: BAAI/bge-reranker-v2-m3
+    engine: vllm
+    max_conns: 16
+  - id: rerank-infinity              # infinity, started with --url-prefix /v1
+    url: http://gpu-5:7997/v1        # without the prefix infinity serves /rerank at its root
+    model: BAAI/bge-reranker-v2-m3
+    max_conns: 16
+  - id: rerank-tei                   # Hugging Face text-embeddings-inference
+    url: http://gpu-6:8080           # called at /rerank, with or without a /v1 here
+    model: BAAI/bge-reranker-v2-m3
+    rerank_format: tei               # translated: documents -> texts, the bare array -> results
+    max_conns: 16
+```
+
+Without `rerank_format` the request is relayed to `{url}/rerank` as the client sent it. `tei`
+is the only other value; an unknown one fails the load. The three nodes above serve one model
+and share its load, each asked in its own dialect. Clients reach them through
+[`/v1/rerank`](#client-protocols).
 
 ### Routing
 
@@ -321,7 +350,7 @@ client_auth:
 ```
 
 - Every client route -- `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`,
-  `/v1/audio/*`, `/v1/messages`, every `/api/*` route and `/.well-known/langertha.json` --
+  `/v1/audio/*`, `/v1/rerank` and `/rerank`, `/v1/messages`, every `/api/*` route and `/.well-known/langertha.json` --
   answers `401` with
   `WWW-Authenticate: Bearer realm="skeid"` to a request without a key (`Missing API key`) or
   with a key whose id is not listed (`Invalid API key`). The body is in the route's dialect:
@@ -440,6 +469,7 @@ balancer in front of Skeid needs a read timeout at least as long.
 | `POST /v1/embeddings` | OpenAI | passed through |
 | `POST /v1/audio/transcriptions` | OpenAI | multipart upload, relayed to the node's own endpoint; answer and stream relayed as they are |
 | `POST /v1/audio/translations` | OpenAI | the same, to the node's translations endpoint |
+| `POST /v1/rerank`, `POST /rerank` | OpenAI | one route under two names; relayed to the node's own endpoint, translated for a `rerank_format: tei` node |
 | `GET /v1/models` | OpenAI | node models and alias names, per key policy |
 | `POST /v1/messages` | Anthropic | translated to and from OpenAI |
 | `POST /api/chat` | Ollama | translated; streams unless `"stream": false` |
@@ -487,6 +517,37 @@ curl -s http://127.0.0.1:8090/v1/audio/transcriptions -H "Authorization: Bearer 
 - Metering is what the node reports, see [`audio_seconds`](#usage-and-billing). A chat request
   that names a Whisper model is routed to that node and refused there; Skeid does not know
   what a model can do.
+
+**Rerank** (`/v1/rerank`, also `/rerank`). The request shape Cohere set and vLLM, Jina and
+infinity took over; there is no stream:
+
+```bash
+curl -s http://127.0.0.1:8090/v1/rerank -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' -d '{
+    "model": "BAAI/bge-reranker-v2-m3", "query": "What is the capital of Germany?",
+    "documents": ["Cologne is on the Rhine", "Berlin is the capital"], "top_n": 1,
+    "return_documents": true }'
+```
+
+- `400` before a node is touched: a body that is no JSON object, a `model` that is not a
+  non-empty string, a `query` that is not a string, `documents` that is not a non-empty array.
+  Then it is routed by `model` like a chat request: aliases, tiers, key policy, `max_conns`,
+  health.
+- By default the body goes to `{url}/rerank` with every field as sent and `model` replaced by
+  the served model, and the node's answer comes back byte for byte
+  ([ADR 0021](docs/adr/0021-non-chat-routes-are-relayed-not-translated.md)). What the nodes do
+  differently stays different: `document` is `{"text": ...}` from vLLM and Cohere and a plain
+  string from infinity; vLLM returns the documents whether `return_documents` asked or not;
+  `top_n` and unknown fields are the node's to interpret.
+- A [`rerank_format: tei`](#nodes) node is translated. Up: `POST /rerank` at the server root
+  with `query`, `texts` (each document a string, or the `text` of an object), `return_text` for
+  `return_documents` and `truncate` when sent; everything else is dropped. Down:
+  `{"model": <served model>, "results": [{"index", "relevance_score", "document": {"text"}}],
+  "usage": {"total_tokens"}}`, sorted by score, cut to `top_n`, `document` only when
+  `return_documents` asked for it, `usage` only when TEI sent its `x-compute-tokens` header. A
+  document that is not text, or a `top_n` that is not a whole number of at least 0, is a `400`
+  with one failed usage event (the node was admitted by then, the slot is given back).
+- Metering: [`documents`](#usage-and-billing) and the node's tokens as input tokens.
 
 **Anthropic** (`/v1/messages`). Messages, system prompt, images (base64 or URL source) and
 function tools are translated; `tool_use` / `tool_result` round-trips work, including images
@@ -547,6 +608,8 @@ Every forwarded request writes one usage event after it finishes, failures inclu
   observation, never turned into tokens)
 - audio routes only, and only when the node reports it: `audio_seconds`, the seconds of audio
   the node worked on
+- the rerank route only, on a request the node answered: `documents`, the number of documents
+  the request carried
 
 Streamed requests are priced from the upstream's usage frame exactly like a non-streamed
 answer. A stream cut short is recorded as failed, and billed from its usage frame if one
@@ -560,6 +623,24 @@ measured, never `0`. Ask for `response_format=verbose_json` where seconds are wh
 A node that reports tokens instead (OpenAI's `gpt-4o-transcribe`, vLLM's stream usage frame)
 fills the token fields as on a chat request. Seconds are recorded, not priced: `pricing` has
 no per-second rate ([ADR 0021](docs/adr/0021-non-chat-routes-are-relayed-not-translated.md)).
+
+`documents` is counted by Skeid off the request, so it is there whatever the node reports; a
+failed rerank request has no such field. The event's `endpoint` is `/v1/rerank` for both
+spellings of the route. A reranker's tokens are input tokens: they are recorded as
+`input_tokens` (and `total_tokens`) and priced with the served model's `input_per_million`,
+from wherever the node reports them:
+
+| Node | Where the count is read |
+| --- | --- |
+| vLLM, infinity, Jina | `usage.prompt_tokens`, else `usage.total_tokens` (older vLLM and Jina send only the total) |
+| Cohere | `meta.tokens.input_tokens` |
+| TEI (`rerank_format: tei`) | the `x-compute-tokens` response header |
+
+A node that reports none leaves the token fields at 0. Two caveats: **infinity counts
+characters, not tokens**, unless it runs with `lengths_via_tokenize` -- Skeid records what the
+node says, so price such a node per character or turn the option on; and Cohere's
+`meta.billed_units.search_units` is not recorded. `documents` is recorded, not priced: there
+is no per-document or per-search rate.
 
 Without a `usage_store` (and without `SKEID_USAGE_DB`) nothing is recorded. When the store
 cannot write an event (a full disk, a dropped table, a lost database), the request is still
@@ -625,9 +706,10 @@ curl -s -H "Authorization: Bearer $SKEID_ADMIN_API_KEY" \
 ```
 
 A report has `totals`, `by_key`, `by_model` and the most `recent` events (limit 1..500; the
-CLI defaults to 20, the admin route to 50). The first three sum `audio_seconds` beside the
-tokens; the CLI prints it (`Audio:  seconds=...`, `audio_seconds=...` on a row) only where
-there is some.
+CLI defaults to 20, the admin route to 50). The first three sum `audio_seconds` and
+`documents` beside the tokens; the CLI prints them (`Audio:  seconds=...` and
+`Rerank: documents=...` after the totals, `audio_seconds=...` and `documents=...` on a row)
+only where there are some.
 
 ### Your own usage sink
 

@@ -21,9 +21,9 @@ in and out. Consequences that are not negotiable:
 - The upstream call is engine-agnostic. vLLM, SGLang, Ollama-in-OpenAI-mode and OpenAI itself
   all take the same body; the **Engine ID** is metadata for accounting and eligibility, not a
   branch in the request builder.
-- A non-chat route of the OpenAI face (audio) is **relayed** to the node's endpoint of the same
-  name, not translated into the chat call (ADR 0021, section below). That is a second path and
-  body shape, not a second proxy function.
+- A non-chat route of the OpenAI face (audio, rerank) is **relayed** to the node's endpoint of
+  the same name, not translated into the chat call (ADR 0021, sections below). That is a second
+  path and body shape, not a second proxy function.
 
 ## Client edge
 
@@ -31,6 +31,7 @@ in and out. Consequences that are not negotiable:
 |---|---|---|
 | OpenAI | `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models` | yes, SSE relay |
 | OpenAI, relayed (ADR 0021) | `POST /v1/audio/transcriptions`, `POST /v1/audio/translations` | yes, SSE relay in the node's own event dialect |
+| OpenAI, relayed (ADR 0021) | `POST /v1/rerank`, `POST /rerank` (one route) | no |
 | Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
 | Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
 
@@ -114,10 +115,49 @@ form fields, the upstream parts, where an answer reports usage; its names
   (`usage.type` = `duration`) else top-level `duration`, else **absent** — never `0`. Not priced.
 - Nothing is injected into the form (`stream_include_usage` is the client's to send).
 
+## Relayed route: rerank
+
+`POST /v1/rerank` and `POST /rerank` are one handler (`_handle_openai_rerank`); the event's
+`endpoint` is `/v1/rerank` for both. `Langertha::Skeid::Protocol::Rerank` owns the wire —
+`query`, `documents`, `top_n`, `return_documents`, TEI's `texts` / `return_text` / `score`,
+`x-compute-tokens`, `meta.tokens` appear nowhere else.
+
+- Before a node is picked, `request_problem` answers `400` for: a body that is no JSON object, a
+  `model` that is not a non-empty string, a `query` that is not a string, `documents` that is
+  not a non-empty array. No slot, no event. What a document may be is the node's to say.
+- **Default: relayed.** The body goes to `{node.url}/rerank` re-encoded with `model` = served
+  model and every other field as sent; the answer comes back byte for byte
+  (`_render_upstream_response`). vLLM, infinity (`--url-prefix /v1`), Jina, Cohere. Do not
+  normalise what they do differently (`document` as `{text}` vs a plain string, vLLM returning
+  documents unasked). Re-encoding is deliberate: one `model` reaches the node, the one Skeid
+  routed by — never pass the client's bytes through.
+- **`rerank_format: tei` on the node: translated on the upstream side** (ADR 0021 Update; the
+  only translation that is not at the client edge). `POST <node url without /v1>/rerank` with
+  `{query, texts, return_text?, truncate?}`; the bare array becomes
+  `{model: served, results: [{index, relevance_score, document: {text}?}], usage: {total_tokens}?}`,
+  sorted by score, cut to `top_n` (absent / `null` / `0` = all). It is a node option, never an
+  `engine` branch. A new upstream dialect is a row in `Protocol::Rerank`'s `%FORMAT`.
+- The dialect is known only after admission. A request a TEI node cannot take (a document that
+  is not a string or `{text: string}`, a bad `top_n`) throws a `Protocol::Refusal` from
+  `request_to_upstream`; the handler answers through `_refuse_unsendable_request`:
+  `request.finish`, one failed event (`400`, `invalid_request_error`), no upstream call.
+- `$relay` keys rerank added, both called with `($payload, $res)`: `usage` (returns the usage
+  block to meter, or nothing — instead of pricing the body's own `usage`) and `answer` (the
+  response translator for a node with a format; a `die` is the `translation_error` path, `500`).
+  `units` gets `$res` as its second argument too.
+- Usage: `documents` = documents in the request, on the event of a request the node answered
+  2xx, absent otherwise; recorded, not priced. Tokens are **input** tokens (`prompt_tokens` =
+  total, `completion_tokens` 0) so `input_per_million` prices them, read from
+  `usage.prompt_tokens`, else `usage.total_tokens`, else `meta.tokens.input_tokens` (Cohere);
+  for `tei` from the `x-compute-tokens` header only. infinity counts characters unless
+  `lengths_via_tokenize`. No `search_units`, no streaming, no `/v2/rerank`.
+- `t/69-rerank.t`; 26 mutations of the logic were checked to fail it.
+
 ## Upstream call
 
 The call is `POST {node.url}/chat/completions` or `/embeddings`; a relayed route posts to its
-own path (above). `_endpoint_url_for_node($base, $path)` — appends `/v1` unless the node url
+own path (above); a `rerank_format: tei` node is called at its server root
+(`_root_url_for_node`). `_endpoint_url_for_node($base, $path)` — appends `/v1` unless the node url
 already ends in `/v1`. A node url is a base, never a full endpoint.
 
 `_forward_headers` passes the client's headers through minus the hop-by-hop set

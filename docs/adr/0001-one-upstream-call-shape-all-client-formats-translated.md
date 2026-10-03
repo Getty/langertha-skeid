@@ -1,6 +1,6 @@
 # ADR 0001 — One upstream call shape; all client formats are translated
 
-- Status: accepted — error translation extended to the Ollama face (skeid #47, see Update); non-chat routes are relayed, not translated (ADR 0021)
+- Status: accepted — error translation extended to the Ollama face (skeid #47, see Update); non-chat routes are relayed, not translated (ADR 0021); one rerank dialect is translated upstream (ADR 0021, Update k92)
 - Date: 2026-08-08
 - Tags: protocols, translation, routing, backfill
 
@@ -89,3 +89,11 @@ the same name in their own shape, through the same proxy functions as the chat c
 The rule here is unchanged for chat: three client formats, one upstream call, no second code
 path. The wire names of a relayed route live in its own `Langertha::Skeid::Protocol::*` module,
 as a translator's do.
+
+## Update (skeid k92, ADR 0021): rerank is relayed; `rerank_format: tei` translates upstream
+
+`/v1/rerank` is relayed like the audio routes. One kind of node, Hugging Face
+text-embeddings-inference, speaks a rerank dialect no client speaks, and a node marked
+`rerank_format: tei` is translated on the upstream side. That is not the matrix this ADR rules
+out: the chat call still has one upstream shape, `engine` still changes no call, and rerank has
+one client dialect. The reasoning and the cost are in ADR 0021's Update.

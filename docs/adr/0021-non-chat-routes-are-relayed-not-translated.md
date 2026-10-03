@@ -1,8 +1,8 @@
 # ADR 0021 — Non-chat routes of the OpenAI face are relayed, not translated; their usage units are optional event fields
 
-- Status: accepted — implemented for audio (skeid k91); rerank follows (skeid k92)
+- Status: accepted — implemented for audio (skeid k91) and rerank (skeid k92, see Update)
 - Date: 2026-10-03
-- Tags: protocols, relay, audio, uploads, usage, metering, pricing
+- Tags: protocols, relay, audio, rerank, uploads, usage, metering, pricing
 
 ---
 
@@ -118,3 +118,91 @@ translates nothing.**
   nodes: the form part for part with a file sent from disk, the alias rewrite, byte-identical
   answers and streams, the units read, load sharing with `max_conns` and health, the `413` and
   `401` before the body, every exit path's `request.finish` and one event, and the stores.
+
+## Update (skeid k92, 2026-10-03): rerank is relayed; a TEI node is translated on the upstream side
+
+`POST /v1/rerank`, and `POST /rerank` as a second name for it, is the second relayed route.
+Reranking has no OpenAI definition; the shape clients speak is the one Cohere set and vLLM, Jina
+and infinity took over (`model`, `query`, `documents`, `top_n`, `return_documents`). A node that
+speaks it gets the body at `{node.url}/rerank` and its answer goes back untouched, under every
+rule above:
+
+- **Skeid reads `model`, and checks three more things before a node is picked** — the body is a
+  JSON object, `query` is a string, `documents` is a non-empty array — each a `400` that costs
+  no slot and no event. What a document may be is the node's to say.
+- **What differs between those nodes is left to differ.** `document` is `{text}` on vLLM and
+  Cohere and a plain string on infinity; vLLM returns the documents whether asked or not.
+  Evening that out would be a translation nobody asked for, and it would have to be kept in
+  step with four servers.
+- **The body is re-encoded, not passed as bytes.** A JSON object may name `model` twice, and
+  two parsers need not pick the same one — the hazard the audio form has, solved the way the
+  chat and embeddings routes already solve it: Skeid decodes, sets `model`, encodes, so the
+  node sees exactly one. The content is unchanged; the layout is the encoder's. The answer is
+  relayed byte for byte.
+- **The usage unit is `documents`**, an optional nullable event field like `audio_seconds` —
+  with one difference: Skeid counts it off the request instead of reading it off the answer, so
+  it is on every event of a request the node answered, whatever the node reports. Recorded,
+  not priced.
+- **A reranker's tokens are input tokens.** They are reported in three places, none of them
+  where `metrics.normalize` would price them as input: `usage.prompt_tokens` or only
+  `usage.total_tokens` (vLLM, infinity, Jina), `meta.tokens.input_tokens` (Cohere), a response
+  header (TEI). `Langertha::Skeid::Protocol::Rerank->usage` reads the count and hands
+  `metrics.normalize` the one usage block it prices — the count as prompt tokens and as the
+  total — so `input_per_million` applies and pricing stays in `Langertha::Pricing`. This reads
+  a number off an answer Skeid already holds, as `Protocol::Audio->usage_units` does. infinity
+  counts characters unless it runs with `lengths_via_tokenize`; Skeid records what the node
+  says. Cohere's `search_units` is not recorded: there is no unit to price it in.
+- **`$relay` grew by two keys**, both called with the decoded answer and the upstream response:
+  `usage`, for an answer that reports its tokens somewhere a chat answer does not, and
+  `answer`, for a node whose own dialect is not the client's (below). No second proxy function.
+
+**The exception: `rerank_format: tei`.** Hugging Face text-embeddings-inference serves rerank
+only as `POST /rerank` at the server root, taking `{query, texts, return_text, truncate}` and
+answering a bare array `[{index, score, text}]`, its token count in `x-compute-tokens`. It
+cannot be relayed: no client speaks that. A node marked `rerank_format: tei` is translated in
+both directions — `documents` to `texts`, `return_documents` to `return_text`, the array into
+`{model, results, usage}` sorted by score and cut to `top_n`.
+
+This is a translation on the **upstream** side of the hub, and it does not reopen ADR 0001:
+
+- ADR 0001 rules out a matrix of client formats times upstream engines for the **chat** call.
+  Rerank has one client dialect and is not the chat call. The dimension added here is upstream
+  dialects of one route — two of them — not a second client face of it.
+- It is a node option, not a branch on the **Engine ID**. `engine` still changes no call;
+  `rerank_format` says what one endpoint of one node speaks, where the operator wrote the node.
+  An unknown value fails the load, like an unknown engine.
+- It rides the same proxy function, key injection, `request.start` / `request.finish` pairing,
+  client-abort handling and usage event as every other request. Only the body sent and the
+  body returned differ, and both are built in `Langertha::Skeid::Protocol::Rerank`, the only
+  place that knows TEI's names.
+- The alternative was to tell operators to put a shim in front of TEI. That moves the same
+  translation out of the one process that already meters and authenticates the request.
+
+What it costs:
+
+- **The dialect is known only after admission.** Which node serves a request is decided by
+  routing, so a request a TEI node cannot take — a document that is neither a string nor an
+  object with a string `text`, a `top_n` that is not a whole number of at least zero — is found
+  holding a slot. It is refused like a request whose node has no key (`_refuse_unkeyed_node`):
+  no upstream call, `request.finish`, one failed usage event, an error to the client — here a
+  `400`, since the request is the client's to change. The same request to a relayed node is
+  forwarded and judged there. A model served by both a TEI and a relayed node therefore answers
+  such a request differently depending on which node round-robin picked.
+- **`top_n` and `return_documents` are Skeid's to implement for a TEI node**, and its to get
+  wrong: no `top_n`, `null` and `0` keep every result; `return_documents` absent means no
+  documents (Cohere's default and TEI's, not Jina's).
+- A second upstream dialect of rerank would be a second entry in `Protocol::Rerank`'s format
+  table. A third route with upstream dialects should make this a pattern, and get its own ADR,
+  rather than copy the option.
+
+Langertha has no model of reranking (no role, no engine method, no value object), so there was
+nothing to reuse and nothing to pin. If it gains one, the dialects belong there and
+`Protocol::Rerank` shrinks to the relay and the usage reader.
+
+`t/69-rerank.t` proves both paths against vLLM-, infinity-, Cohere- and TEI-shaped fake nodes:
+both spellings of the route, the body content and the answer bytes on the relay, the alias
+rewrite, each token place as priced input tokens, `documents`, the four `400`s before
+admission, TEI's translation with ordering, `top_n`, `return_documents`, the node URL with and
+without `/v1`, the refusal after admission, a non-array answer, load sharing with `max_conns`
+and health, the `401` before anything is forwarded, every exit path's `request.finish` and one
+event, and the stores.

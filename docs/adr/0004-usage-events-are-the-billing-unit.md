@@ -92,3 +92,10 @@ The audio routes count seconds of audio, not tokens. Their events carry `audio_s
 the node reports a duration and no such key when it does not — optional and nullable like
 `content_bytes`, recorded as reported, summed in the report, not priced (ADR 0021). The event
 is still one per forwarded request and means the same in every store.
+
+## Update (skeid k92, ADR 0021): rerank events carry `documents`
+
+A rerank event carries `documents`, the number of documents the request held — optional and
+nullable like `audio_seconds`, summed in the report, not priced. Skeid counts it off the
+request, so it is on the event of every request the node answered and absent from a failed
+one. A reranker's tokens are recorded as input tokens (ADR 0021, Update k92).
