@@ -68,6 +68,16 @@ Revision history for Langertha-Skeid
       after the tag is pushed, with the Changes section as release notes. The
       gh calls in run_after_release are gone: they ran before the tag existed,
       so the release tag landed on the commit before the release commit.
+    - A system message inside messages on /v1/messages (Claude Code sends one
+      after the conversation started) no longer reaches the node in the middle
+      of the conversation, where chat templates such as vLLM's Qwen3.x answer
+      400 "System message must be at the beginning.". The node gets at most one
+      system message, at index 0: top-level system plus the system messages
+      before the first turn. A later one is wrapped in <system-reminder> and
+      becomes text of the adjacent user turn, never between an assistant's
+      tool_calls and their tool messages, so the prompt prefix stays stable
+      for prefix caching. Requests without such a message are translated as
+      before.
 
 0.003     2026-10-01 21:30:07Z
 

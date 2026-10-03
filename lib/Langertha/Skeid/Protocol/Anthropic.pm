@@ -47,7 +47,38 @@ C<model>, the messages, and C<max_tokens>, C<temperature> and C<top_p> when give
 of the request is carried -- C<stop_sequences>, C<metadata>, C<thinking> and C<cache_control>
 included; C<stream> is set by the proxy.
 
-C<system> (a string or a block array) becomes a leading system message. Content block arrays
+C<system> (a string or a block array) becomes a leading system message, and it is the only
+system message the upstream gets: a chat template wants it first (Qwen3 on vLLM answers
+C<System message must be at the beginning.>) or wants strictly alternating turns. A message
+with C<role: system> inside C<messages> -- string or block array, its text blocks joined -- is
+therefore never forwarded where it stands, and one without text is dropped:
+
+=over 4
+
+=item *
+
+Before the first message of another role it is part of that leading system message, after the
+top-level C<system>, the pieces separated by a blank line.
+
+=item *
+
+After it, its text is wrapped as C<< <system-reminder>\n...\n</system-reminder> >> -- always,
+whatever the text holds -- and becomes text of a user turn of the translated conversation. It
+is appended to the last message when that is a user message. Otherwise it waits, and goes in
+front of the next user message; when an assistant message comes first, or the conversation
+ends, the waiting reminders are a user message of their own at that point. A tool message
+neither takes a reminder nor ends the wait, so nothing comes between an assistant's
+C<tool_calls> and their answers. Reminders that meet keep the client's order, a blank line
+between them. Joined to a text content it is a blank line apart from the user's text; a content
+array (image parts) gets it as a text part of its own.
+
+=back
+
+A later system message is never moved into the leading one: that would change the start of the
+prompt on every turn and with it the node's prefix cache. A request without a system message in
+C<messages> is translated exactly as before.
+
+Content block arrays
 fold to text, unless a user message carries an C<image> block: then its text and image blocks
 become an OpenAI content array in the order the client sent them, text as C<text> parts and
 each image as an C<image_url> part -- a C<base64> source as a C<data:> URL with its
@@ -91,13 +122,41 @@ sub request_to_openai {
     }
   }
 
+  my $started;  # a message that is not a system message has been seen
+  my @pending;  # reminders waiting for the next user message
+
   for my $m (@{$body->{messages} || []}) {
     next unless ref($m) eq 'HASH';
     my $role = $m->{role} // 'user';
     my $content = $m->{content};
 
+    # A system message is never forwarded where it stands: a chat template wants its system
+    # message first. Before the first turn it is part of the one leading system message; after
+    # it, text of a user turn -- not of the leading one, whose prefix has to stay the same from
+    # turn to turn for the node's prefix cache.
+    if ($role eq 'system') {
+      my $txt = _system_text($content);
+      next unless length $txt;
+      if (!$started) {
+        if (@messages) {
+          $messages[0]{content} = join("\n\n", grep { length } $messages[0]{content}, $txt);
+        } else {
+          push @messages, { role => 'system', content => $txt };
+        }
+        next;
+      }
+      my $reminder = "<system-reminder>\n" . $txt . "\n</system-reminder>";
+      if (@messages && $messages[-1]{role} eq 'user') {
+        _add_reminder($messages[-1], $reminder);
+      } else {
+        push @pending, $reminder;
+      }
+      next;
+    }
+    $started = 1;
+
     if (!ref($content)) {
-      push @messages, { role => $role, content => (defined($content) ? "$content" : '') };
+      _push_message(\@messages, \@pending, { role => $role, content => (defined($content) ? "$content" : '') });
       next;
     }
 
@@ -151,16 +210,16 @@ sub request_to_openai {
             $val = @rest ? \@rest : $TOOL_IMAGES_MOVED;
           }
           my $txt = ref($val) ? Langertha::Skeid::Protocol::encode_json_text_safe($val) : (defined($val) ? "$val" : '');
-          push @messages, {
+          _push_message(\@messages, \@pending, {
             role => 'tool',
             tool_call_id => $tcid,
             content => $txt,
-          };
+          });
           next;
         }
       }
 
-      push @messages, { role => 'user', content => \@tool_images } if @tool_images;
+      _push_message(\@messages, \@pending, { role => 'user', content => \@tool_images }) if @tool_images;
 
       my $text = join('', @text);
       if ($role eq 'assistant') {
@@ -168,14 +227,17 @@ sub request_to_openai {
         $msg{content} = $text if length $text;
         $msg{tool_calls} = \@tool_calls if @tool_calls;
         $msg{content} = '' if !exists($msg{content}) && !exists($msg{tool_calls});
-        push @messages, \%msg;
+        _push_message(\@messages, \@pending, \%msg);
       } elsif ($has_image) {
-        push @messages, { role => $role, content => \@parts };
+        _push_message(\@messages, \@pending, { role => $role, content => \@parts });
       } elsif (length $text) {
-        push @messages, { role => $role, content => $text };
+        _push_message(\@messages, \@pending, { role => $role, content => $text });
       }
     }
   }
+
+  # Reminders no user message came for end the conversation as one.
+  push @messages, { role => 'user', content => join("\n\n", @pending) } if @pending;
 
   my %out = (
     model    => ($body->{model} // ''),
@@ -212,6 +274,44 @@ sub request_to_openai {
   }
 
   return \%out;
+}
+
+# The text of a system message: a string, or the text blocks of a block list joined like the
+# top-level system.
+sub _system_text {
+  my ($content) = @_;
+  return defined($content) ? "$content" : '' unless ref($content);
+  return '' unless ref($content) eq 'ARRAY';
+  return join('', map { ref($_) eq 'HASH' ? ($_->{text} // '') : "$_" } @$content);
+}
+
+# Adds a reminder to a user message, behind what it says or in front of it: text joined by a
+# blank line, or a text part of its own when the content is an array of parts.
+sub _add_reminder {
+  my ($msg, $reminder, $in_front) = @_;
+  if (ref($msg->{content}) eq 'ARRAY') {
+    my $part = { type => 'text', text => $reminder };
+    $in_front ? unshift(@{$msg->{content}}, $part) : push(@{$msg->{content}}, $part);
+    return;
+  }
+  my $text = $msg->{content} // '';
+  $msg->{content} = join("\n\n", grep { length } $in_front ? ($reminder, $text) : ($text, $reminder));
+}
+
+# Adds a translated message. Waiting reminders go in front of a user message's own content; a
+# tool message leaves them waiting, so nothing comes between an assistant's tool calls and
+# their answers; anything else gets them as a user message in front of it.
+sub _push_message {
+  my ($messages, $pending, $msg) = @_;
+  if (@$pending && $msg->{role} ne 'tool') {
+    my $reminders = join("\n\n", splice(@$pending));
+    if ($msg->{role} eq 'user') {
+      _add_reminder($msg, $reminders, 1);
+    } else {
+      push @$messages, { role => 'user', content => $reminders };
+    }
+  }
+  push @$messages, $msg;
 }
 
 sub _is_image_block {
