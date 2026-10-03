@@ -1,0 +1,14 @@
+---
+class: standard
+created: 2026-10-03T20:39:20Z
+id: 102
+priority: medium
+status: backlog
+tags:
+- anthropic
+- translation
+title: 'Anthropic route: translated conversation can hold two user messages in a row'
+updated: 2026-10-03T20:39:20Z
+---
+
+Found while working k100. The OpenAI message list request_to_openai builds can contain consecutive user messages: the tool-images user message followed by the client text of the same Anthropic message (existing), and since k100 a standalone <system-reminder> user message after a run of tool messages. Templates with strict role alternation (Gemma) may refuse that, depending on how they render tool messages. k100 removed the mid-conversation system role, not same-role neighbours. Done: decide whether Skeid merges adjacent user messages (content arrays included) on the Anthropic face, without changing the prompt prefix of earlier turns; test on the forwarded OpenAI messages.
