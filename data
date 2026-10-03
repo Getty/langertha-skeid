@@ -1,0 +1,16 @@
+---
+class: standard
+created: 2026-10-03T04:39:05Z
+id: 98
+priority: medium
+status: backlog
+tags:
+- core
+- bug
+title: add_node removes the existing node before it rejects an unknown engine
+updated: 2026-10-03T04:39:05Z
+---
+
+Found while building the rerank route (k92), present on main before it. add_node removes the node of the same id before it normalises the new one's `engine`; an unknown engine croaks after the removal, so a bad re-add (POST /skeid/nodes, nodes.add) takes the working node out of the inventory. k92 validates `rerank_format` before the removal; `engine` and the registry capacity block should be checked there too.
+
+Wanted: every check in add_node that can croak runs before remove_node; a test that re-adds a node with an unknown engine and finds the old one still routable.
