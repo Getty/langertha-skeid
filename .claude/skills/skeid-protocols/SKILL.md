@@ -35,6 +35,11 @@ in and out. Consequences that are not negotiable:
 | Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
 | Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
 
+Embeddings take the chat path (`_begin_route_async`): several nodes of one model share load, with
+health, `max_conns`, capacity readings, aliases and tiers; one request is one slot whatever its batch
+size; the answer is relayed byte for byte and `usage.prompt_tokens` / `total_tokens` are metered as
+input tokens. No Ollama `/api/embed`. `t/70-embeddings-nodes.t`.
+
 `GET /health` is unauthenticated and cheap (also with `client_auth`); `/skeid/*` is the admin surface (skill
 `skeid-core`). `GET /.well-known/langertha.json` serves the per-key provider manifest (ADR 0015).
 

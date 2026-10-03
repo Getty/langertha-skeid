@@ -241,6 +241,41 @@ is the only other value; an unknown one fails the load. The three nodes above se
 and share its load, each asked in its own dialect. Clients reach them through
 [`/v1/rerank`](#client-protocols).
 
+**An embedding node** is a node like any other too: `POST /v1/embeddings` is routed, admitted
+and metered like a chat request, so several servers of one model share its load, `healthy`,
+`max_conns`, `weight`, capacity probes, aliases and tiers all apply, and the answer is relayed
+untouched:
+
+```yaml
+nodes:
+  - id: embed-vllm                   # vllm serve BAAI/bge-m3 --task embed
+    url: http://gpu-7:8000/v1
+    model: BAAI/bge-m3
+    engine: vllm
+    max_conns: 16
+  - id: embed-tei                    # Hugging Face text-embeddings-inference
+    url: http://gpu-8:8080           # TEI serves /v1/embeddings (OpenAI-compatible)
+    model: BAAI/bge-m3
+    max_conns: 16
+  - id: embed-infinity               # infinity, started with --url-prefix /v1
+    url: http://gpu-9:7997/v1        # without the prefix infinity serves /embeddings at its root
+    model: BAAI/bge-m3
+    max_conns: 16
+```
+
+- The usage event takes `usage.prompt_tokens` / `usage.total_tokens` as input and total tokens
+  (an embedding has no output tokens) and prices them with the model's `input_per_million`.
+  infinity counts characters, not tokens, unless it runs with `lengths_via_tokenize`; what it
+  reports is what is recorded.
+- The default Prometheus capacity probe knows the metric names of vLLM, SGLang and TGI. A TEI or
+  infinity node names its own in the `capacity` block (`running`, `waiting`, see
+  [Capacity](#capacity-admission-and-saturation)), or runs on `inflight` admission, which needs
+  nothing from the server.
+- One request is one slot, whatever its batch size: a request with 1000 inputs weighs like one
+  with a single input. Choose `max_conns` with that in mind.
+- A JSON body above Mojolicious' 16 MiB message limit is refused as invalid JSON.
+- There is no Ollama embeddings face (`/api/embed`); only `/v1/embeddings` exists.
+
 ### Routing
 
 ```yaml

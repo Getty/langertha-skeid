@@ -282,6 +282,7 @@ usage_store: { backend: …, … }
 manifest:   { enabled, public_url, … }   # provider manifest, per-key grants in keys: (ADR 0015)
 registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
 uploads:    { max_bytes: 26214400 }      # body limit of the upload routes (/v1/audio/*); ADR 0021
+client_auth: { keys: [name-or-key-id] }   # only these callers may use the client routes; 401 otherwise (ADR 0020)
 ```
 
 The admin key is resolved on every applied config as explicit (`serve --admin-api-key`,
