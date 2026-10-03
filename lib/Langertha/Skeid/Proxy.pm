@@ -20,6 +20,7 @@ use Langertha::Skeid::Protocol::Anthropic::Stream;
 use Langertha::Skeid::Protocol::Audio;
 use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Ollama::Stream;
+use Langertha::Skeid::Protocol::Rerank;
 use Langertha::ToolCall;
 
 =head1 SYNOPSIS
@@ -58,6 +59,8 @@ every one but C</health> answers C<401> to a key not on its list. See L</Custome
   POST /v1/embeddings              OpenAI embeddings
   POST /v1/audio/transcriptions    OpenAI audio: multipart upload, relayed as the node answers
   POST /v1/audio/translations      the same, to the node's translations endpoint
+  POST /v1/rerank                  rerank: relayed as the node answers, translated for a TEI node
+  POST /rerank                     the same route under its other name
   POST /v1/messages                Anthropic Messages, streamed or not
   POST /api/chat                   Ollama chat; streams unless "stream": false
   POST /api/generate               Ollama generate; streams unless "stream": false
@@ -114,6 +117,51 @@ also has C<content_bytes>, the UTF-8 bytes of the text relayed. A node that repo
 count leaves an event with a status and a duration and no C<audio_seconds> key: not measured,
 which is not zero. See L<Langertha::Skeid/Pluggable Usage Storage>.
 
+=head2 Rerank route
+
+C</v1/rerank> and C</rerank> are one route. It takes the request shape Cohere set and vLLM, Jina
+and infinity took over -- C<model>, C<query>, C<documents>, optionally C<top_n>,
+C<return_documents> and whatever else the node understands -- and answers with the node's
+C<results>. It is not a streamed route.
+
+Four things are checked before a node is picked, each a C<400> that costs no slot and no usage
+event: the body is a JSON object, C<model> is a non-empty string, C<query> is a string,
+C<documents> is a non-empty array. What a document may be is left to the node. The request is
+then routed like a chat request -- by C<model>, through aliases, tiers, the key's policy,
+eligibility and admission.
+
+By default the request is B<relayed> (ADR 0021): it goes to C<{node url}/rerank> with every
+field as the client sent it and C<model> replaced by the served model, and the node's answer
+comes back as it is -- status, headers but for the framing ones, body byte for byte. That
+covers vLLM, infinity started with C<--url-prefix /v1>, Jina and Cohere, and Skeid does not
+even out what differs between them: C<document> is C<{ "text": ... }> on vLLM and Cohere and a
+plain string on infinity, and vLLM returns the documents whether C<return_documents> asked for
+them or not. The body is decoded and written again on the way, so the node sees exactly one
+C<model> -- the one Skeid routed by.
+
+A node with C<rerank_format: tei> (L<Langertha::Skeid/nodes>) is Hugging Face
+text-embeddings-inference, which speaks another dialect, and is B<translated> in both
+directions. The request goes to C</rerank> at the server root -- the node's URL with or without
+a trailing C</v1> -- as C<query>, C<texts> (each document a string, or an object's string
+C<text>), C<return_text> for C<return_documents> and C<truncate> when the client sent them, and
+nothing else. TEI's bare array becomes C<< { model, results, usage } >>: C<model> the served
+model, C<results> sorted by score with C<relevance_score> and, when C<return_documents> asked
+for it, C<< document => { text } >>, cut to C<top_n>; C<usage.total_tokens> from TEI's
+C<x-compute-tokens> header when it sent one. A request such a node cannot take -- a document
+that is not text, a C<top_n> that is not a whole number of at least zero -- is a C<400> as
+well, but one known only after the node was admitted: the slot is given back, and one failed
+usage event is written. An answer that is not TEI's array is a C<500> C<api_error>, as for
+any translation that fails. The wire of both dialects is L<Langertha::Skeid::Protocol::Rerank>'s.
+
+The usage event has C<api_format> C<openai> and C<endpoint> C</v1/rerank> for both spellings.
+C<documents> is the number of documents the request carried, on the event of a request the
+node answered and on no other. The node's tokens are recorded as B<input> tokens and as the
+total, so the model's C<input_per_million> prices them, from wherever that node reports them:
+C<usage.prompt_tokens>, else C<usage.total_tokens>, else Cohere's C<meta.tokens.input_tokens>,
+or a TEI node's C<x-compute-tokens>. A node that reports none leaves an event without tokens.
+infinity counts characters unless it runs with C<lengths_via_tokenize>; Skeid records what the
+node says. See L<Langertha::Skeid/Pluggable Usage Storage>.
+
 =head2 Uploads
 
 The audio routes are the upload routes: their request limit is the config's
@@ -167,7 +215,7 @@ instead.
 
 With C<client_auth>, that key id has to be on the section's list. Every client route checks it
 first -- C</v1/models>, C</v1/chat/completions>, C</v1/embeddings>, the C</v1/audio/*> routes,
-C</v1/messages>, every C</api/*> route and C</.well-known/langertha.json> -- after picking up a
+C</v1/rerank> and C</rerank>, C</v1/messages>, every C</api/*> route and C</.well-known/langertha.json> -- after picking up a
 changed config
 (L<Langertha::Skeid/maybe_reload_config>), so a list change holds from the next request.
 No key is C<401> C<Missing API key>, a key whose id is not listed C<401> C<Invalid API key>,
@@ -180,7 +228,8 @@ they have their own rules. Being let in widens nothing: the key's routing policy
 
 The node URL gets C</v1> added unless it ends in it, then C</chat/completions> or
 C</embeddings> (an audio route: C</audio/transcriptions> or C</audio/translations>, see
-L</Audio routes>); the body carries the served model (an alias tier's C<model>), everything else
+L</Audio routes>; rerank: C</rerank>, for a TEI node without the C</v1>, see L</Rerank route>);
+the body carries the served model (an alias tier's C<model>), everything else
 as the client sent it or as translated. The client's headers go upstream except the hop-by-hop
 ones, C<Host>, C<Content-Length> and C<Accept-Encoding>. When the node has a key of its own --
 C<api_key_ref> through the key broker, else C<api_key_env> -- it replaces C<Authorization> and
@@ -214,7 +263,8 @@ out, the request stays what it was: finished and metered by the node's answer.
 A key the C<client_auth> list does not let in is C<401> (OpenAI: type C<invalid_request_error>,
 code C<invalid_api_key>; Anthropic: C<authentication_error>; see L</Customer identity>). An
 upload over C<uploads.max_bytes> is C<413 invalid_request_error>; an audio request that is not a
-multipart form, or whose form has no usable C<model> field, is C<400 invalid_request_error>. A
+multipart form, or whose form has no usable C<model> field, is C<400 invalid_request_error>, as
+is a rerank request without a C<model>, a string C<query> or C<documents>. A
 request no node may serve for this key is C<403 permission_error>; a model no healthy node
 serves is C<503 model_not_found>; eligible nodes that stay full past the wait are
 C<429 rate_limit_error>; an upstream failure is its status (or C<502>) with type
@@ -455,6 +505,15 @@ sub build_app {
     $openai->post($endpoint => sub {
       my ($c) = @_;
       _handle_openai_audio($c, $endpoint);
+    });
+  }
+
+  # Rerank (skeid k92): /v1/rerank and its alias /rerank, one route. Relayed like audio, except
+  # to a node whose rerank_format names another upstream dialect.
+  for my $endpoint (Langertha::Skeid::Protocol::Rerank->routes) {
+    $openai->post($endpoint => sub {
+      my ($c) = @_;
+      _handle_openai_rerank($c);
     });
   }
 
@@ -985,6 +1044,88 @@ sub _handle_openai_audio {
   });
 }
 
+# POST /v1/rerank and POST /rerank (skeid k92). A JSON body in the shape Cohere, vLLM, Jina and
+# infinity share, routed by its `model` like a chat request. To a node that speaks that shape
+# the body is relayed with only `model` replaced, and the answer comes back byte for byte (ADR
+# 0021). A node marked `rerank_format` speaks another dialect and is translated in both
+# directions -- on the upstream side, the one place Skeid does that. Either way the wire's names
+# are Langertha::Skeid::Protocol::Rerank's to know.
+sub _handle_openai_rerank {
+  my ($c) = @_;
+  my $rerank = 'Langertha::Skeid::Protocol::Rerank';
+  _extend_client_timeout($c);
+  my $body = $c->req->json;
+  if (defined(my $problem = $rerank->request_problem($body))) {
+    _render_error($c, 400, $problem, 'invalid_request_error');
+    return;
+  }
+
+  my $model = $body->{model};
+  my $documents = $rerank->document_count($body);
+  my $api_key_id = _request_api_key_id($c);
+  _begin_route_async($c, $model, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
+    return unless $route;
+
+    # Requested and served model are two strings once an alias is in play (ADR 0008): the body
+    # that goes upstream carries the served one, the usage event carries both.
+    my $served_model = _served_model($tier, $model);
+    my $format = $route->{rerank_format} // '';
+    my $meta = {
+      api_format => 'openai',
+      endpoint   => $rerank->endpoint,
+      api_key_id => $api_key_id,
+      provider   => 'skeid',
+      engine     => ($route->{engine} // 'openaibase'),
+      model            => $served_model,
+      requested_model  => $model,
+      route_url        => ($route->{url} // ''),
+    };
+
+    # Which dialect the request has to be put in is known only now, with the node. A request
+    # this node's dialect cannot carry -- a document that is not text, for a node that takes
+    # texts -- is the client's to fix, but it holds a slot already.
+    my $upstream_body = eval { $rerank->request_to_upstream($body, $served_model, $format) };
+    unless (ref($upstream_body) eq 'HASH') {
+      my $err = $@;
+      my $message = blessed($err) && $err->isa('Langertha::Skeid::Protocol::Refusal')
+        ? $err->message : 'Invalid request';
+      _refuse_unsendable_request($c, $node_id, $started, $meta, $message);
+      return;
+    }
+
+    my $url = $rerank->at_server_root($format)
+      ? _root_url_for_node($route->{url}, $rerank->upstream_path)
+      : _endpoint_url_for_node($route->{url}, $rerank->upstream_path);
+    my $relay = {
+      # Tokens are reported in three places, none of them where a chat answer has them.
+      usage => sub {
+        my ($payload, $res) = @_;
+        return $rerank->usage($payload, $res->headers, $format);
+      },
+      # Counted off the request, so it needs nothing from the node but its answer.
+      units => sub {
+        my ($payload, $res) = @_;
+        return $res->is_success ? (documents => $documents) : ();
+      },
+      (length($format) ? (answer => sub {
+        my ($payload, $res) = @_;
+        return $rerank->response_from_upstream($payload, $res->headers, $body, $served_model, $format);
+      }) : ()),
+    };
+
+    $c->render_later;
+    _proxy_openai_json_async($c, $url, $upstream_body, $node_id, $started, $meta, sub {
+      my ($res, $err, $status, $upstream, $payload) = @_;
+      return if $err;
+      return _render_upstream_response($c, $res, $node_id) unless length $format;
+      $c->res->code($status || 200);
+      $c->res->headers->header('x-skeid-node' => $node_id);
+      $c->render(json => $payload);
+    }, undef, $relay);
+  });
+}
+
 sub _handle_anthropic_messages {
   my ($c) = @_;
   _extend_client_timeout($c);
@@ -1346,6 +1487,11 @@ sub _client_abort_event {
 # the upstream transaction instead of the JSON one made from $body; `units`, a code ref that
 # reads the route's own usage units off the decoded answer and returns them as event fields;
 # and, for a stream, `delta_text`, which returns the text of a frame in the route's own dialect.
+# Two more for an answer that is not chat-shaped (rerank, skeid k92), both called with the
+# decoded answer -- whatever JSON it is -- and the upstream response: `usage` returns the usage
+# block to meter, or nothing, where the answer reports its tokens somewhere else than a chat
+# answer does; `answer` is $translate for a node whose own dialect is not the client's, and
+# fails the same way.
 sub _proxy_openai_json_async {
   my ($c, $url, $body, $node_id, $started, $meta, $cb, $translate, $relay) = @_;
   $meta ||= {};
@@ -1441,8 +1587,12 @@ sub _proxy_openai_json_async {
     my $payload = eval { $res->json };
 
     my $translated;
-    if ($translate) {
-      $translated = eval { $translate->(ref($payload) eq 'HASH' ? $payload : {}) };
+    if ($translate || $relay->{answer}) {
+      $translated = eval {
+        $relay->{answer}
+          ? $relay->{answer}->($payload, $res)
+          : $translate->(ref($payload) eq 'HASH' ? $payload : {});
+      };
       unless (defined $translated) {
         $c->app->log->error('Translating the answer of node ' . $node_id . ' failed');
         $c->skeid->call_function('request.finish', {
@@ -1473,7 +1623,11 @@ sub _proxy_openai_json_async {
     });
 
     my $metrics = {};
-    if (ref($payload) eq 'HASH') {
+    if ($relay->{usage}) {
+      my $usage = $relay->{usage}->($payload, $res);
+      $metrics = _priced_metrics($c, $meta, $body, $duration_ms, { usage => $usage })
+        if ref($usage) eq 'HASH';
+    } elsif (ref($payload) eq 'HASH') {
       my $tool_calls = eval { [ map { $_->to_hash } Langertha::ToolCall->extract('openai', $payload) ] } || [];
       $metrics = _priced_metrics($c, $meta, $body, $duration_ms, $payload, $tool_calls);
     }
@@ -1485,7 +1639,7 @@ sub _proxy_openai_json_async {
       ok           => ($status < 500) ? 1 : 0,
       duration_ms  => $duration_ms,
       metrics      => $metrics,
-      ($relay->{units} ? $relay->{units}->($payload) : ()),
+      ($relay->{units} ? $relay->{units}->($payload, $res) : ()),
     });
 
     $cb->($res, 0, $status, (ref($payload) eq 'HASH' ? $payload : {}), $translated);
@@ -2111,6 +2265,34 @@ sub _refuse_unkeyed_node {
   return;
 }
 
+# The answer to a request that holds a slot on a node and cannot be put to it: the body is in a
+# shape the node's dialect has no place for, which only shows once the node is known (rerank to a
+# `rerank_format` node, skeid k92). As for an unkeyed node, no upstream call and everything an
+# admitted request is owed -- its request.finish, one usage event, an error in the face's shape
+# -- but 400: the request is the client's to change, and no retry will get it through.
+# $message is written for the client and quotes nothing of the request.
+sub _refuse_unsendable_request {
+  my ($c, $node_id, $started, $meta, $message) = @_;
+  my $duration_ms = _duration_ms($started);
+  $c->skeid->call_function('request.finish', {
+    id => $node_id,
+    ok => 0,
+    duration_ms => $duration_ms,
+  });
+  _record_usage_event($c, {
+    %$meta,
+    node_id       => $node_id,
+    status_code   => 400,
+    ok            => 0,
+    duration_ms   => $duration_ms,
+    error_type    => 'invalid_request_error',
+    error_message => $message,
+    metrics       => {},
+  });
+  _render_error($c, 400, $message, 'invalid_request_error');
+  return;
+}
+
 # The free capacity probe (ADR 0009): a commercial provider will not tell us its queue depth,
 # but it puts its rate-limit state on every response we already have in hand. Reading it costs
 # no extra request -- which is the whole reason this is worth doing on the request path at all.
@@ -2223,6 +2405,8 @@ sub _record_usage_event {
       (defined($args->{content_bytes}) ? (content_bytes => 0 + $args->{content_bytes}) : ()),
       # Audio routes only, and only when the node reported it (skeid k91, ADR 0021).
       (defined($args->{audio_seconds}) ? (audio_seconds => 0 + $args->{audio_seconds}) : ()),
+      # The rerank route only, and only for a request the node answered (skeid k92).
+      (defined($args->{documents}) ? (documents => 0 + $args->{documents}) : ()),
       metrics       => $safe_metrics,
     });
   };
@@ -2387,6 +2571,16 @@ sub _endpoint_url_for_node {
   return $base . '/v1/' . $path;
 }
 
+# The URL of a route a node serves at its server root rather than below /v1 (a TEI node's
+# /rerank): a node URL is a base, and one written with a trailing /v1 names the same server.
+sub _root_url_for_node {
+  my ($base, $path) = @_;
+  $base //= '';
+  $base =~ s{/\z}{};
+  $base =~ s{/v1\z}{};
+  return $base . $path;
+}
+
 sub _duration_ms {
   my ($started) = @_;
   return int((time - $started) * 1000);
@@ -2404,6 +2598,8 @@ sub _duration_ms {
 translated faces
 
 =item * L<Langertha::Skeid::Protocol::Audio> -- the wire of the relayed audio routes
+
+=item * L<Langertha::Skeid::Protocol::Rerank> -- the wire of the rerank route, and its TEI dialect
 
 =item * L<Langertha::Skeid::KeyBroker::OpenBao> -- upstream keys from OpenBao
 

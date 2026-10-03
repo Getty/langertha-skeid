@@ -15,6 +15,7 @@ use Langertha::Skeid::UsageStore;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Ollama;
+use Langertha::Skeid::Protocol::Rerank;
 use Langertha::Usage;
 use Langertha::Cost;
 use Langertha::Pricing;
@@ -132,6 +133,16 @@ reports neither -- a plain C<json>, C<text>, C<srt> or C<vtt> answer, most strea
 key out: not measured, never a zero. It is recorded as the node reported it and is not priced
 (ADR 0021); the DBI stores keep it in a nullable C<audio_seconds> column, C<jsonlog> writes it
 as part of the event, and a report sums it in C<totals>, C<by_key> and C<by_model>.
+
+A rerank request's event (C</v1/rerank>, also for the C</rerank> spelling) carries C<documents>:
+how many documents the request held. Skeid counts them off the request, so the number does not
+depend on what the node reports; it is on the event of a request the node answered and absent
+from a failed one. The node's tokens are recorded as B<input> tokens -- a reranker generates
+nothing -- so the model's C<input_per_million> prices them, wherever the node reported them:
+C<usage.prompt_tokens> or C<usage.total_tokens>, Cohere's C<meta.tokens.input_tokens>, a TEI
+node's C<x-compute-tokens> header (L<Langertha::Skeid::Protocol::Rerank/usage>). C<documents>
+itself is recorded and not priced, and is stored like C<audio_seconds>: a nullable C<documents>
+column, a key in C<jsonlog>, a sum in the reports.
 
 When a callback or override is provided, the configured store is bypassed entirely
 and no database connection is created.  DBI, DBD::SQLite and DBD::Pg are C<recommends>
@@ -288,8 +299,10 @@ set by C<skeid serve --workers>).
       api_key_ref: secret/skeid/remote/groq   # upstream key, resolved through the key broker
       api_key_env: GROQ_API_KEY        # upstream key from this variable when the ref resolves none
       capacity: { probe: prometheus }  # default none: inflight admission, see below
+      rerank_format: tei               # default none; a reranker that speaks TEI's dialect, see below
 
-An entry without C<id> or C<url> is skipped; one with an unknown C<engine> fails the load. When
+An entry without C<id> or C<url> is skipped; one with an unknown C<engine> or C<rerank_format>
+fails the load. When
 a node has a key of its own it replaces the client's C<Authorization> upstream (see
 L<Langertha::Skeid::Proxy>); otherwise the client's headers go through. Key references and
 variable names are the only key material a config holds (ADR 0003).
@@ -305,6 +318,13 @@ C<custom>; C<interval_ms> (default 2000) sets the poll rate. Rate-limit headers 
 upstream response whatever the block says, so C<ratelimit> starts nothing. The keys per probe
 are documented in L<Langertha::Skeid::CapacityProbe/for_node>,
 L<Langertha::Skeid::CapacityProbe::Prometheus> and L<Langertha::Skeid::CapacityProbe::Registry>.
+
+C<rerank_format> names the dialect a reranker node speaks on its rerank route when it is not the
+one clients speak. Without it -- vLLM, infinity started with C<--url-prefix /v1>, Jina, Cohere --
+a C</v1/rerank> request is relayed to C<{url}/rerank> as it came. C<tei> is Hugging Face
+text-embeddings-inference: the request is translated and sent to C</rerank> at the server root
+(the node's C<url> with or without a trailing C</v1>), the answer translated back. It is the
+only value; see L<Langertha::Skeid::Proxy/Rerank route>.
 
 =head2 pricing
 
@@ -1242,7 +1262,7 @@ sub BUILD {
 
 Adds a node, replacing any node with the same id. Takes the fields of a config C<nodes> entry
 and fills in their defaults (see L</nodes>). Returns 1. Croaks without C<id> or C<url>, on an
-unknown C<engine>, and on a C<registry> capacity block that
+unknown C<engine> or C<rerank_format>, and on a C<registry> capacity block that
 L<Langertha::Skeid::CapacityProbe::Registry/validate_config> rejects. The C<nodes.add> function
 and C<POST /skeid/nodes> call it.
 
@@ -1260,6 +1280,10 @@ sub add_node {
     require Langertha::Skeid::CapacityProbe::Registry;
     Langertha::Skeid::CapacityProbe::Registry->validate_config($node{capacity}, $id);
   }
+
+  # An unknown format croaks, like an unknown engine: a TEI node called in the default dialect
+  # answers every request with an error (skeid k92).
+  my $rerank_format = Langertha::Skeid::Protocol::Rerank->normalize_format($node{rerank_format});
 
   $self->remove_node($id);
   push @{$self->nodes}, {
@@ -1281,6 +1305,9 @@ sub add_node {
     # How this node's capacity is found (ADR 0009). Absent means inflight, which is every
     # deployment that existed before probes did.
     (ref($node{capacity}) eq 'HASH' ? (capacity => { %{$node{capacity}} }) : ()),
+    # The dialect the node's rerank route speaks when it is not the client's (skeid k92).
+    # Absent means the request is relayed as it came.
+    (length($rerank_format) ? (rerank_format => $rerank_format) : ()),
   };
   $self->_bump_inventory;
   return 1;
@@ -2444,8 +2471,8 @@ C<route_url>, C<status_code>, C<ok>, C<duration_ms>, C<error_type>, C<error_mess
 C<metrics> the token counts (C<input_tokens>, C<output_tokens>, C<total_tokens>,
 C<cached_tokens>, C<cache_write_tokens>), C<tool_calls> and the costs (C<cost_input_usd>,
 C<cost_output_usd>, C<cost_total_usd>, C<cost_cache_read_usd>, C<cost_cache_write_usd>). Costs
-arrive already priced; nothing is priced here. C<content_bytes> and C<audio_seconds> are set
-only when given. The C<usage.record> function calls it.
+arrive already priced; nothing is priced here. C<content_bytes>, C<audio_seconds> and
+C<documents> are set only when given. The C<usage.record> function calls it.
 
 =cut
 
@@ -2526,6 +2553,9 @@ sub record_usage {
   # like content_bytes: absent means the node did not say, which is not a measured zero. Recorded
   # as reported, never priced here.
   $event{audio_seconds} = _num($args{audio_seconds}) if defined $args{audio_seconds};
+  # How many documents a rerank request carried (skeid k92, ADR 0021), counted off the request
+  # the node answered. Optional and additive like the two above; recorded, never priced.
+  $event{documents} = _num($args{documents}) if defined $args{documents};
 
   return $self->_store_usage_event(\%event);
 }

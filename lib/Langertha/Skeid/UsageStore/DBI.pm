@@ -156,6 +156,8 @@ my @ADDED_COLUMNS = (
   # Seconds of audio an audio route's node reported (skeid k91, ADR 0021). Nullable: an event
   # whose node did not say reads NULL ("not measured"), not a measured zero.
   ['audio_seconds', 'DOUBLE PRECISION'],
+  # Documents a rerank request carried (skeid k92). Nullable: only a rerank event has a count.
+  ['documents', 'BIGINT'],
 );
 
 sub _add_missing_columns {
@@ -487,8 +489,9 @@ sub _insert {
       created_at, request_id, api_format, endpoint, api_key_id, provider, engine, model, node_id, route_url,
       status_code, ok, duration_ms, input_tokens, output_tokens, total_tokens, cached_tokens, tool_calls,
       cost_input_usd, cost_output_usd, cost_total_usd, error_type, error_message, requested_model,
-      content_bytes, cost_cache_read_usd, cost_cache_write_usd, cache_write_tokens, audio_seconds
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      content_bytes, cost_cache_read_usd, cost_cache_write_usd, cache_write_tokens, audio_seconds,
+      documents
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   });
   $sth->execute(
     $event->{created_at},
@@ -525,6 +528,8 @@ sub _insert {
     $event->{cache_write_tokens},
     # Nullable: only an audio route's event carries it, and only when its node reported it.
     $event->{audio_seconds},
+    # Nullable: only a rerank event carries it.
+    $event->{documents},
   );
 
   return ($self->backend eq 'sqlite' && $dbh->can('sqlite_last_insert_rowid'))
@@ -536,8 +541,9 @@ sub _insert {
 
   my $report = $store->report(\%filters);
 
-Aggregates in SQL: totals, per-key and per-model breakdowns (tokens, cost and the
-C<audio_seconds> the audio routes recorded), and the newest C<limit> events.
+Aggregates in SQL: totals, per-key and per-model breakdowns (tokens, cost, the
+C<audio_seconds> the audio routes recorded and the C<documents> of the rerank route), and the
+newest C<limit> events.
 The same C<since> / C<api_key_id> / C<model> filter set applies to every part of the report, so
 the breakdowns always add up to the totals shown next to them. C<limit> defaults to 20. The shape
 is described in L<Langertha::Skeid::UsageStore/The store contract>; a failure to connect or a
@@ -592,6 +598,7 @@ sub _report {
        COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
        COALESCE(SUM(tool_calls), 0) AS tool_calls,
        COALESCE(SUM(audio_seconds), 0) AS audio_seconds,
+       COALESCE(SUM(documents), 0) AS documents,
        COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
      FROM usage_events $where_sql",
     undef,
@@ -604,6 +611,7 @@ sub _report {
        COUNT(*) AS requests,
        COALESCE(SUM(total_tokens), 0) AS total_tokens,
        COALESCE(SUM(audio_seconds), 0) AS audio_seconds,
+       COALESCE(SUM(documents), 0) AS documents,
        COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
      FROM usage_events
      $where_sql
@@ -619,6 +627,7 @@ sub _report {
        COUNT(*) AS requests,
        COALESCE(SUM(total_tokens), 0) AS total_tokens,
        COALESCE(SUM(audio_seconds), 0) AS audio_seconds,
+       COALESCE(SUM(documents), 0) AS documents,
        COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
      FROM usage_events
      $where_sql
@@ -656,6 +665,7 @@ sub _report {
       cache_write_tokens => $num->($totals->{cache_write_tokens}),
       tool_calls     => $num->($totals->{tool_calls}),
       audio_seconds  => $num->($totals->{audio_seconds}),
+      documents      => $num->($totals->{documents}),
       total_cost_usd => $num->($totals->{total_cost_usd}),
     },
     by_key   => [ map {
@@ -664,6 +674,7 @@ sub _report {
         requests       => $num->($_->{requests}),
         total_tokens   => $num->($_->{total_tokens}),
         audio_seconds  => $num->($_->{audio_seconds}),
+        documents      => $num->($_->{documents}),
         total_cost_usd => $num->($_->{total_cost_usd}),
       }
     } @$by_key ],
@@ -673,6 +684,7 @@ sub _report {
         requests       => $num->($_->{requests}),
         total_tokens   => $num->($_->{total_tokens}),
         audio_seconds  => $num->($_->{audio_seconds}),
+        documents      => $num->($_->{documents}),
         total_cost_usd => $num->($_->{total_cost_usd}),
       }
     } @$by_model ],

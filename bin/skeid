@@ -194,6 +194,8 @@ sub _run_usage {
   # Only where an audio route recorded some (skeid k91): a store without audio events prints
   # what it always printed.
   printf "Audio:  seconds=%s\n", _seconds($tot->{audio_seconds}) if $tot->{audio_seconds};
+  # Likewise the documents of the rerank route (skeid k92).
+  printf "Rerank: documents=%d\n", $tot->{documents} if $tot->{documents};
 
   print "\nBy API key:\n";
   print "  (none)\n" unless @{$report->{by_key} || []};
@@ -203,7 +205,7 @@ sub _run_usage {
       ($row->{requests} // 0),
       ($row->{total_tokens} // 0),
       ($row->{total_cost_usd} // 0),
-      ($row->{audio_seconds} ? ' audio_seconds=' . _seconds($row->{audio_seconds}) : '');
+      _row_units($row);
   }
 
   print "\nBy model:\n";
@@ -214,7 +216,7 @@ sub _run_usage {
       ($row->{requests} // 0),
       ($row->{total_tokens} // 0),
       ($row->{total_cost_usd} // 0),
-      ($row->{audio_seconds} ? ' audio_seconds=' . _seconds($row->{audio_seconds}) : '');
+      _row_units($row);
   }
 
   print "\nRecent:\n";
@@ -234,6 +236,15 @@ sub _run_usage {
   }
 
   return 0;
+}
+
+# What a by-key or by-model row ends in: the units of the relayed routes, each only where the
+# row has some, so a row without any is printed as it always was.
+sub _row_units {
+  my ($row) = @_;
+  return join '',
+    ($row->{audio_seconds} ? ' audio_seconds=' . _seconds($row->{audio_seconds}) : ()),
+    ($row->{documents}     ? ' documents=' . (0 + $row->{documents})             : ());
 }
 
 # Seconds of audio for the report: a float sum, printed without the noise binary fractions
@@ -359,7 +370,9 @@ held is lost. A single process (C<--workers 1>) flushes on C<SIGINT>, C<SIGTERM>
 Prints a usage report: the backend and store (a C<jsonlog> path, the SQLite file, or
 C<configured DSN>), totals, per API key id, per model, and the newest events. Where the audio
 routes recorded any, an C<Audio: seconds=...> line follows the totals and the rows that have some
-end in C<audio_seconds=...>; a store without such events prints neither. The store is the
+end in C<audio_seconds=...>; a store without such events prints neither. The rerank route's
+documents are printed the same way: a C<Rerank: documents=...> line and C<documents=...> on the
+rows that have some. The store is the
 config's C<usage_store>; any of C<--backend>, C<--log-path>, C<--db>, C<--dsn>, C<--db-user>,
 C<--db-pass> or C<--db-pass-env> replaces it with a store built from those options alone. Exits
 0, or 2 after printing C<ERROR: ...> when the report fails (no store configured, say) or

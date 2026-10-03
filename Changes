@@ -25,6 +25,29 @@ Revision history for Langertha-Skeid
       table on start), reports sum it in totals, by_key and by_model, and
       skeid usage prints it where there is some. Seconds are recorded, not
       priced.
+    - POST /v1/rerank and its alias POST /rerank on the OpenAI face, for
+      reranker nodes. The JSON body (model, query, documents, top_n,
+      return_documents, ...) is routed by model like a chat request (aliases,
+      tiers, key policy, max_conns, health, client_auth) and relayed to
+      {node url}/rerank with only model replaced; the answer comes back as the
+      node gave it. That covers vLLM, infinity (started with --url-prefix
+      /v1), Jina and Cohere, whose differences are not evened out. A body that
+      is no JSON object, or has no model, no string query or no documents, is
+      400 before a node is touched.
+    - Node option rerank_format: tei for Hugging Face text-embeddings-inference:
+      the request is translated to POST /rerank at the server root (query,
+      texts, return_text, truncate) and TEI's bare array back into results
+      sorted by score, cut to top_n, with document { text } when asked for and
+      usage.total_tokens from the x-compute-tokens header. A document that is
+      not text is 400. An unknown rerank_format fails the config load.
+    - Usage events of the rerank route carry documents, the number of documents
+      the request held, when the node answered. The node's tokens are recorded
+      as input tokens, priced by input_per_million, from usage.prompt_tokens,
+      usage.total_tokens, meta.tokens.input_tokens (Cohere) or x-compute-tokens
+      (TEI). jsonlog writes documents, the DBI stores get a nullable documents
+      column (added to an existing table on start), reports sum it in totals,
+      by_key and by_model, and skeid usage prints it where there is some.
+      Documents are recorded, not priced.
     - An optional client_auth: { keys: [...] } section turns the client routes
       into an allowlist. Each entry is a names: entry or a key id (k_...),
       never a key. With it, a missing key or one that is not listed gets 401
