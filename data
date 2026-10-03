@@ -1,0 +1,16 @@
+---
+class: standard
+created: 2026-10-03T04:39:05Z
+id: 99
+priority: low
+status: backlog
+tags:
+- core
+- design
+title: Client-caused 4xx count as node errors in request.finish and the registry snapshot
+updated: 2026-10-03T04:39:05Z
+---
+
+Noted while building the rerank route (k92), existing behaviour. request.finish is called with ok => 0 for every upstream 4xx, and since k92 for a request refused after admission (400, a document a TEI node cannot take). A failed request counts toward the node's error counter, errors_in_window and last_failure_at in the registry snapshot -- so a client that sends bad requests makes a healthy node look like a failing one to a fronting Skeid. A client abort is already counted apart (k81).
+
+Decide: whether a 4xx that is the client's to fix (400, 404, 413, 422; not 401/403/429, which say something about the node's key or capacity) should be a fourth outcome like `aborted`, counted apart and outside the error window. ADR-worthy: it changes what the registry snapshot's error numbers mean.
