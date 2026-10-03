@@ -85,3 +85,10 @@ and every event still gets one write attempt, a failure is still reported — th
 without a flush loses every event queued since the last one, not only the request in flight.
 That changes what an outage can cost the billing record, so it is off by default and an
 operator opts into it with the interval that bounds the window.
+
+## Update (skeid k91, ADR 0021): a route's own usage unit is an optional event field
+
+The audio routes count seconds of audio, not tokens. Their events carry `audio_seconds` when
+the node reports a duration and no such key when it does not — optional and nullable like
+`content_bytes`, recorded as reported, summed in the report, not priced (ADR 0021). The event
+is still one per forwarded request and means the same in every store.

@@ -162,7 +162,9 @@ nodes:
 ```
 
 Every node is called in the OpenAI dialect: `POST {url}/chat/completions` or
-`{url}/embeddings` ([ADR 0001](docs/adr/0001-one-upstream-call-shape-all-client-formats-translated.md)).
+`{url}/embeddings` ([ADR 0001](docs/adr/0001-one-upstream-call-shape-all-client-formats-translated.md)),
+and `{url}/audio/transcriptions` or `{url}/audio/translations` for the audio routes
+([ADR 0021](docs/adr/0021-non-chat-routes-are-relayed-not-translated.md)).
 `engine` does not change the call. It must match an engine id of the installed Langertha
 (the lowercased class name: `OpenAI` → `openai`, `OpenAIBase` → `openaibase`,
 `vLLM` → `vllm`, `SGLang` → `sglang`, `Groq` → `groq`, ...); an unknown id fails the load, and
@@ -185,6 +187,30 @@ was called, the log names the key reference, and the client's key stays with Ske
 
 `healthy` is only ever changed by an operator (config or admin API). Skeid does not poll
 nodes, and neither errors nor rate limits mark a node unhealthy.
+
+**A Whisper node** is a node like any other; what it serves is decided by the model name a
+client asks for. vLLM serves one model per process, speaches loads models on demand:
+
+```yaml
+nodes:
+  - id: whisper-vllm                 # vllm serve openai/whisper-large-v3
+    url: http://gpu-2:8000/v1
+    model: openai/whisper-large-v3
+    engine: vllm
+    max_conns: 4
+  - id: whisper-speaches             # speaches (faster-whisper)
+    url: http://gpu-3:8000/v1
+    model: Systran/faster-whisper-large-v3
+    engine: openaibase
+    max_conns: 2
+aliases:
+  whisper:                           # one product name: vLLM first, speaches when it is full
+    tiers:
+      - model: openai/whisper-large-v3
+      - model: Systran/faster-whisper-large-v3
+```
+
+Clients reach it through [`/v1/audio/transcriptions`](#client-protocols).
 
 ### Routing
 
@@ -295,7 +321,8 @@ client_auth:
 ```
 
 - Every client route -- `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`,
-  `/v1/messages`, every `/api/*` route and `/.well-known/langertha.json` -- answers `401` with
+  `/v1/audio/*`, `/v1/messages`, every `/api/*` route and `/.well-known/langertha.json` --
+  answers `401` with
   `WWW-Authenticate: Bearer realm="skeid"` to a request without a key (`Missing API key`) or
   with a key whose id is not listed (`Invalid API key`). The body is in the route's dialect:
   OpenAI `{"error":{"type":"invalid_request_error","code":"invalid_api_key",...}}`, Anthropic
@@ -312,6 +339,26 @@ client_auth:
   it by position only -- it is most likely a key pasted where its id belongs. `keys: []` lets
   nobody in.
 - With `routing.trust_key_id_header` the header's id is what has to be on the list.
+
+### Uploads
+
+```yaml
+uploads:
+  max_bytes: 26214400     # default: 25 MiB, OpenAI's own limit for an audio file
+```
+
+The largest request body the upload routes (`/v1/audio/transcriptions`,
+`/v1/audio/translations`) accept: the file and the form around it. A larger one is answered
+`413` (`invalid_request_error`) without touching a node and without a usage event. The limit
+holds while the body arrives, not after it was stored: a request that declares a larger
+`Content-Length` is answered at once and its connection closed, and with
+[client authentication](#client-authentication) a caller that is not on the list gets its
+`401` the same way, before its upload is received. The section is hot-reloaded; removed, the
+default applies again. An unknown key in it or a value that is not an integer of at least 1
+fails the load. Every other route keeps the server's own request limit (16 MiB,
+`MOJO_MAX_MESSAGE_SIZE`).
+
+Behind a reverse proxy, its own body limit applies first (nginx: `client_max_body_size`).
 
 ### Pricing
 
@@ -391,6 +438,8 @@ balancer in front of Skeid needs a read timeout at least as long.
 | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI | passed through; streaming relayed byte for byte |
 | `POST /v1/embeddings` | OpenAI | passed through |
+| `POST /v1/audio/transcriptions` | OpenAI | multipart upload, relayed to the node's own endpoint; answer and stream relayed as they are |
+| `POST /v1/audio/translations` | OpenAI | the same, to the node's translations endpoint |
 | `GET /v1/models` | OpenAI | node models and alias names, per key policy |
 | `POST /v1/messages` | Anthropic | translated to and from OpenAI |
 | `POST /api/chat` | Ollama | translated; streams unless `"stream": false` |
@@ -410,6 +459,34 @@ own message.
 is and parsed only for metering; Skeid does not add `stream_options.include_usage`, so ask
 for it if streamed requests should carry token counts. Otherwise the event records only
 `content_bytes`.
+
+**Audio** (`/v1/audio/transcriptions`, `/v1/audio/translations`). OpenAI's
+`multipart/form-data` upload, for a node that serves Whisper through vLLM or
+[speaches](https://github.com/speaches-ai/speaches). Nothing is translated
+([ADR 0021](docs/adr/0021-non-chat-routes-are-relayed-not-translated.md)):
+
+```bash
+curl -s http://127.0.0.1:8090/v1/audio/transcriptions -H "Authorization: Bearer $KEY" \
+  -F model=whisper -F file=@meeting.wav -F language=de -F response_format=verbose_json
+```
+
+- The request is routed by the form's `model` field like a chat request: aliases, tiers, key
+  policy, `max_conns`, health. `model` has to be there exactly once (otherwise `400`); an alias
+  tier's served model replaces it. Every other part goes to `{url}/audio/transcriptions` (or
+  `/audio/translations`) as the client sent it, in the client's order, unknown and repeated
+  fields (`timestamp_granularities[]`) included.
+- The upload is not copied in memory: a part above 256 KiB is spooled to a temporary file by
+  the server and sent upstream from there. Its size limit is [`uploads.max_bytes`](#uploads).
+- The answer is the node's, whatever `response_format` made it: JSON, `verbose_json`, `text`,
+  `srt`, `vtt`.
+- `stream=true` (also `1`, `on`, `yes`, in any case) relays the node's event stream byte for
+  byte, in the node's dialect: `transcript.text.delta` / `transcript.text.done` from OpenAI and
+  speaches (which ends without `[DONE]`), `transcription.chunk` frames and `data: [DONE]` from
+  vLLM. Skeid adds nothing to the form; a vLLM node sends its usage frame only when the form
+  carries `stream_include_usage=true`.
+- Metering is what the node reports, see [`audio_seconds`](#usage-and-billing). A chat request
+  that names a Whisper model is routed to that node and refused there; Skeid does not know
+  what a model can do.
 
 **Anthropic** (`/v1/messages`). Messages, system prompt, images (base64 or URL source) and
 function tools are translated; `tool_use` / `tool_result` round-trips work, including images
@@ -468,10 +545,21 @@ Every forwarded request writes one usage event after it finishes, failures inclu
   `cost_cache_write_usd`, `cost_total_usd`
 - streamed requests only: `content_bytes`, the UTF-8 size of the relayed content (an
   observation, never turned into tokens)
+- audio routes only, and only when the node reports it: `audio_seconds`, the seconds of audio
+  the node worked on
 
 Streamed requests are priced from the upstream's usage frame exactly like a non-streamed
 answer. A stream cut short is recorded as failed, and billed from its usage frame if one
 arrived.
+
+`audio_seconds` is taken from the node's answer: `usage.seconds` when `usage.type` is
+`duration` (vLLM's JSON answer, OpenAI's `whisper-1`), else the top-level `duration` of a
+`verbose_json` answer (vLLM, speaches). An answer with neither -- speaches' plain JSON, any
+`text` / `srt` / `vtt` answer, a vLLM translation, most streams -- leaves the field out: not
+measured, never `0`. Ask for `response_format=verbose_json` where seconds are what you bill.
+A node that reports tokens instead (OpenAI's `gpt-4o-transcribe`, vLLM's stream usage frame)
+fills the token fields as on a chat request. Seconds are recorded, not priced: `pricing` has
+no per-second rate ([ADR 0021](docs/adr/0021-non-chat-routes-are-relayed-not-translated.md)).
 
 Without a `usage_store` (and without `SKEID_USAGE_DB`) nothing is recorded. When the store
 cannot write an event (a full disk, a dropped table, a lost database), the request is still
@@ -537,7 +625,9 @@ curl -s -H "Authorization: Bearer $SKEID_ADMIN_API_KEY" \
 ```
 
 A report has `totals`, `by_key`, `by_model` and the most `recent` events (limit 1..500; the
-CLI defaults to 20, the admin route to 50).
+CLI defaults to 20, the admin route to 50). The first three sum `audio_seconds` beside the
+tokens; the CLI prints it (`Audio:  seconds=...`, `audio_seconds=...` on a row) only where
+there is some.
 
 ### Your own usage sink
 

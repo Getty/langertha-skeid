@@ -21,12 +21,16 @@ in and out. Consequences that are not negotiable:
 - The upstream call is engine-agnostic. vLLM, SGLang, Ollama-in-OpenAI-mode and OpenAI itself
   all take the same body; the **Engine ID** is metadata for accounting and eligibility, not a
   branch in the request builder.
+- A non-chat route of the OpenAI face (audio) is **relayed** to the node's endpoint of the same
+  name, not translated into the chat call (ADR 0021, section below). That is a second path and
+  body shape, not a second proxy function.
 
 ## Client edge
 
 | API format | Routes | Streaming |
 |---|---|---|
 | OpenAI | `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models` | yes, SSE relay |
+| OpenAI, relayed (ADR 0021) | `POST /v1/audio/transcriptions`, `POST /v1/audio/translations` | yes, SSE relay in the node's own event dialect |
 | Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
 | Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
 
@@ -76,10 +80,45 @@ lives with its translator (`manifest_endpoint`; OpenAI's in `Langertha::Skeid::P
 (`ToolCall->extract_hermes_from_text`). Never hand-roll a parser here — extend Langertha
 instead, and pin the new `Langertha` version in `cpanfile`.
 
+## Relayed routes (audio)
+
+A route of the OpenAI face that is not a chat call is **relayed, not translated** (ADR 0021):
+`/v1/audio/transcriptions` and `/v1/audio/translations` go to `{node.url}/audio/...` as the
+multipart form the client sent, and the node's answer (JSON, `verbose_json`, `text`, `srt`,
+`vtt`, SSE) comes back untouched. `Langertha::Skeid::Protocol::Audio` owns that wire — the
+form fields, the upstream parts, where an answer reports usage; its names
+(`transcript.text.delta`, `usage.type: duration`) appear nowhere else.
+
+- No second proxy function. `_proxy_openai_json_async` / `_proxy_openai_stream` take an optional
+  `$relay` hash: `request` (builds the upstream transaction), `units` (usage units off the
+  answer), `delta_text` (stream frame text for `content_bytes`). A new relayed route brings a
+  `$relay`, never a copy of the relay.
+- Skeid reads `model` (exactly once, else `400`; routes and applies the key's policy by it) and
+  `stream` (last one decides; on for pydantic's truth set `1 true on yes t y`). It writes
+  `model` only when a tier serves another one. Everything else passes as sent — unknown and
+  repeated fields, the client's part order and boundary.
+- **Two parsers, one form.** The node parses the form again. Whatever a node could read as the
+  `model` field must count as one in `form_fields`, or a key routes by one model and is served
+  another. Loosen that parser, never tighten it; `name*` is refused.
+- The upload is not copied: parts above 256 KiB are file assets, and `upstream_parts` hands the
+  same asset to the user agent's `multipart` generator. `$part->asset->slurp` on the file is the
+  regression (`t/68` counts it).
+- The upload limit is `uploads.max_bytes`, set per request by `_limit_upload` on the request
+  content's `body` event — head parsed, body unread. Declared too large, or a caller
+  `client_auth` refuses: the limit is set to 1, the parser stops, the route (or the gate)
+  answers `413` / `401` without the body. A new upload route has to be known to
+  `_limit_upload`, or it runs under the server's 16 MiB.
+- `Expect` is dropped from the upstream headers of an upload: a node's `100 Continue` makes
+  Mojo::UserAgent start a fresh response object, and the stream relay listens on the old one.
+- Usage: tokens through `metrics.normalize` when reported; `audio_seconds` from `usage.seconds`
+  (`usage.type` = `duration`) else top-level `duration`, else **absent** — never `0`. Not priced.
+- Nothing is injected into the form (`stream_include_usage` is the client's to send).
+
 ## Upstream call
 
-`_endpoint_url_for_node($base, $path)` — appends `/v1` unless the node url already ends in
-`/v1`. A node url is a base, never a full endpoint.
+The call is `POST {node.url}/chat/completions` or `/embeddings`; a relayed route posts to its
+own path (above). `_endpoint_url_for_node($base, $path)` — appends `/v1` unless the node url
+already ends in `/v1`. A node url is a base, never a full endpoint.
 
 `_forward_headers` passes the client's headers through minus the hop-by-hop set
 (`connection`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `te`, `trailer`,

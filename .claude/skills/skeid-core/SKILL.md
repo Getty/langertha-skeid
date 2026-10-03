@@ -17,6 +17,7 @@ Langertha::Skeid          nodes, routing, admission, config, pricing, usage, reg
   ::Protocol              shared translation helpers, OpenAI manifest face
   ::Protocol::Anthropic   /v1/messages <-> OpenAI (+ ::Stream)
   ::Protocol::Ollama      /api/chat, /api/generate <-> OpenAI (+ ::Stream)
+  ::Protocol::Audio       /v1/audio/* relayed, not translated: form fields, usage units (ADR 0021)
   ::UsageStore            config normalization + backend factory
   ::UsageStore::JsonLog   append-only JSON events (recommended default)
   ::UsageStore::DBI       sqlite + postgresql
@@ -274,6 +275,7 @@ admin_api_key: "…"               # or admin_api_key_env:, or admin: { api_key 
 usage_store: { backend: …, … }
 manifest:   { enabled, public_url, … }   # provider manifest, per-key grants in keys: (ADR 0015)
 registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
+uploads:    { max_bytes: 26214400 }      # body limit of the upload routes (/v1/audio/*); ADR 0021
 ```
 
 The admin key is resolved on every applied config as explicit (`serve --admin-api-key`,
@@ -306,6 +308,13 @@ usage block through `Langertha::Usage`/`Pricing` into `cost_cache_read_usd` /
 upstream's usage block verbatim (frames merged key by key, later wins — counts are running
 totals, never summed) and prices it through the same `metrics.normalize` call as a
 non-streamed answer, on every face (skeid #41).
+
+Optional event fields say "not measured" by being absent, never by `0`: `content_bytes`
+(streams only) and `audio_seconds` (audio routes, only when the node reports a duration — ADR
+0021; recorded, not priced). Each is an argument of `record_usage`, a nullable column added
+through `@ADDED_COLUMNS` in `UsageStore::DBI`, a key `jsonlog` writes as is, and — for
+`audio_seconds` — a sum in the report's `totals` / `by_key` / `by_model` that `skeid usage`
+prints only when non-zero. A new usage unit follows the same path.
 
 Backend selection in `UsageStore->normalize_config` is inference-first: explicit `backend` wins,
 otherwise `sqlite_path`/`path`/`db_path` → sqlite, `dbi:Pg:` dsn → postgresql, `log_path` →

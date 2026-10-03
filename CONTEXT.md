@@ -140,8 +140,8 @@ _Avoid_: liveness, readiness, up/down.
 
 **API format** (client protocol):
 The dialect the *client* speaks to Skeid: OpenAI (`/v1/chat/completions`, `/v1/embeddings`,
-`/v1/models`), Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/tags`,
-`/api/ps`). A property of the request. Code, config (`manifest.faces`) and ADRs call one API
+`/v1/models`, and the **Relayed routes** `/v1/audio/transcriptions`, `/v1/audio/translations`),
+Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/tags`, `/api/ps`). A property of the request. Code, config (`manifest.faces`) and ADRs call one API
 format's set of routes a **face** — "the Anthropic face".
 _Avoid_: engine, provider, frontend API.
 
@@ -150,6 +150,15 @@ Mapping a non-OpenAI client request into the OpenAI request Skeid forwards upstr
 upstream response back into the client's format. One direction pair per API format, and the
 only place a format-specific field name may appear.
 _Avoid_: adapter, shim, conversion layer.
+
+**Relayed route**:
+A route of the OpenAI **API format** that is not a chat call and has one dialect only — audio
+transcription and translation today. Its request goes to the node's endpoint of the same name
+in its own shape (a multipart form, part for part) and the answer comes back as the node gave
+it; there is nothing to translate from or into, so no **Translation** (ADR 0021). Routing,
+**Policy**, **Admission** and the **Usage event** are those of every other route; only the
+served model is written into the request.
+_Avoid_: passthrough (says nothing about routing and metering still applying), proxy route.
 
 **Upstream**:
 The node side of a request. The client side is the *client* or *caller* — never "backend".
@@ -160,7 +169,8 @@ On the OpenAI **API format** streaming responses pass through byte-for-byte; Ske
 chunks only to accumulate usage and content size. The Anthropic and Ollama formats stream too:
 there the upstream OpenAI SSE is re-chunked by a stream translator (Anthropic events, Ollama
 NDJSON) — the relay-plus-**Translation** case. Every stream is metered and priced from the
-verbatim upstream usage frame, like a non-streamed request (skeid #41).
+verbatim upstream usage frame, like a non-streamed request (skeid #41). A **Relayed route**
+streams the same way, byte-for-byte, whichever event dialect its node speaks.
 _Avoid_: proxying, piping (too vague about the parse-but-don't-modify contract).
 
 **TTFT**:
@@ -172,9 +182,17 @@ _Avoid_: latency (unqualified), response time.
 ### Metering
 
 **Usage event**:
-One record per forwarded request: identity, node, model, status, duration, tokens, cost. The
-billing unit and the reason Skeid exists between a client and a node.
+One record per forwarded request: identity, node, model, status, duration, tokens, cost, and
+where a route counts something else, its own usage unit (**Audio seconds**). The billing unit
+and the reason Skeid exists between a client and a node.
 _Avoid_: log line, metric, sample.
+
+**Audio seconds** (`audio_seconds`):
+The seconds of audio a node says it worked on, on the **Usage event** of an audio **Relayed
+route**. The first **usage unit** that is not a token count: an optional event field recorded
+as the node reports it, absent when the node reports none — not measured, which is never `0`.
+Recorded, not priced (ADR 0021).
+_Avoid_: duration (that is the request's wall time, `duration_ms`), audio length, minutes.
 
 **Usage store**:
 The pluggable sink for usage events — `jsonlog` (recommended), `sqlite`, `postgresql`, or a
@@ -326,7 +344,7 @@ _Avoid_: hot reload, restart, refresh.
   distinction exists to prevent.
 - **API format** governs the client edge, **Engine ID** the upstream edge. A request can enter
   as Anthropic and leave as OpenAI; that crossing is **Translation** and it happens in exactly
-  one place.
+  one place. A **Relayed route** makes no crossing: it enters and leaves in the same shape.
 
 ## Example dialogue
 

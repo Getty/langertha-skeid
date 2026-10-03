@@ -1,6 +1,6 @@
 # ADR 0001 — One upstream call shape; all client formats are translated
 
-- Status: accepted — error translation extended to the Ollama face (skeid #47, see Update)
+- Status: accepted — error translation extended to the Ollama face (skeid #47, see Update); non-chat routes are relayed, not translated (ADR 0021)
 - Date: 2026-08-08
 - Tags: protocols, translation, routing, backfill
 
@@ -79,3 +79,13 @@ an in-band error. Both changed: every error on `/api/*` is rendered as Ollama's
 (`Langertha::Skeid::Protocol::Ollama->error_body`), and a translated Ollama stream that fails
 after it opened ends with an Ollama error line and no `done: true` line. Only the OpenAI
 pass-through still has no in-band error frame.
+
+## Update (skeid k91, ADR 0021): non-chat routes of the OpenAI face are relayed
+
+The audio routes (`/v1/audio/transcriptions`, `/v1/audio/translations`) are not the
+`/chat/completions` call and are not translated into it: a multipart upload has nothing to be
+translated into, and only the OpenAI face has these routes. They go to the node's endpoint of
+the same name in their own shape, through the same proxy functions as the chat call (ADR 0021).
+The rule here is unchanged for chat: three client formats, one upstream call, no second code
+path. The wire names of a relayed route live in its own `Langertha::Skeid::Protocol::*` module,
+as a translator's do.
