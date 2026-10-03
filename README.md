@@ -588,10 +588,16 @@ curl -s http://127.0.0.1:8090/v1/rerank -H "Authorization: Bearer $KEY" \
 function tools are translated; `tool_use` / `tool_result` round-trips work, including images
 inside a tool result. Streaming emits the Anthropic event sequence (`message_start`,
 `content_block_*` including `tool_use` blocks with `input_json_delta`, `message_delta`,
-`message_stop`). A stream that fails after it opened ends with an `event: error` frame. Not
-supported: images from the Files API and provider built-in tools (`web_search_*`, `bash_*`,
-`text_editor_*`, `computer_*`, `mcp_toolset`, ...), both answered with `400`. Tools on this
-face need a Langertha newer than 0.503 (see [Install](#install)).
+`message_stop`). A stream that fails after it opened ends with an `event: error` frame. The
+node only ever sees one system message, at the start: `system` plus any `role: system` messages
+before the first turn. A `role: system` message later in `messages` (Claude Code's
+mid-conversation system messages) is sent as `<system-reminder>...</system-reminder>` text of
+the adjacent user turn — appended to the user message before it, else prepended to the one
+after it, else as its own user message — so chat templates that want the system message first
+or strict role alternation accept it, and the prompt prefix stays the same from turn to turn.
+Not supported: images from the Files API and provider built-in tools (`web_search_*`,
+`bash_*`, `text_editor_*`, `computer_*`, `mcp_toolset`, ...), both answered with `400`. Tools
+on this face need a Langertha newer than 0.503 (see [Install](#install)).
 
 **Ollama** (`/api/chat`, `/api/generate`). Streams newline-delimited JSON unless the request
 says `"stream": false`, as Ollama does. `tools` and replayed tool round-trips are translated

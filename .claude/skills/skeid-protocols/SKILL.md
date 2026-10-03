@@ -50,7 +50,12 @@ usage frame goes through `metrics.normalize`, skeid #41); images are translated 
 ## Translation
 
 `Langertha::Skeid::Protocol::Anthropic`
-- request → OpenAI: `system` (string or block array) becomes a leading system message; content
+- request → OpenAI: `system` (string or block array) becomes a leading system message, joined
+  by any `role: system` messages before the first turn. A later `role: system` message (Claude
+  Code mid-conversation system) is never a system message and never moved into the leading one
+  (prefix caching): wrapped in `<system-reminder>` it is appended to the preceding user message,
+  else prepended to the next one, else its own user message — never between `tool_calls` and
+  their `tool` messages (k100); content
   blocks fold to text, except that `image` blocks (base64 or url source) make an OpenAI content
   array with `image_url` parts in client order — a Files API image is a `400`; `tool_use`
   blocks become `tool_calls` on an assistant message; `tool_result` blocks become their own
