@@ -1,0 +1,33 @@
+---
+class: standard
+created: 2026-10-03T03:30:59Z
+id: 95
+priority: low
+status: backlog
+tags:
+- audio
+- realtime
+- design
+title: 'Realtime transcription over WebSocket (OpenAI Realtime protocol): later stage,
+  effort estimate'
+updated: 2026-10-03T03:30:59Z
+---
+
+Card only -- a later stage, nothing is built yet. Live transcription over the OpenAI Realtime protocol: a WebSocket the client keeps open, audio in as input_audio_buffer.append frames, text out as conversation.item.input_audio_transcription.delta / .completed events. The file-based route is k91.
+
+The protocol, as far as Skeid is concerned: GET /v1/realtime upgraded to a WebSocket, the model or `intent=transcription` in the query, the key in the Authorization header (browsers: in a subprotocol). Client events session.update / transcription_session.update, input_audio_buffer.append / .commit; server events session.created, the transcription deltas, `.completed` with a usage block, error. Backends: vLLM serves /v1/realtime for realtime-capable models, speaches has a realtime route as well -- which events and which usage each really sends has to be checked against the deployed versions first.
+
+What is there to build on: Mojolicious serves WebSockets in the same daemon and prefork workers that serve HTTP, and Mojo::UserAgent opens an upstream WebSocket without blocking, so the async-only rule (ADR 0005) holds without a second server. client_auth (a bridge, runs before the upgrade), route planning, node key injection and usage.record are reusable. The JSON and SSE upstream helpers are not: they are one request, one answer.
+
+What has to be built:
+1. the route and the handshake: client_auth before the upgrade (401, never an open socket), the key also from the subprotocol; route planning at the handshake, which needs the model in the query -- a session that names its model only in session.update has to be held until then, or refused.
+2. admission per session, not per request: request.start at the handshake, request.finish when either side closes. A session holds its slot for minutes, so max_conns on a realtime node means concurrent sessions, and route_wait happens before the upgrade.
+3. the relay: frames both ways, text and binary, with a queue per direction (a client that sends audio faster than the node reads must not grow memory without bound), close codes passed on, the upstream closed when the client leaves and the other way round.
+4. alias tiers: the served model has to replace the requested one inside session.update frames, so client JSON frames are parsed, not only relayed.
+5. timeouts and sizes: Mojolicious closes a silent WebSocket after 30 s and limits a message to 256 KiB; both need route-specific values. A graceful stop (SIGQUIT) waits for open sessions.
+6. metering: one usage event per session at close -- duration, the usage blocks of the completed transcriptions summed (tokens or audio_seconds), status from how it ended -- or one per completed transcription. An ADR: the event is "one per forwarded request" today.
+7. tests: Test::Mojo speaks WebSocket (websocket_ok) and a fake upstream WebSocket can live in the same app, so it stays offline.
+
+Estimate: a module of its own (Langertha::Skeid::Proxy::Realtime, some 350-500 lines) plus about as much test code; two to three worker passes and an ADR for session admission and session metering. Risk medium. The open ends are not in Mojolicious but in the backends (three servers, three event dialects) and in what a slot held for minutes does to capacity probes and to worker shares (ADR 0010).
+
+Order: after k91 is in use and a real client asks for live transcription.
