@@ -1,0 +1,48 @@
+---
+class: standard
+completed: 2026-10-03T04:38:36Z
+created: 2026-10-03T03:30:58Z
+id: 92
+priority: high
+started: 2026-10-03T04:15:01Z
+status: done
+tags:
+- rerank
+- proxy
+- usage
+title: 'Reranking: POST /v1/rerank and /rerank, TEI translated per node, documents
+  and tokens in the usage event'
+updated: 2026-10-03T04:38:40Z
+---
+
+The cluster runs a reranker next to the chat and embedding nodes. Reranking has to come in through Skeid: client_auth (k90), routing over nodes, one usage event per forwarded request.
+
+Routes (OpenAI face, behind the client gate): POST /v1/rerank, and POST /rerank as an alias of it.
+
+Request, the shape vLLM, Cohere, Jina and infinity share: { model, query, documents, top_n, return_documents, ... }. Answer: { results: [ { index, relevance_score, document? } ], usage? }.
+
+Upstream:
+- default: the body goes to {node.url}/rerank unchanged (model replaced by the served model), the answer comes back unchanged. Covers vLLM (/v1/rerank), infinity started with --url-prefix /v1, Jina and Cohere. Skeid does not normalise what differs between them: `document` is {text} on vLLM and Cohere v1, a plain string on infinity; vLLM ignores return_documents and always returns the documents.
+- node option `rerank_format: tei` for Hugging Face text-embeddings-inference, which has no Cohere-shaped route: POST <server root>/rerank with { query, texts, return_text, truncate? }, answer a bare array [ { index, score, text? } ]. Skeid translates both ways at the edge (ADR 0001): documents (strings or { text }) -> texts, return_documents -> return_text, the answer into results sorted by score, cut to top_n, relevance_score from score, document { text } when asked for. A new Protocol module, the only place TEI's field names appear.
+
+Usage event (ADR 0004), endpoint /v1/rerank for both spellings of the route:
+- new optional field `documents` (nullable): how many documents the request carried -- Skeid counts it itself, so it is there whatever the node reports
+- tokens when the node reports them: usage.total_tokens / usage.prompt_tokens (vLLM, infinity, Jina), meta.tokens.input_tokens (Cohere), the x-compute-tokens response header (TEI). Rerank tokens are input tokens: a usage block with only total_tokens is recorded as input, so `input_per_million` prices it.
+- stores and reports as for audio_seconds: jsonlog writes it, DBI gets a nullable column, totals / by key / by model carry it
+- pricing per document or per search unit is not modelled: recorded, not priced
+
+Done when: /v1/rerank and /rerank work against local fake upstreams in t/ (vLLM-shaped, infinity-shaped, TEI), two nodes of one model share the load, max_conns and health respected, request.start/request.finish paired on every exit path, client_auth 401 before anything is forwarded, a malformed body answers 400 without touching a node, existing behaviour unchanged, prove -lr t/ green. README, CONTEXT.md, POD, skeid-protocols skill follow.
+
+Known gaps to leave as they are: infinity reports characters, not tokens, unless it runs with lengths_via_tokenize; no /v2/rerank; no streaming (the format has none).
+
+2026-10-03 04:19 Started. Read k91 (0303b52, 1bf62bb). Plan: Protocol::Rerank owns the rerank wire (request check, TEI translation both ways, token places); Proxy gets one handler on both spellings; $relay grows 'usage' (reader that sees the response) and 'answer' (upstream-side translation of a non-object body); documents follows audio_seconds through record_usage, stores, reports, skeid usage. Langertha (0.503 installed, 0.504 tree) has no rerank model at all, so there is nothing to reuse or pin.
+
+2026-10-03 04:31 Code and tests in the tree, prove -lr t/ green (Files=74, Tests=4482). New: lib/Langertha/Skeid/Protocol/Rerank.pm, t/69-rerank.t. Changed: Proxy.pm (handler on both spellings, $relay usage/answer, _refuse_unsendable_request, _root_url_for_node), Skeid.pm (add_node rerank_format, record_usage documents), UsageStore DBI/JsonLog, share/sql, bin/skeid. 26 mutations of the logic each fail t/69. Docs next.
+
+2026-10-03 04:36 Decisions beyond the brief: (1) the relayed body is re-encoded like chat/embeddings, never passed as the client's bytes -- a duplicate 'model' key would otherwise let a key route by one model and be served another (two parsers, one body); content is unchanged, the answer is byte-identical. (2) JSON number vs string is told apart by the scalar's flags (B), so query: 42 is a 400. (3) TEI: top_n absent/null/0 = all, anything not a whole number >= 0 is refused like a non-text document (400 after admission); return_text is sent only when the client sent return_documents; document comes from TEI's text; equal scores keep document order; an index out of range or a row without score is a translation failure. (4) x-compute-tokens is read only for a tei node, body usage only for a relayed one. (5) documents only on a 2xx answer (units gets the response). (6) ADR 0001 and 0004 got short Update sections beside ADR 0021's.
+
+2026-10-03 04:36 Also found, not changed (for the dispatcher to decide): (a) add_node removes the existing node of the same id before an unknown engine croaks, so a bad re-add loses the old node; rerank_format is checked before the removal. (b) request.finish ok=0 counts toward the registry's errors_in_window also for client-caused failures -- every upstream 4xx already does, and the new 400-after-admission follows that precedent (_refuse_unkeyed_node). (c) vLLM takes a multimodal query object; the agreed 400 for a non-string query refuses it. (d) A model served by a TEI node and a relayed node answers a non-text document differently depending on which node round-robin picked. (e) For the langertha board: Langertha has no rerank model (no role, no value object, 0.503 and the 0.504 tree); if it gains one, Protocol::Rerank's dialects belong there. No pin changed, no Langertha release needed for k92.
+
+Done: POST /v1/rerank and /rerank (one handler, behind the client gate), relayed by default, translated for rerank_format: tei nodes; documents and input tokens in the usage event through record_usage, jsonlog, DBI (nullable column, added on start), reports and skeid usage. New: lib/Langertha/Skeid/Protocol/Rerank.pm, t/69-rerank.t. Docs: POD, Changes, README, CONTEXT, ADR 0021 Update (+0001, 0004), skeid-protocols and skeid-core skills. Verified: prove -lr t/ -> Files=74, Tests=4482, Result: PASS; t/69 also green with MOJO_NO_JSON_XS=1; 26 mutations of the logic each fail t/69. No existing test edited except the t/00-load.t line. Tree uncommitted, commit-ready.
+
+2026-10-03 04:38 Committed: 536ff7b (code, tests, share/sql, Changes), b5cee6d (docs)
