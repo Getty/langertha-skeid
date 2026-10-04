@@ -2,6 +2,18 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - The request goes upstream as the client spelled it. /v1/chat/completions
+      and /v1/embeddings forward the client's bytes with only model replaced,
+      instead of decoding the body and encoding it again -- which wrote every
+      object's keys sorted. A node renders tool definitions into the prompt in
+      the order they arrive, so the model got a prompt the client did not
+      write: a JSON schema as properties, required, type instead of type,
+      properties, required. One node answered such a prompt in gibberish. The
+      Anthropic and Ollama faces translate the body and so cannot forward it;
+      they carry each tool's JSON schema over as the client wrote it, in a
+      tool definition spelled in wire order (ADR 0023).
+    - A body that names model twice has both replaced by the served model, so
+      no node reads a model the request was not routed for.
     - POST /v1/audio/transcriptions and /v1/audio/translations on the OpenAI
       face, for Whisper nodes (vLLM, speaches). The multipart form is routed by
       its model field like a chat request (aliases, tiers, key policy,

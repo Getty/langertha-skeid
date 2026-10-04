@@ -10,6 +10,7 @@ my @modules = qw(
   Langertha::Skeid::Protocol::Anthropic
   Langertha::Skeid::Protocol::Audio
   Langertha::Skeid::Protocol::Ollama
+  Langertha::Skeid::Protocol::RawBody
   Langertha::Skeid::Protocol::Rerank
   Langertha::Skeid::UsageStore
   Langertha::Skeid::UsageStore::JsonLog

@@ -371,7 +371,16 @@ keys:
   and sets that header; otherwise any client can name itself into another customer's policy
   and invoice.
 
-### Client authentication
+### What the node receives
+
+Skeid changes one thing in a request on the OpenAI face: `model`, when an alias serves another
+one. Everything else goes to the node as the bytes the client sent — key order, whitespace and
+escapes included — because a node renders tool definitions into the prompt in the order they
+arrive, and a re-encoded request is a different prompt and a different prompt-cache prefix. The
+Anthropic and Ollama faces translate the body; there each tool's JSON schema is carried over as
+the client wrote it ([ADR 0023](docs/adr/0023-the-request-goes-upstream-as-the-client-spelled-it.md)).
+
+## Client authentication
 
 When Skeid is the public entry itself -- nginx in front for TLS, nothing that checks keys --
 list the customer key ids that may come in

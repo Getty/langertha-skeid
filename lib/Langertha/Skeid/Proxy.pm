@@ -20,6 +20,7 @@ use Langertha::Skeid::Protocol::Anthropic::Stream;
 use Langertha::Skeid::Protocol::Audio;
 use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Ollama::Stream;
+use Langertha::Skeid::Protocol::RawBody;
 use Langertha::Skeid::Protocol::Rerank;
 use Langertha::ToolCall;
 
@@ -843,8 +844,10 @@ sub _handle_openai_chat {
       route_url        => ($route->{url} // ''),
     };
 
+    my $relay = _verbatim_relay($c, $served_model);
+
     if ($body->{stream}) {
-      _proxy_openai_stream($c, $url, $body, $node_id, $started, $meta);
+      _proxy_openai_stream($c, $url, $body, $node_id, $started, $meta, undef, $relay);
       return;
     }
 
@@ -853,7 +856,7 @@ sub _handle_openai_chat {
       my ($res, $err, $status) = @_;
       return if $err;
       _render_upstream_response($c, $res, $node_id);
-    });
+    }, undef, $relay);
   });
 }
 
@@ -894,7 +897,7 @@ sub _handle_openai_embeddings {
       my ($res, $err, $status) = @_;
       return if $err;
       _render_upstream_response($c, $res, $node_id);
-    });
+    }, undef, _verbatim_relay($c, $served_model));
   });
 }
 
@@ -1183,7 +1186,8 @@ sub _handle_anthropic_messages {
       $openai_body->{stream} = \1;
       $openai_body->{stream_options} = { include_usage => \1 };
       _proxy_openai_stream($c, $url, $openai_body, $node_id, $started, $meta,
-        Langertha::Skeid::Protocol::Anthropic::Stream->new(model => $model));
+        Langertha::Skeid::Protocol::Anthropic::Stream->new(model => $model),
+        _schema_relay($c, $openai_body, 'input_schema'));
       return;
     }
 
@@ -1199,7 +1203,7 @@ sub _handle_anthropic_messages {
       # response_from_openai reads a decoded OpenAI response ($upstream->{choices}, ...); the
       # raw Mojo $res would read as all-undef and yield a well-formed but empty envelope (karr #26).
       return Langertha::Skeid::Protocol::Anthropic->response_from_openai($_[0], $model);
-    });
+    }, _schema_relay($c, $openai_body, 'input_schema'));
   });
 }
 
@@ -1274,7 +1278,8 @@ sub _handle_ollama {
       $openai_body->{stream} = \1;
       $openai_body->{stream_options} = { include_usage => \1 };
       _proxy_openai_stream($c, $url, $openai_body, $node_id, $started, $meta,
-        Langertha::Skeid::Protocol::Ollama::Stream->new(model => $model, shape => $face->{shape}));
+        Langertha::Skeid::Protocol::Ollama::Stream->new(model => $model, shape => $face->{shape}),
+        _schema_relay($c, $openai_body, 'function', 'parameters'));
       return;
     }
 
@@ -1291,7 +1296,7 @@ sub _handle_ollama {
       # Mojo response object, or every field reads undef and the client gets empty content (karr #26).
       my $response_method = $face->{response};
       return Langertha::Skeid::Protocol::Ollama->$response_method($_[0]);
-    });
+    }, _schema_relay($c, $openai_body, 'function', 'parameters'));
   });
 }
 
@@ -2049,6 +2054,45 @@ sub _proxy_openai_stream {
     }
   });
   });
+}
+
+# The request of a route on the OpenAI face, whose node speaks the wire the client spoke: the
+# client's own bytes with only `model` replaced (Langertha::Skeid::Protocol::RawBody), never the
+# decoded body encoded again. Re-encoding sorts the keys of every object, and a node renders
+# tool definitions into the prompt in the order they arrive -- so it would hand the model a
+# prompt the client did not write, and its prompt cache a prefix it has not seen.
+#
+# undef, and with it the encoded body, only for bytes the scanner cannot follow.
+sub _verbatim_relay {
+  my ($c, $served_model) = @_;
+  my $bytes = Langertha::Skeid::Protocol::RawBody::with_top_level($c->req->body, model => $served_model);
+  return undef unless defined $bytes;
+  return { request => sub {
+    my ($ua, $url, $headers) = @_;
+    return $ua->build_tx(POST => $url, $headers, $bytes);
+  } };
+}
+
+# The request of a translated route (the Anthropic and Ollama faces): the translated body, with
+# each tool's JSON schema written as the client spelled it and the tool definition around it in
+# the order the function-calling wire spells it. The body is new, so it cannot go up as the
+# client's bytes -- but the tool definitions are what a node renders into the prompt verbatim,
+# and those are kept (Langertha::Skeid::Protocol::RawBody). @path is where a tool carries its
+# schema on the client's wire.
+#
+# The body is encoded when the request is built, after the caller has set `model` and `stream`
+# on it. undef for a request without tools; a body whose tools no longer line up with the
+# client's goes up encoded as before.
+sub _schema_relay {
+  my ($c, $openai_body, @path) = @_;
+  my $texts = Langertha::Skeid::Protocol::RawBody::tool_schemas($c->req->body, @path) or return undef;
+  return { request => sub {
+    my ($ua, $url, $headers) = @_;
+    my $bytes = Langertha::Skeid::Protocol::RawBody::encode_with_schemas($openai_body, $texts);
+    return $ua->build_tx(POST => $url, $headers, json => $openai_body) unless defined $bytes;
+    delete @{$headers}{ grep { lc($_) eq 'content-type' } keys %$headers };
+    return $ua->build_tx(POST => $url, { %$headers, 'Content-Type' => 'application/json' }, $bytes);
+  } };
 }
 
 # The upstream request of an admitted call: the one JSON POST every translated route makes (ADR
