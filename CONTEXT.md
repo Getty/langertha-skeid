@@ -4,7 +4,8 @@ The vocabulary Skeid is written in. Exists because three strands meet in one pro
 brings a word the others already use for something else: **routing** (which upstream serves
 this request), **metering** (what did it cost and who owes it), and **key resolution** (how a
 secret reaches a request without ever touching disk). Use these words in code, tests, tickets
-and ADRs.
+and ADRs. A fourth strand, the **MCP gateway**, borrows identity, key resolution and metering
+and deliberately none of routing.
 
 ## Language
 
@@ -189,6 +190,41 @@ latency number that matters for a proxy; distinct from **duration**, the whole-r
 that lands in the usage event.
 _Avoid_: latency (unqualified), response time.
 
+### MCP gateway
+
+**MCP server**:
+An upstream that speaks MCP, declared under a name in the config's `mcp.servers` (ADR 0022).
+Not a **Node**: it serves no **Model**, is never routed to, admitted, probed or priced, and has
+no **Health**. A customer reaches it by its name, `/mcp/<name>`, and only when it is assigned.
+_Avoid_: node, backend, tool server, plugin, connector.
+
+**MCP assignment** (`keys:` of a server):
+The **Customer key IDs** an **MCP server** is for, written on the server's entry as key ids or
+**Customer names** and resolved at config load. A third decision beside **Client
+authentication** (whether a key comes in) and **Policy** (which models and nodes it reaches):
+which MCP servers it has. A server that is not assigned to a key does not exist for that key —
+the answer is the `404` of an unknown name, never a **Refusal**.
+_Avoid_: grant (the manifest's word), permission, policy, subscription, access list.
+
+**MCP relay**:
+Passing a request to an assigned **MCP server** and its answer back without reading either:
+method, body bytes and a fixed set of headers up, status, headers and body or event stream
+down. One step past a **Relayed route**, which still reads `model` to route by — here there is
+no field Skeid reads and nothing it routes. No tool lists are merged; one name is one server.
+_Avoid_: translation, aggregation, MCP proxy (says nothing about the assignment), bridge.
+
+**Local MCP server** (`transport: stdio`):
+An entry describing an MCP server that runs on the customer's own machine. Skeid neither
+starts nor reaches it; the entry is a hint in the listing (`command`, `args`, `env`) and has no
+`/mcp/<name>` route.
+_Avoid_: stdio node, managed server, hosted server.
+
+**MCP listing** (`GET /v1/mcp/servers`):
+What one customer key is told about its **MCP assignments**: per server the name, transport,
+description and either the public URL or the local command. Never an upstream URL, a **Key
+reference** or a static header.
+_Avoid_: catalog, registry (that word means the snapshot), discovery document.
+
 ### Metering
 
 **Usage event**:
@@ -246,8 +282,9 @@ needed. `KeyBroker::OpenBao` is the implementation; the interface is what code d
 _Avoid_: vault client, secret manager, key store.
 
 **Key reference** (`api_key_ref`):
-An opaque path that *names* a secret (`secret/skeid/remote/openai`). Config, ticket text and
-log lines may carry a key reference; they may never carry what it resolves to.
+An opaque path that *names* a secret (`secret/skeid/remote/openai`), on a **Node** or an **MCP
+server**. Config, ticket text and log lines may carry a key reference; they may never carry
+what it resolves to.
 _Avoid_: key path, secret name, key id (that word means the caller).
 
 **Customer key ID** (`api_key_id`):
@@ -361,6 +398,15 @@ _Avoid_: hot reload, restart, refresh.
   so a policy failure is a **Refusal**, and running out of permitted capacity stays a 429 —
   falling through to a denied node "because everything else is full" is the failure this
   distinction exists to prevent.
+- An **MCP server** takes from the request path exactly three things: the **Customer key ID**
+  (through **Client authentication** and its own **MCP assignment**), the **Key broker** for
+  its own upstream key, and one **Usage event** per relayed request (`api_format: mcp`, no
+  model, no node). It takes nothing of **Routing**: no **Eligibility**, no **Admission**, no
+  **Inflight**.
+- The client's key is never an **MCP server**'s credential. A node that names no key source
+  forwards the client's `Authorization`; an MCP server that names none is called without one.
+- An **MCP assignment** is checked after **Client authentication** and is independent of
+  **Policy**: a key's models say nothing about its MCP servers, and the other way round.
 - **API format** governs the client edge, **Engine ID** the upstream edge. A request can enter
   as Anthropic and leave as OpenAI; that crossing is **Translation** and it happens in exactly
   one place. A **Relayed route** makes no crossing: it enters and leaves in the same shape —
@@ -397,6 +443,12 @@ _Avoid_: hot reload, restart, refresh.
   the name a node serves. Where both can appear — usage events, reports, log lines — they are
   **requested model** and **served model**. Bare "model" is only safe where no alias layer is
   involved.
+- **"relay"** now covers three things: the **SSE relay** of a chat stream (bytes passed on,
+  read along for usage), a **Relayed route** (a non-chat route of the OpenAI face: routed by
+  `model`, not translated) and the **MCP relay** (nothing read, nothing routed). The first two
+  serve a **Node**; the third never does. MCP is not a **face** either: its events carry
+  `api_format: mcp` because that is what the client spoke, but there is no **Translation** and
+  no manifest endpoint for it.
 - **"registry"** names two things: the Skeid-to-Skeid **Registry snapshot** (`registry:` config,
   `Langertha::Skeid::Registry`, ADR 0017), and — in ADR 0011 and `key_id_for_name` — the
   `names:` section. The bare word means the snapshot; the other is the **Customer name** map.

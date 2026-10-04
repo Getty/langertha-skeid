@@ -138,15 +138,19 @@ the answer depends on who asks.
 - **Sub-paths** exist for an upstream that needs more than one endpoint. `<path>` is appended
   to the configured URL's path segment by segment; dot segments are refused rather than
   normalised, so a key cannot climb out of the path the operator configured.
-- **Answer.** Status and headers as the upstream gave them, but for the framing ones
-  (`Content-Length`, `Transfer-Encoding`, `Content-Encoding`) — the rule every relayed answer
-  follows — plus Skeid's `x-request-id`. The headers go out the moment the upstream's arrive,
+- **Answer.** Status and headers as the upstream gave them, but for the hop-by-hop ones
+  (`Connection`, `Keep-Alive`, `Transfer-Encoding`, …), `Content-Length` and `Content-Encoding`,
+  plus Skeid's `x-request-id`. The headers go out the moment the upstream's arrive,
   before any body byte, and every chunk is written as it is read: an event stream is not
   buffered, and a standing `GET` stream is open for the client before its first event.
 - **One exception to "as the upstream gave it": an upstream `401` becomes `502`.** Towards the
   client `401` means "your Skeid key is not let in", and MCP clients act on it (they start an
   OAuth discovery against the host). An upstream `401` means *Skeid's* credential is wrong — an
   operator fault. It is logged with the server name and answered `502 upstream_error`.
+- **Second exception: a redirect (`3xx`) becomes `502`.** Its `Location` is an upstream URL,
+  which a customer is never shown, and Skeid follows no redirect (the server's key would go
+  along). The log names the target; the operator configures it. The usual case is a server
+  that redirects `/mcp` to `/mcp/`.
 - **No key for the upstream** (a named `api_key_ref` / `api_key_env` yields nothing): `503
   upstream_key_unavailable`, no upstream call, logged with the reference — a node's rule.
 - **Unreachable upstream**: `502 upstream_error`.
@@ -176,6 +180,7 @@ of a key, in the existing schema with no new field:
 `status_code` is the upstream's status and `ok` is `status < 500`, with these cases apart:
 
 - upstream `401` → `502`, `ok = 0`, `error_type: upstream_unauthorized`
+- upstream redirect → `502`, `ok = 0`, `error_type: upstream_redirect`
 - no upstream key → `503`, `ok = 0`, `error_type: upstream_key_unavailable`
 - no answer at all → `502`, `ok = 0`, `error_type: upstream_error`
 - client hung up before or during a plain answer → `499`, `ok = 0`, `error_type: client_abort`
@@ -209,7 +214,7 @@ assigned key as written — they are a message to the customer, so they must not
 ## 8. Tests
 
 `t/72-mcp-gateway.t`, against a fake MCP upstream (a Mojolicious app that answers JSON, an
-event stream it holds open on command, `202`, `401`, and records the headers it received):
+event stream it holds open on command, `202`, `401`, a redirect, and records the headers it received):
 assigned → `200` with body and headers both ways; the stream arrives event by event while the
 upstream still holds it; `Mcp-Session-Id` there and back; the client's `Authorization` never
 arrives upstream and the server's does; unassigned, unknown, `stdio` and dot-segment paths →
@@ -239,5 +244,5 @@ load errors; the usage events.
 7. **Standing streams are cut at `SKEID_UPSTREAM_TIMEOUT`.** The user agent has one time limit
    for all upstream calls. A separate, longer limit for MCP streams would need a second user
    agent.
-8. **The upstream `401` → `502` mapping** is the one place the relay changes an answer. If a
+8. **The upstream `401` → `502` mapping** (with the redirect → `502`) is where the relay changes an answer. If a
    deployment ever wants per-end-user OAuth passed through, this is the line to revisit.
