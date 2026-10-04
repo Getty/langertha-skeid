@@ -14,6 +14,7 @@ use Langertha ();
 use Langertha::Skeid::UsageStore;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
+use Langertha::Skeid::Protocol::MCP;
 use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Rerank;
 use Langertha::Usage;
@@ -270,6 +271,9 @@ L</ENVIRONMENT>, else built in.
 
 =item * C<uploads>: removed from the file, the upload limit is the built-in default again.
 
+=item * C<mcp>: removed from the file, the MCP gateway is off again and its routes are unknown
+paths.
+
 =back
 
 Two exceptions. A section no applied config has declared belongs to whoever set it: nodes added
@@ -418,6 +422,67 @@ see L<Langertha::Skeid::Proxy/Uploads>. Every other route keeps the server's own
 that is not a hash, an unknown key in it, and a C<max_bytes> that is not an integer of at least
 1 -- there is no "unlimited". A changed value holds from the next request.
 
+=head2 mcp
+
+  names:
+    alice: k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b   # `skeid keyid <key>` -- never the key
+  mcp:
+    public_url: https://llm.example.com    # optional: where clients reach Skeid
+    servers:
+      bookrag:                             # the name in /mcp/bookrag
+        url: http://bookrag-mcp.internal:8080/mcp
+        description: Book search over the house library
+        api_key_ref: secret/skeid/mcp/bookrag   # the server's key, through the key broker
+        api_key_env: BOOKRAG_MCP_KEY            # ... or from this variable
+        headers: { X-Tenant: example }          # static headers that are no secret
+        keys: [alice, k_9c8b7a6f5e4de5f60718293a4b5c6d7e8f901a2b]
+      files:
+        transport: stdio                   # a hint: runs on the customer's own machine
+        command: mcp-files
+        args: ["--root", "/srv/data"]
+        env: {}
+        description: Files on your own machine
+        keys: [alice]
+
+The MCP gateway (skeid k103, ADR 0022): MCP servers assigned to customer key ids. A key reaches
+a server assigned to it under C</mcp/E<lt>nameE<gt>> with its own Skeid key, and
+C</v1/mcp/servers> lists what it was assigned; see L<Langertha::Skeid::Proxy/MCP routes>.
+Without the section both routes are unknown paths, as before.
+
+C<public_url> is where clients reach this Skeid -- the base of the URLs in the listing. Without
+it the listing uses the scheme and host of the request, which behind a TLS proxy is C<http://>
+unless the server runs in reverse-proxy mode; an edge deployment sets it.
+
+A server is C<transport: streamable-http> (the default) or C<stdio>:
+
+=over 4
+
+=item * B<streamable-http> is relayed. C<url> is where Skeid reaches it. Its credential is
+named like a node's: C<api_key_ref> through the key broker, else C<api_key_env>, sent upstream as
+C<Authorization: Bearer>; a server that names one and gets no key from it is not called. A
+server that names neither is called without a credential -- never with the client's.
+C<headers> are sent with every request and are for what is no secret: C<Authorization>,
+C<Proxy-Authorization>, C<X-Api-Key> and C<Cookie> are refused there, as are the headers the
+relay itself passes on or that belong to the connection.
+
+=item * B<stdio> is a hint. Such a server runs on the customer's machine; Skeid neither starts
+nor reaches it, and it has no C</mcp/E<lt>nameE<gt>> route. C<command>, C<args> (a list of
+strings) and C<env> (a map of strings) are shown to the assigned key as written, so they are
+no place for a secret.
+
+=back
+
+C<keys> is the assignment: customer key ids from C<skeid keyid> or C<names:> entries, a single
+one without the list, resolved at config load as in L</client_auth> -- a short (pre-ADR 0016) id
+matches the full id it is the prefix of. A server without C<keys> is assigned to nobody and says
+so once. C<description> is free text for the listing.
+
+The load fails on an unknown key in the section or in a server, a key of the other transport, a
+server name that is not letters, digits, C<.>, C<_> and C<-> (starting with a letter or digit, at
+most 64), a C<url> that is not absolute C<http(s)> or carries C<user:password@>, a C<stdio>
+server without C<command>, and a C<keys> entry that is neither a name nor a key id. No message
+repeats a URL, a header value or a C<keys> entry.
+
 =head2 routing
 
   routing:
@@ -489,9 +554,9 @@ L<Langertha::Skeid::UsageStore::DBI/flush_interval_ms> and ADR 0005.
 =head1 ENVIRONMENT
 
 Defaults for the attributes of the same meaning; a value in the config wins. Besides these, the
-config names variables of its own -- C<api_key_env> on a node, C<admin.api_key_env>, a usage
-store's C<password_env>, the registry's C<secret_env> and C<read_key_env> -- so that no secret has
-to be written into it. L<Langertha::Skeid::Proxy/build_app> reads the C<OPENBAO_*> variables,
+config names variables of its own -- C<api_key_env> on a node or an MCP server,
+C<admin.api_key_env>, a usage store's C<password_env>, the registry's C<secret_env> and
+C<read_key_env> -- so that no secret has to be written into it. L<Langertha::Skeid::Proxy/build_app> reads the C<OPENBAO_*> variables,
 C<SKEID_UPSTREAM_POOL> and C<SKEID_UPSTREAM_TIMEOUT>.
 
 =env SKEID_ROUTE_WAIT_TIMEOUT_MS
@@ -680,6 +745,35 @@ lets no key in. Read through L</client_auth_enabled> and L</client_key_allowed>.
 # Key id -> 1, from client_auth.keys (skeid k90). Undef is off -- every caller gets in, as
 # before the section existed -- and is a different thing from {}, which lets nobody in.
 has client_auth_keys => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+=attr mcp_servers
+
+The MCP servers of the config's C<mcp> section, as a hashref of server name to resolved entry,
+built at config load (default undef: the MCP gateway is off). An entry holds C<name>,
+C<transport>, C<description> and C<keys> -- the customer key ids it is assigned to, id to 1 --
+and for a relayed server C<url>, C<api_key_ref>, C<api_key_env> and C<headers>, for a C<stdio>
+one C<command>, C<args> and C<env>. Read through L</mcp_enabled>, L</mcp_server_for_key> and
+L</mcp_servers_for_key>.
+
+=attr mcp_public_url
+
+Where clients reach this Skeid, for the URLs of the MCP listing (config C<mcp.public_url>,
+default undef: the listing takes the URL of the request).
+
+=cut
+
+# Server name -> resolved entry, from mcp.servers (skeid k103, ADR 0022). Undef is off -- both
+# MCP routes are the unknown path they were before the section existed -- and is a different
+# thing from {}, a gateway that is on and has no server.
+has mcp_servers => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+has mcp_public_url => (
   is      => 'rw',
   default => sub { undef },
 );
@@ -1564,6 +1658,7 @@ my @CONFIG_STATE = qw(
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
   admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
+  mcp_servers mcp_public_url
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
 
@@ -1818,6 +1913,16 @@ sub _apply_config {
     push @notices, $self->_load_client_auth($cfg->{client_auth});
   } elsif ($before->{client_auth}) {
     $self->client_auth_keys(undef);
+  }
+
+  # The MCP gateway (skeid k103). After the policies as well: a server's keys: may be names:
+  # names. Removed from the file, the gateway is off again and its routes are unknown paths.
+  if (exists $cfg->{mcp}) {
+    $declared{mcp} = 1;
+    push @notices, $self->_load_mcp($cfg->{mcp});
+  } elsif ($before->{mcp}) {
+    $self->mcp_servers(undef);
+    $self->mcp_public_url(undef);
   }
 
   # The upload limit of the multipart routes (skeid k91). Removed from the file, it is the
@@ -3279,9 +3384,7 @@ sub key_id_for_name {
 }
 
 # The client_auth section (skeid k90), resolved once at config load into a key id set. An entry
-# is a names: name or a key id; anything else fails the load. The message names the entry by
-# its position and never by its value: a value that is neither is most likely a key someone
-# pasted, and a reload error ends up in the log and on /skeid/config (ADR 0003). Returns the
+# is a names: name or a key id; anything else fails the load (see _key_id_set). Returns the
 # notices to log once the config applied.
 sub _load_client_auth {
   my ($self, $section) = @_;
@@ -3295,6 +3398,20 @@ sub _load_client_auth {
   $list = [ $list ] unless ref $list;
   croak 'client_auth.keys must be a list of key ids or names: entries' unless ref($list) eq 'ARRAY';
 
+  my $allowed = $self->_key_id_set($list, 'client_auth.keys');
+  $self->client_auth_keys($allowed);
+  return %$allowed ? () : ('client_auth.keys is empty: no key can use the client routes, every '
+    . 'request on them answers 401');
+}
+
+# A list of customer keys in the config -- client_auth.keys, an MCP server's keys -- resolved
+# into a key id set, id to 1. An entry is a names: name or a key id; anything else fails the
+# load. The message names the entry by its position and never by its value: a value that is
+# neither is most likely a key someone pasted, and a reload error ends up in the log and on
+# /skeid/config (ADR 0003). $label is the list's place in the config, for that message. A short
+# (pre-ADR 0016) id is kept as it is and warned about once; _configured_key_id matches it.
+sub _key_id_set {
+  my ($self, $list, $label) = @_;
   my (%allowed, @legacy);
   my $position = 0;
   for my $entry (@$list) {
@@ -3304,19 +3421,130 @@ sub _load_client_auth {
     my $full = defined($id) && !ref($id) && $id =~ /\Ak_[0-9a-f]{40}\z/;
     unless ($full || _is_legacy_key_id($id)) {
       croak defined($name)
-        ? "client_auth.keys entry $position is the names: entry '$name', which does not map to a "
+        ? "$label entry $position is the names: entry '$name', which does not map to a "
           . 'key id (k_ + 40 hex from `skeid keyid`)'
-        : "client_auth.keys entry $position is neither a names: entry nor a key id (k_ + 40 hex "
+        : "$label entry $position is neither a names: entry nor a key id (k_ + 40 hex "
           . 'from `skeid keyid`); a key itself never goes into the config';
     }
     push @legacy, $id unless $full;
     $allowed{$id} = 1;
   }
   _warn_legacy_key_id($_) for @legacy;
+  return \%allowed;
+}
 
-  $self->client_auth_keys(\%allowed);
-  return %allowed ? () : ('client_auth.keys is empty: no key can use the client routes, every '
-    . 'request on them answers 401');
+# The mcp section (skeid k103, ADR 0022), resolved once at config load into the server table.
+# Strict like client_auth and uploads: a misspelled key, a key of the other transport or a URL
+# that is none fails the load, and the previous config stays in force. No message repeats a
+# value that could be a secret -- a URL, a header value, a keys entry. What the wire allows --
+# the transports, a server name, the headers a server may set -- is Protocol::MCP's to know.
+# Returns the notices to log once the config applied.
+my %MCP_KEYS = map { $_ => 1 } qw( public_url servers );
+my %MCP_SERVER_KEYS = (
+  common  => [qw( transport description keys )],
+  relayed => [qw( url api_key_ref api_key_env headers )],
+  stdio   => [qw( command args env )],
+);
+
+sub _load_mcp {
+  my ($self, $section) = @_;
+  my $mcp = 'Langertha::Skeid::Protocol::MCP';
+  croak 'mcp must be a hash with a servers map' unless ref($section) eq 'HASH';
+  for my $key (sort keys %$section) {
+    croak "mcp: unknown key '$key' (known: " . join(' ', sort keys %MCP_KEYS) . ')'
+      unless $MCP_KEYS{$key};
+  }
+
+  my $public_url;
+  if (defined $section->{public_url}) {
+    my $problem = $mcp->url_problem($section->{public_url});
+    croak "mcp.public_url $problem: it is where clients reach Skeid" if defined $problem;
+    ($public_url = "$section->{public_url}") =~ s{/+\z}{};
+  }
+
+  my $servers = $section->{servers} // {};
+  croak 'mcp.servers must be a hash of server name to server' unless ref($servers) eq 'HASH';
+
+  my (%resolved, @notices);
+  for my $name (sort keys %$servers) {
+    my $problem = $mcp->name_problem($name);
+    croak "mcp.servers: $problem" if defined $problem;
+    my $at    = "mcp.servers.$name";
+    my $entry = $servers->{$name};
+    croak "$at must be a hash" unless ref($entry) eq 'HASH';
+
+    my $transport = $entry->{transport} // $mcp->default_transport;
+    croak "$at: unknown transport (known: " . join(' ', $mcp->transports) . ')'
+      unless $mcp->is_transport($transport);
+    my $relayed = $mcp->is_relayed($transport);
+    my %own     = map { $_ => 1 } @{$MCP_SERVER_KEYS{common}}, @{$MCP_SERVER_KEYS{$relayed ? 'relayed' : 'stdio'}};
+    my %other   = map { $_ => 1 } @{$MCP_SERVER_KEYS{$relayed ? 'stdio' : 'relayed'}};
+    for my $key (sort keys %$entry) {
+      next if $own{$key};
+      croak "$at: '$key' " . ($relayed ? 'belongs to a stdio server' : 'does not belong to a stdio server')
+        if $other{$key};
+      croak "$at: unknown key '$key' (known: " . join(' ', sort keys %own) . ')';
+    }
+
+    my $description = $entry->{description} // '';
+    croak "$at.description must be a string" if ref $description;
+
+    my %server = (name => $name, transport => "$transport", description => "$description");
+    if ($relayed) {
+      croak "$at needs a url: where the MCP server is reached" unless defined $entry->{url};
+      $problem = $mcp->url_problem($entry->{url});
+      croak "$at.url $problem" if defined $problem;
+      $server{url} = "$entry->{url}";
+
+      for my $source (qw( api_key_ref api_key_env )) {
+        next unless defined $entry->{$source};
+        croak "$at.$source must be a non-empty string"
+          if ref($entry->{$source}) || !length($entry->{$source});
+        $server{$source} = "$entry->{$source}";
+      }
+
+      my $headers = $entry->{headers} // {};
+      croak "$at.headers must be a map of header name to value" unless ref($headers) eq 'HASH';
+      for my $header (sort keys %$headers) {
+        croak "$at.headers: a header name must be an HTTP token"
+          unless $header =~ /\A[A-Za-z0-9!#\$%&'*+.^_`|~-]+\z/;
+        $problem = $mcp->config_header_problem($header);
+        croak "$at.headers: '$header' may not be set here: $problem" if defined $problem;
+        my $value = $headers->{$header};
+        croak "$at.headers: the value of '$header' must be a string on one line"
+          if !defined($value) || ref($value) || $value =~ /[\r\n\0]/;
+        $server{headers}{$header} = "$value";
+      }
+      $server{headers} ||= {};
+    } else {
+      croak "$at needs a command: what the customer runs on its own machine"
+        unless defined($entry->{command}) && !ref($entry->{command}) && length($entry->{command});
+      $server{command} = "$entry->{command}";
+
+      my $args = $entry->{args} // [];
+      croak "$at.args must be a list of strings"
+        unless ref($args) eq 'ARRAY' && !grep { !defined($_) || ref($_) } @$args;
+      $server{args} = [ map { "$_" } @$args ];
+
+      my $env = $entry->{env} // {};
+      croak "$at.env must be a map of strings"
+        unless ref($env) eq 'HASH' && !grep { !defined($_) || ref($_) } values %$env;
+      $server{env} = { map { $_ => "$env->{$_}" } keys %$env };
+    }
+
+    my $list = $entry->{keys} // [];
+    $list = [ $list ] unless ref $list;
+    croak "$at.keys must be a list of key ids or names: entries" unless ref($list) eq 'ARRAY';
+    $server{keys} = $self->_key_id_set($list, "$at.keys");
+    push @notices, "$at is assigned to no key: no customer can reach or see it"
+      unless %{$server{keys}};
+
+    $resolved{$name} = \%server;
+  }
+
+  $self->mcp_servers(\%resolved);
+  $self->mcp_public_url($public_url);
+  return @notices;
 }
 
 # The uploads section (skeid k91). Strict like client_auth: a misspelled key or a limit that is
@@ -3364,6 +3592,53 @@ sub client_key_allowed {
   my $allowed = $self->client_auth_keys;
   return 1 unless defined $allowed;
   return defined($self->_configured_key_id($allowed, $api_key_id)) ? 1 : 0;
+}
+
+=method mcp_enabled
+
+  if ($skeid->mcp_enabled) { ... }
+
+Whether the config has an C<mcp> section, so that the MCP routes exist. See L</mcp>.
+
+=cut
+
+sub mcp_enabled { defined $_[0]->mcp_servers ? 1 : 0 }
+
+=method mcp_server_for_key
+
+  my $server = $skeid->mcp_server_for_key('bookrag', $key_id);   # the resolved entry, or undef
+
+The MCP server of that name, if it is assigned to this customer key id -- two hash lookups.
+Undef for an unknown name and for a server assigned to other keys alike: the caller must not be
+able to tell the two apart. A short (pre-ADR 0016) id in a server's C<keys> matches the full id
+it is the prefix of, as in C<client_auth>; C<anonymous> is assigned nothing.
+
+=cut
+
+sub mcp_server_for_key {
+  my ($self, $name, $api_key_id) = @_;
+  my $servers = $self->mcp_servers;
+  return undef unless $servers && defined($name) && length($name);
+  my $server = $servers->{$name} or return undef;
+  return defined($self->_configured_key_id($server->{keys}, $api_key_id)) ? $server : undef;
+}
+
+=method mcp_servers_for_key
+
+  my $servers = $skeid->mcp_servers_for_key($key_id);   # [ $server, ... ], sorted by name
+
+Every MCP server assigned to this customer key id, relayed and C<stdio> ones alike. Empty for a
+key with no assignment and while the gateway is off.
+
+=cut
+
+sub mcp_servers_for_key {
+  my ($self, $api_key_id) = @_;
+  my $servers = $self->mcp_servers || {};
+  return [
+    grep { defined $self->_configured_key_id($_->{keys}, $api_key_id) }
+    map  { $servers->{$_} } sort keys %$servers
+  ];
 }
 
 =method route_plan
