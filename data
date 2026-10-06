@@ -1,0 +1,18 @@
+---
+class: standard
+completed: 2026-10-06T03:31:33Z
+created: 2026-10-04T18:01:49Z
+id: 104
+priority: high
+started: 2026-10-06T03:31:33Z
+status: done
+tags:
+- proxy
+title: 'Forward the client''s request bytes: no re-sorted keys, tool schemas as the
+  client spelled them'
+updated: 2026-10-06T03:31:33Z
+---
+
+The OpenAI face decoded and re-encoded the body, which sorts every object's keys. A node renders tool definitions into the prompt in the order they arrive, so the model got a different prompt than the client wrote; brain (Qwen3.6-35B-A3B-FP8) answered one such prompt with gibberish that the client's own bytes do not produce (hub: docs/citiai-brain-viele-tools-2026-10-04.md). Now: /v1/chat/completions and /v1/embeddings forward the client's bytes with only model replaced; the Anthropic and Ollama faces carry each tool's JSON schema over as the client spelled it. Branch preserve-key-order, t/73-request-bytes.t, ADR 0023.
+
+Rolled out 2026-10-06: image 98541df on both stages of llm.citilan.de (aiedge and edge, citiai-core 5e00d1d). Measured there with the 20-tool request of the finding: 8854 prompt tokens as the client sent it, 8828 before. Suite in the image: 4651 of 4652; the one failure is t/61-upstream-timeout.t under prove -j8 (request and inactivity timeout both 1 s, either may fire first), green three times on its own. main is at 98541df locally, not pushed.
