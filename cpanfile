@@ -12,6 +12,8 @@ requires 'HTTP::Tiny', '0.080';
 requires 'Digest::SHA', '6.02';
 
 recommends 'DBD::Pg';
+# customer_source (ADR 0022): loaded only when the config has the section.
+recommends 'Mojo::Pg';
 
 on test => sub {
   requires 'Test2::Suite';

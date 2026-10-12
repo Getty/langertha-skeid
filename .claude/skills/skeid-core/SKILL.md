@@ -283,7 +283,33 @@ manifest:   { enabled, public_url, … }   # provider manifest, per-key grants i
 registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
 uploads:    { max_bytes: 26214400 }      # body limit of the upload routes (/v1/audio/*); ADR 0021
 client_auth: { keys: [name-or-key-id] }   # only these callers may use the client routes; 401 otherwise (ADR 0020)
+customer_source: { dsn | from_usage_store, user, password_env, relation, refresh_interval_s,
+                   listen, max_stale_s, connect_timeout_s }   # customer key ids from a DB view (ADR 0022)
 ```
+
+**Customer source** (ADR 0022, `Langertha::Skeid::CustomerSource`, fetcher `::Pg` on
+`Mojo::Pg`). The relation gives `key_id, name, policy, models` per active key. The rule
+everything rests on: **the database is never on the request path.** A fetcher on
+`Mojo::IOLoop` (poll every `refresh_interval_s`, `LISTEN` + 250 ms debounce, back-off like
+`_reload_retry_delay`, `connect_timeout_s` bounds each fetch) holds the **source snapshot**; a
+changed digest calls `reload_config` from the fetch callback, an unchanged one does nothing. The
+fingerprint is the file's + `;customer_source:<digest>`, so `maybe_reload_config` still only
+reads the file and merges whatever snapshot is in memory.
+
+- Merge happens first in `_apply_config` (`merge_into`): rows are checked (`check_rows` — full id
+  only, duplicates reject both, policy must exist in the file, models a list of names), the file
+  wins per id (`keys:` directly, via `names:`, short-id prefix → shadowed), the rest become
+  `keys:` entries. Accepted ids are added to `client_auth_keys` **after** `_load_client_auth`
+  and only when the file declares `client_auth` — a union. No row can make a reload die;
+  rejected rows are reported by name or position, never by value (a key may be pasted there).
+- Fail-closed: no snapshot (startup failure) or a stale one (`max_stale_s`) merges nothing.
+  A failing fetch keeps the last good snapshot. A removed section drops it; a changed one
+  restarts the fetcher and keeps the snapshot until the new source answered.
+- `build_app` calls `start_customer_source`; `skeid serve` runs `customer_source_startup_fetch`
+  (bounded, before listening) and `customer_source_release` before prefork forks. Tests inject
+  `customer_source_fetcher => sub { $fake }` — no `Mojo::Pg` needed; `t/72`–`t/75`.
+- Mojo::Pg's connect is synchronous (DBD::Pg has no async connect): bounded by
+  `connect_timeout_s`, once per process per connection lifetime. Queries are async.
 
 The admin key is resolved on every applied config as explicit (`serve --admin-api-key`,
 `build_app(admin_api_key)`, `new(admin_api_key)`, `set_admin_api_key`) > config (first of the

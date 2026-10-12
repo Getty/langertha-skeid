@@ -12,6 +12,7 @@ use Time::HiRes ();
 use YAML::PP;
 use Langertha ();
 use Langertha::Skeid::UsageStore;
+use Langertha::Skeid::CustomerSource;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Ollama;
@@ -270,6 +271,10 @@ L</ENVIRONMENT>, else built in.
 
 =item * C<uploads>: removed from the file, the upload limit is the built-in default again.
 
+=item * C<customer_source>: removed from the file, the fetcher stops and the source's rows are
+dropped at that reload; changed, the fetcher restarts and the rows in force stay until the new
+source answered. See L</customer_source>.
+
 =back
 
 Two exceptions. A section no applied config has declared belongs to whoever set it: nodes added
@@ -405,6 +410,87 @@ C<default_policy>: being let in does not widen what a key's policy routes it to.
 The check takes the same identity routing does: with C<routing.trust_key_id_header> the header's
 key id is what has to be on the list.
 
+=head2 customer_source
+
+  customer_source:
+    backend: postgresql                  # the only backend; the default
+    dsn: dbi:Pg:dbname=console;host=db   # or host / port / dbname, as in usage_store
+    user: skeid_reader
+    password_env: SKEID_CUSTOMER_DB_PASSWORD   # never a password in the file
+    # from_usage_store: true             # instead: the usage store's connection (postgresql);
+    #                                    # user / password_env here override its own
+    relation: skeid.customer_keys        # table or view, schema-qualified allowed
+    refresh_interval_s: 30               # default 30; the poll that always runs
+    listen: skeid_customer_keys          # optional NOTIFY channel: a notification fetches sooner
+    max_stale_s: 0                       # default 0: keep the last good rows during an outage
+    connect_timeout_s: 5                 # default 5; also bounds each query
+
+Customer keys from a database relation (ADR 0022), for when another application -- a
+self-service console -- issues and revokes them. Skeid runs one statement,
+C<SELECT key_id, name, policy, models FROM "skeid"."customer_keys">, and nothing else; the
+owner provides the relation, typically as a view over its own tables, and grants C<SELECT> on it.
+The relation is quoted as written, so its case counts. One row per customer key id:
+
+=over 4
+
+=item * C<key_id> (C<text>, not null): C<k_> + 40 lowercase hex, as C<skeid keyid> prints it.
+
+=item * C<name> (C<text>): a label for warnings and C</skeid/config>. Never an identity, and not
+a C<names:> entry: the file cannot refer to it.
+
+=item * C<policy> (C<text>): a profile of the file's C<policies>; C<NULL> takes C<default_policy>.
+
+=item * C<models> (C<text[]>): replaces the profile's model list, as a C<keys:> override does;
+C<NULL> keeps it, C<'{}'> is no models.
+
+=back
+
+A row present means the key is active: the owner revokes a key by making its row disappear. The
+relation decides only which ids exist and which existing profile each takes -- profiles,
+C<deny_tags>, aliases, nodes and the manifest stay in the file.
+
+The rows of the last successful fetch -- the B<source snapshot> -- are merged into the file's
+config at every reload, before any section is read:
+
+=over 4
+
+=item * Rows are checked first. A row is rejected, and grants nothing, when its C<key_id> is not
+a full key id, when another row has the same C<key_id> (both are rejected), when C<policy> names
+no profile, or when C<models> is not a list of names. A rejected row is reported by its C<name>,
+else by its position, never by its values. No row can fail a reload.
+
+=item * The file wins per key id. A row whose id the file's C<keys:> names -- directly, through
+C<names:>, or by a short id that is its prefix -- is B<shadowed>: its C<policy> and C<models> are
+ignored.
+
+=item * Every accepted row's id joins C<client_auth>, beside the file's own ids: the database
+cannot revoke an id the file lists. It does so only when the file declares C<client_auth> --
+C<client_auth: { keys: [] }> is enough, and its empty list is then not warned about. Without
+C<client_auth> the load warns once: nothing is gated, and a revoked key routes under
+C<default_policy>.
+
+=back
+
+The rows are fetched on the event loop, never on the request path (ADR 0005): every
+C<refresh_interval_s>, and sooner after a C<NOTIFY> on C<listen> (one fetch per 0.25 s, however
+many arrive), each worker for itself. A snapshot whose digest changed triggers a reload from the
+fetch's callback; an unchanged one does nothing. The config's fingerprint is the file's plus the
+snapshot's digest, so a reload a request triggers still only reads the file.
+
+When a fetch fails, the last good snapshot stays in force, the fetch is retried with the reload
+back-off (C<refresh_interval_s> doubling per failure, at most 60 s), and the reason is logged when
+it is new. C<max_stale_s> above 0 drops the source's rows once the last good snapshot is that
+old, until a fetch succeeds. A fetch that has not answered within C<connect_timeout_s> counts as
+failed. C<skeid serve> runs one fetch before it listens; when it fails, Skeid starts degraded and
+fail-closed -- the file's config in force, no source rows. C<GET /skeid/config> shows the source's
+state (L</customer_source_status>), C</health> only C<ok>, C<failed_at> and C<failures>.
+
+The section is checked at load: an unknown key, a C<password> (only C<password_env>), a backend
+other than PostgreSQL, a C<relation> that is not a plain or schema-qualified identifier, a
+C<listen> that is not an identifier, and C<from_usage_store> without a PostgreSQL usage store
+fail it, as does a missing L<Mojo::Pg> -- a C<recommends>, loaded only for a configured source.
+See L<Langertha::Skeid::CustomerSource> and L<Langertha::Skeid::CustomerSource::Pg>.
+
 =head2 uploads
 
   uploads:
@@ -490,8 +576,8 @@ L<Langertha::Skeid::UsageStore::DBI/flush_interval_ms> and ADR 0005.
 
 Defaults for the attributes of the same meaning; a value in the config wins. Besides these, the
 config names variables of its own -- C<api_key_env> on a node, C<admin.api_key_env>, a usage
-store's C<password_env>, the registry's C<secret_env> and C<read_key_env> -- so that no secret has
-to be written into it. L<Langertha::Skeid::Proxy/build_app> reads the C<OPENBAO_*> variables,
+store's and a customer source's C<password_env>, the registry's C<secret_env> and
+C<read_key_env> -- so that no secret has to be written into it. L<Langertha::Skeid::Proxy/build_app> reads the C<OPENBAO_*> variables,
 C<SKEID_UPSTREAM_POOL> and C<SKEID_UPSTREAM_TIMEOUT>.
 
 =env SKEID_ROUTE_WAIT_TIMEOUT_MS
@@ -683,6 +769,34 @@ has client_auth_keys => (
   is      => 'rw',
   default => sub { undef },
 );
+
+=attr customer_source_fetcher
+
+A code ref that builds the fetcher of a C<customer_source> section: called with the Skeid and
+the normalized section, it returns an object with C<fetch($cb)> and optionally C<on_notify($cb)>
+and C<release> (see L<Langertha::Skeid::CustomerSource>). Without it the fetcher is a
+L<Langertha::Skeid::CustomerSource::Pg>, and a config with the section needs L<Mojo::Pg>. Tests
+give a fake here; see L</customer_source>.
+
+=cut
+
+has customer_source_fetcher => (
+  is        => 'ro',
+  predicate => 'has_customer_source_fetcher',
+);
+
+# The customer source (ADR 0022). The normalized section of the config in force and a digest of
+# it (a changed one restarts the fetcher), the loop that fetches, the latest snapshot -- the rows
+# of the last successful fetch, merged into the file's config at every reload -- and what the
+# last merge accepted, rejected and shadowed.
+has _source_cfg        => (is => 'rw');
+has _source_cfg_print  => (is => 'rw');
+has _source_ctl        => (is => 'rw');
+has _source_snapshot   => (is => 'rw');
+has _source_report     => (is => 'rw');
+has _source_started    => (is => 'rw', default => sub { 0 });
+has _source_stale_timer => (is => 'rw');
+has _source_gate_warned => (is => 'rw', default => sub { 0 });
 
 =attr upload_max_bytes
 
@@ -1588,6 +1702,11 @@ sub reload_config {
     die $err;
   }
 
+  # With a customer_source, the config is two inputs: the file and the snapshot merged into it
+  # (ADR 0022). Either changing is a changed config; neither changing is the no-op below.
+  $fingerprint .= ';customer_source:' . $self->_source_digest
+    if exists $cfg->{customer_source};
+
   # Same config as last applied: nothing to do. Rebuilding would replace the node list, which
   # bumps the inventory generation, restarts every capacity probe and forgets health an admin
   # set -- for a config that did not change (skeid #38).
@@ -1611,13 +1730,14 @@ sub reload_config {
   my ($generation, $route_cache, $probe_key_cache, $rr_cursor)
     = ($self->_inventory_generation, $self->_route_cache, $self->_probe_key_cache, $self->_rr_cursor);
 
-  my ($nodes_print, $declared, $notices);
-  if (eval { ($nodes_print, $declared, $notices) = $self->_apply_config($cfg); 1 }) {
+  my ($nodes_print, $declared, $notices, $source);
+  if (eval { ($nodes_print, $declared, $notices, $source) = $self->_apply_config($cfg); 1 }) {
     $self->_forget_departed_nodes;
     $self->_config_fingerprint($fingerprint);
     $self->_nodes_fingerprint($nodes_print);
     $self->_config_declared($declared);
     $self->_clear_reload_failure;
+    push @$notices, $self->_commit_customer_source($source);
     warn 'skeid: ' . $_ . "\n" for @$notices;
     return $cfg;
   }
@@ -1789,6 +1909,23 @@ sub _apply_config {
   my $before = $self->_config_declared;
   my (%declared, @notices);
 
+  # First: the customer source's snapshot is merged into the file's config before any section
+  # reads it (ADR 0022). Rows are checked against the file, the file wins per key id, and no row
+  # can fail the load -- only the section itself can. A stale or absent snapshot merges nothing:
+  # source customers are then refused (fail-closed).
+  my %source;
+  if (exists $cfg->{customer_source}) {
+    $declared{customer_source} = 1;
+    $source{cfg} = Langertha::Skeid::CustomerSource->normalize_config($cfg->{customer_source},
+      usage_store => $cfg->{usage_store});
+    $self->_require_customer_source_driver unless $self->has_customer_source_fetcher;
+    my $snapshot = $self->_source_snapshot;
+    if ($snapshot && !$snapshot->{stale}) {
+      $source{merge} = Langertha::Skeid::CustomerSource->merge_into($cfg, $snapshot->{rows});
+      $cfg = $source{merge}{config};
+    }
+  }
+
   if (exists $cfg->{pricing}) {
     $declared{pricing} = 1;
     # Replaced wholesale, not merged: a model removed from the section loses its price.
@@ -1815,10 +1952,20 @@ sub _apply_config {
   # section would have it (skeid k90).
   if (exists $cfg->{client_auth}) {
     $declared{client_auth} = 1;
-    push @notices, $self->_load_client_auth($cfg->{client_auth});
+    my @said = $self->_load_client_auth($cfg->{client_auth});
+    # With a customer source, an empty list in the file is the expected setup: the ids come
+    # from the source. Every accepted row joins the file's own ids -- a union, so the database
+    # cannot revoke an id the file lists.
+    push @notices, @said unless $source{cfg};
+    if ($source{merge}) {
+      my %allowed = %{$self->client_auth_keys};
+      $allowed{$_} = 1 for @{$source{merge}{allow}};
+      $self->client_auth_keys(\%allowed);
+    }
   } elsif ($before->{client_auth}) {
     $self->client_auth_keys(undef);
   }
+  $source{no_gate} = 1 if $source{cfg} && !exists $cfg->{client_auth};
 
   # The upload limit of the multipart routes (skeid k91). Removed from the file, it is the
   # built-in default again.
@@ -1900,7 +2047,7 @@ sub _apply_config {
       . ' store stays in force until restart (usage events are billing data, ADR 0004)';
   }
 
-  return ($nodes_print, \%declared, \@notices);
+  return ($nodes_print, \%declared, \@notices, \%source);
 }
 
 # The admin API key a config names (skeid k64). It may be named directly or handed over by
@@ -2041,6 +2188,296 @@ sub _reload_on_request {
 }
 
 sub _now { Time::HiRes::time() }
+
+# --- customer source (ADR 0022) -------------------------------------------------------------
+
+# What the snapshot contributes to the config fingerprint.
+sub _source_digest {
+  my ($self) = @_;
+  my $snapshot = $self->_source_snapshot;
+  return 'none' unless $snapshot;
+  return $snapshot->{stale} ? 'stale' : $snapshot->{digest};
+}
+
+sub _require_customer_source_driver {
+  my ($self) = @_;
+  return 1 if eval { require Mojo::Pg; 1 };
+  croak 'customer_source needs Mojo::Pg (and DBD::Pg), which is not installed: install Mojo::Pg, '
+    . 'or remove the customer_source section';
+}
+
+# Runs once a config applied: the source as the config now declares it. A removed section stops
+# the fetcher and drops the snapshot; a changed one restarts the fetcher, the snapshot staying in
+# force until the new source answered. Returns the notices to log.
+sub _commit_customer_source {
+  my ($self, $source) = @_;
+  $source ||= {};
+  my $cfg = $source->{cfg};
+  unless ($cfg) {
+    $self->_stop_source_controller;
+    $self->_source_snapshot(undef);
+    $self->_source_report(undef);
+    $self->_source_cfg(undef);
+    $self->_source_cfg_print(undef);
+    return;
+  }
+
+  my @notices;
+  my $merge = $source->{merge};
+  $self->_source_report($merge ? {
+    accepted => $merge->{accepted},
+    rejected => $merge->{rejected},
+    shadowed => $merge->{shadowed},
+  } : undef);
+  if ($merge) {
+    # By label and reason only: a rejected value may be a key pasted where its id belongs.
+    my @rejected = @{$merge->{rejected}};
+    push @notices, map { "customer_source: $_->{row} rejected: $_->{reason}" } @rejected[0 .. _last(19, @rejected)];
+    push @notices, 'customer_source: ' . (@rejected - 20) . ' more rows rejected' if @rejected > 20;
+    my @shadowed = @{$merge->{shadowed}};
+    push @notices, map { "customer_source: $_ shadowed: the file's keys: entry for that key id wins" }
+      @shadowed[0 .. _last(19, @shadowed)];
+    push @notices, 'customer_source: ' . (@shadowed - 20) . ' more rows shadowed' if @shadowed > 20;
+  }
+  if ($source->{no_gate} && !$self->_source_gate_warned) {
+    $self->_source_gate_warned(1);
+    push @notices, 'customer_source is configured but client_auth is not: source keys are not '
+      . 'gated, and a revoked key is not refused -- it routes under default_policy. Declare '
+      . 'client_auth (client_auth: { keys: [] } is enough)';
+  }
+  $self->_source_gate_warned(0) unless $source->{no_gate};
+
+  my $print = _config_digest($cfg);
+  my $changed = !defined($self->_source_cfg_print) || $print ne $self->_source_cfg_print;
+  $self->_source_cfg($cfg);
+  $self->_source_cfg_print($print);
+  $self->_start_source_controller if $changed && $self->_source_started;
+  return @notices;
+}
+
+sub _last { my ($max, @list) = @_; return $#list < $max ? $#list : $max }
+
+sub _start_source_controller {
+  my ($self) = @_;
+  $self->_stop_source_controller;
+  my $cfg = $self->_source_cfg or return;
+  my $fetcher = $self->has_customer_source_fetcher
+    ? $self->customer_source_fetcher->($self, $cfg)
+    : do {
+      require Langertha::Skeid::CustomerSource::Pg;
+      Langertha::Skeid::CustomerSource::Pg->new(config => $cfg);
+    };
+  my $weak = $self;
+  weaken($weak);
+  my $ctl = Langertha::Skeid::CustomerSource->new(
+    config     => $cfg,
+    fetcher    => $fetcher,
+    on_rows    => sub { $weak->_source_rows($_[0]) if $weak },
+    on_failure => sub { $weak->_source_failed($_[0]) if $weak },
+  );
+  $self->_source_ctl($ctl);
+  $ctl->start;
+  return $ctl;
+}
+
+sub _stop_source_controller {
+  my ($self) = @_;
+  my $ctl = $self->_source_ctl;
+  $ctl->stop if $ctl;
+  $self->_source_ctl(undef);
+  my $timer = $self->_source_stale_timer;
+  Mojo::IOLoop->remove($timer) if defined $timer;
+  $self->_source_stale_timer(undef);
+  return;
+}
+
+# A successful fetch. An unchanged snapshot only renews its age: no reload, no inventory bump, no
+# probe restart. A changed one is merged by a reload -- in-memory work, run here, from the loop,
+# never from a request.
+sub _source_rows {
+  my ($self, $rows) = @_;
+  my $digest = Langertha::Skeid::CustomerSource->snapshot_digest($rows);
+  $self->_arm_source_stale_timer;
+  my $snapshot = $self->_source_snapshot;
+  if ($snapshot && !$snapshot->{stale} && $snapshot->{digest} eq $digest) {
+    $snapshot->{fetched_at} = $self->_now;
+    return;
+  }
+  $self->_source_snapshot({ rows => $rows, digest => $digest, fetched_at => $self->_now, stale => 0 });
+  $self->_reload_for_source;
+  return;
+}
+
+sub _source_failed {
+  my ($self, $err) = @_;
+  $self->_check_source_stale;
+  return;
+}
+
+# max_stale_s: how old the last good snapshot may get while fetches fail. Checked when a fetch
+# fails and when the limit runs out after the last success, whichever is first.
+sub _arm_source_stale_timer {
+  my ($self) = @_;
+  my $timer = $self->_source_stale_timer;
+  Mojo::IOLoop->remove($timer) if defined $timer;
+  $self->_source_stale_timer(undef);
+  my $max = $self->_source_cfg ? $self->_source_cfg->{max_stale_s} : 0;
+  return unless $max > 0;
+  my $weak = $self;
+  weaken($weak);
+  $self->_source_stale_timer(Mojo::IOLoop->timer($max => sub {
+    return unless $weak;
+    $weak->_source_stale_timer(undef);
+    my $ctl = $weak->_source_ctl;
+    $weak->_check_source_stale if $ctl && $ctl->failures;
+  }));
+  return;
+}
+
+sub _check_source_stale {
+  my ($self) = @_;
+  my $cfg = $self->_source_cfg or return;
+  my $max = $cfg->{max_stale_s};
+  return unless $max > 0;
+  my $snapshot = $self->_source_snapshot;
+  return unless $snapshot && !$snapshot->{stale};
+  return if $self->_now - $snapshot->{fetched_at} < $max - 0.001;
+  warn "skeid: customer_source: the last good snapshot is older than max_stale_s (${max}s); its "
+    . "rows are dropped until a fetch succeeds\n";
+  $self->_source_snapshot({ %$snapshot, rows => [], stale => 1 });
+  $self->_reload_for_source;
+  return;
+}
+
+# The reload a new snapshot triggers: the existing all-or-nothing reload_config, with the file
+# read again and the snapshot in memory. It never dies -- it runs from a loop callback -- and a
+# failure is logged when its reason is new, like a reload a request triggers.
+sub _reload_for_source {
+  my ($self) = @_;
+  return if $self->has_config_file && !-f $self->config_file;
+  my $error_before = $self->last_reload_error;
+  return if eval { $self->reload_config; 1 };
+  my $err = $@ || 'config reload failed';
+  if (!defined($error_before) || $error_before ne $err) {
+    (my $msg = $err) =~ s/\s+\z//;
+    warn "skeid: config reload for a new customer_source snapshot failed, keeping the previous "
+      . "config: $msg\n";
+  }
+  return;
+}
+
+=method start_customer_source
+
+  $skeid->start_customer_source;
+
+Starts fetching the config's C<customer_source> on L<Mojo::IOLoop>: the first fetch on the next
+loop turn, then one per C<refresh_interval_s>. A source added, changed or removed by a later
+reload is started, restarted or stopped with it. L<Langertha::Skeid::Proxy/build_app> calls this;
+a Skeid that is not serving (C<skeid usage>) never fetches. Returns true when a source is
+configured.
+
+=cut
+
+sub start_customer_source {
+  my ($self) = @_;
+  return 1 if $self->_source_started && $self->_source_ctl;
+  $self->_source_started(1);
+  return $self->_start_source_controller ? 1 : 0;
+}
+
+=method stop_customer_source
+
+Stops fetching. The snapshot in force stays.
+
+=cut
+
+sub stop_customer_source {
+  my ($self) = @_;
+  $self->_source_started(0);
+  $self->_stop_source_controller;
+  return;
+}
+
+=method customer_source_startup_fetch
+
+  my $ok = $skeid->customer_source_startup_fetch;
+
+Runs one fetch now and waits for it, at most C<connect_timeout_s>, by running the event loop --
+so only before the loop is started: C<skeid serve> calls it before it listens. Returns true when
+the fetch succeeded and its rows are in force. When it fails, Skeid starts degraded and
+fail-closed: the file's config is in force and no source rows are, and the fetch is retried
+with the back-off. Returns false without a started source.
+
+=cut
+
+sub customer_source_startup_fetch {
+  my ($self) = @_;
+  my $ctl = $self->_source_ctl or return 0;
+  my $done = $ctl->completed;
+  $ctl->fetch_now;
+  my $end  = $self->_now + $ctl->config->{connect_timeout_s} + 1;
+  my $tick = Mojo::IOLoop->recurring(0.05 => sub { });
+  Mojo::IOLoop->one_tick while $ctl->completed == $done && $self->_now < $end;
+  Mojo::IOLoop->remove($tick);
+  return ($ctl->completed > $done && !$ctl->failures) ? 1 : 0;
+}
+
+=method customer_source_release
+
+Lets the fetcher close its database connections; the next fetch opens new ones. C<skeid serve>
+calls it before the prefork manager forks, so each worker opens its own.
+
+=cut
+
+sub customer_source_release {
+  my ($self) = @_;
+  my $ctl = $self->_source_ctl;
+  $ctl->release if $ctl;
+  return;
+}
+
+=method customer_source_status
+
+  my $status = $skeid->customer_source_status;   # undef without a customer_source
+  # { ok => 1, relation => 'skeid.customer_keys', last_success_at => '...', failed_at => undef,
+  #   failures => 0, error => undef, stale => 0,
+  #   rows => { accepted => 120, rejected => 1, shadowed => 2 },
+  #   rejected => [ { row => "'acme'", reason => '...' } ], shadowed => [ "'bigcorp'" ] }
+
+The state of the customer source, for C<GET /skeid/config>. C<ok> is true once a fetch
+succeeded and the last one did; C<error> says why not. C<stale> is true while C<max_stale_s> has
+dropped the rows. C<rows> counts what the last merge accepted (shadowed ones included), rejected
+and shadowed; C<rejected> and C<shadowed> list the first 50 by label -- the row's C<name>, else
+its position -- never by value. C</health> carries only C<ok>, C<failed_at> and C<failures>.
+
+=cut
+
+sub customer_source_status {
+  my ($self) = @_;
+  my $cfg = $self->_source_cfg or return undef;
+  my $ctl = $self->_source_ctl;
+  my $status = $ctl ? $ctl->status : {
+    ok => 0, last_success_at => undef, failed_at => undef, failures => 0,
+    error => 'the customer source is not being fetched (not started)',
+  };
+  my $report   = $self->_source_report || { accepted => 0, rejected => [], shadowed => [] };
+  my @rejected = @{$report->{rejected}};
+  my @shadowed = @{$report->{shadowed}};
+  my $snapshot = $self->_source_snapshot;
+  return {
+    %$status,
+    relation => $cfg->{relation},
+    listen   => $cfg->{listen},
+    stale    => ($snapshot && $snapshot->{stale}) ? 1 : 0,
+    rows     => {
+      accepted => 0 + $report->{accepted},
+      rejected => scalar(@rejected),
+      shadowed => scalar(@shadowed),
+    },
+    rejected => [ map { +{ %$_ } } @rejected[0 .. _last(49, @rejected)] ],
+    shadowed => [ @shadowed[0 .. _last(49, @shadowed)] ],
+  };
+}
 
 # The client-facing faces Skeid serves, as manifest endpoints. Each face's spec -- dialect,
 # path under public_url, and the capability flags its translator actually carries upstream --
@@ -4175,7 +4612,9 @@ sub call_function {
 }
 
 sub DEMOLISH {
-  my ($self) = @_;
+  my ($self, $global) = @_;
+  # The customer source's timers hold only weak references; this takes them off the loop.
+  $self->_stop_source_controller unless $global;
   $self->_disconnect_usage_store;
 }
 

@@ -78,6 +78,15 @@ Revision history for Langertha-Skeid
       tool_calls and their tool messages, so the prompt prefix stays stable
       for prefix caching. Requests without such a message are translated as
       before.
+    - customer_source: reads customer key ids (key_id, name, policy, models)
+      from a PostgreSQL table or view through Mojo::Pg (new recommends). The
+      rows are fetched in the background every refresh_interval_s and sooner
+      on LISTEN/NOTIFY, and merged into the file's config at reload. The ids
+      join client_auth; the file wins per key id. Bad rows are rejected and
+      reported by name or position only, never by content. When the database
+      is unreachable the last good set is kept (max_stale_s bounds how long);
+      a failed fetch at startup is degraded and the start fails closed.
+      Status is on /skeid/config and /health (ADR 0022).
 
 0.003     2026-10-01 21:30:07Z
 

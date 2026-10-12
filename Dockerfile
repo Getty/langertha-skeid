@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/skeid
 
 COPY . .
-# requires,recommends: DBI, DBD::Pg and DBD::SQLite are what the cpanfile recommends, at the
-# versions it names. chmod: the runtime user is not the owner, and a checkout made under a
+# requires,recommends: DBI, DBD::Pg, DBD::SQLite and Mojo::Pg (customer_source, ADR 0022) are
+# what the cpanfile recommends, at the versions it names. chmod: the runtime user is not the owner, and a checkout made under a
 # tight umask would otherwise be unreadable to it. Cpanel::JSON::XS is a recommends;
 # the -M line fails the build should it be missing, whatever cpm did with it. Without it the stream
 # relay decodes every SSE frame in pure Perl and loses 43 % throughput (ADR 0019).
@@ -53,7 +53,7 @@ COPY --from=build /opt/skeid /opt/skeid
 WORKDIR /opt/skeid
 
 # Fails the build when a shared library an XS module needs is missing from this stage.
-RUN perl -MDBI -MDBD::Pg -MDBD::SQLite -MIO::Socket::SSL -MCpanel::JSON::XS -e 1
+RUN perl -MDBI -MDBD::Pg -MDBD::SQLite -MIO::Socket::SSL -MCpanel::JSON::XS -MMojo::Pg -e 1
 
 USER 10001:10001
 

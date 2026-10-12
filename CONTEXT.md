@@ -272,6 +272,23 @@ metered; without it Skeid identifies callers but lets every key in. It decides *
 comes in, never *what* it reaches — that stays the **Policy**.
 _Avoid_: login, access control, key check, refusal (that word means the policy's 403).
 
+**Customer source** (`customer_source:`):
+A database relation another application owns — typically a view — that lists active
+**Customer key IDs**, one row each, with an optional label, **Policy** profile name and model
+list (ADR 0022). Skeid fetches it in the background, never on the request path, and merges it
+into the file's config at reload: its ids join **Client authentication**, its profiles must
+exist in the file, and the file wins for any id it names. A row present means the key is active;
+revoking is removing the row.
+_Avoid_: customer database, key store, key sync.
+
+**Source snapshot**:
+The rows of the last successful fetch of the **Customer source**, held in memory per process.
+Every **Config reload** merges it; a snapshot whose digest changed triggers one, an unchanged
+one does nothing. It stays in force while fetches fail (or until `max_stale_s`), and is dropped
+when the section leaves the file. Before the first successful fetch there is none, and no
+source key is let in (fail-closed).
+_Avoid_: cache, customer list.
+
 **Provider manifest**:
 The `/.well-known/langertha.json` document telling one customer key which endpoints, faces and
 models it may use (ADR 0015). Opt-in per key (`keys: <id>: {manifest: {models: [...]}}`),
@@ -325,7 +342,9 @@ The YAML config (or a `config_loader`) is re-read on function dispatch when its 
 or the loader is due; an unchanged result is a no-op. A reload is all or nothing: a failing one
 keeps the previous config in force and is retried with a back-off. A successful one leaves the
 running config equal to the file — a section removed from it is cleared — except that a
-removed usage store stays in force until restart (ADR 0004). Node inventory is live
+removed usage store stays in force until restart (ADR 0004). With a **Customer source** the
+config is the file plus the **Source snapshot**, and a new snapshot triggers a reload from the
+fetcher's callback. Node inventory is live
 state; the file is one of its sources, the admin API is the other — and a changed `nodes:`
 section replaces whatever the admin API pushed.
 _Avoid_: hot reload, restart, refresh.

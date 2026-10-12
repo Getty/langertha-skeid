@@ -121,6 +121,7 @@ OpenBao in dev mode.
 | `SKEID_ADMIN_API_KEY` | control plane | bearer token for `/skeid/*` |
 | `SKEID_USAGE_DB` | control plane | sqlite path, used only when the config has no `usage_store` |
 | `SKEID_USAGE_DB_PASSWORD` | example stack | what its `usage_store.password_env` names |
+| `SKEID_CUSTOMER_DB_PASSWORD` | example stack | what its (commented) `customer_source.password_env` names: the read-only role of the customer view |
 | `SKEID_ROUTE_WAIT_TIMEOUT_MS` / `SKEID_ROUTE_WAIT_POLL_MS` | routing | saturation wait defaults |
 | `SKEID_FRONTEND_COUNT` | routing | Skeid hosts sharing the nodes (ADR 0012), default 1 |
 | `SKEID_CAPACITY_MAX_AGE_MS` | admission | capacity reading lifetime, default 5000 |
@@ -130,8 +131,19 @@ OpenBao in dev mode.
 | `SKEID_UPSTREAM_TIMEOUT` | proxy | seconds an upstream request may take and be silent for (default 300); the client connection of a proxied request gets the same on top of the server's inactivity timeout |
 
 Secrets the config needs are named, never written: a node's `api_key_env`,
-`admin.api_key_env`, a usage store's `password_env`, and the registry's `secret_env` /
-`read_key_env`.
+`admin.api_key_env`, a usage store's and a customer source's `password_env`, and the
+registry's `secret_env` / `read_key_env`. `customer_source` refuses a `password:` outright.
+
+**Customer source in deployment** (ADR 0022). The application that owns customer keys provides
+a relation (a view, typically filtered on `revoked_at IS NULL`) and grants `SELECT` on it to a
+role of its own — recommended even with `from_usage_store: true`, since the usage store's role
+writes and migrates. Each worker holds one connection, two with `listen` (LISTEN/NOTIFY): the
+owner's `max_connections` must allow `workers × frontends × 2`. Connections are opened in the
+worker; `skeid serve` closes the startup fetch's connection before prefork forks. Mojo::Pg is a
+`recommends` the image installs (the runtime `-MMojo::Pg` check fails the build otherwise). A
+database outage at start is a degraded, fail-closed start, not a failed one; during a run the
+last good keys stay (`max_stale_s: 0`) or expire after `max_stale_s`. The manual check against
+the stack's PostgreSQL is in `examples/service/skeid.yaml` next to the commented section.
 
 **Precedence:** a value in the config wins over its ENV default. The admin key is resolved on
 every reload as `serve --admin-api-key` > the config's key (any of its four spellings; set empty

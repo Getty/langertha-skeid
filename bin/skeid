@@ -70,6 +70,24 @@ print "Workers: $workers\n" if $workers > 1;
 # up queueing.
 warn "WARNING: $_\n" for @{ $app->skeid->worker_share_warnings };
 
+# Customer keys from a database relation (ADR 0022): one bounded fetch before listening, so the
+# first request already sees the source's customers. A failed fetch does not stop the start --
+# that would take down every customer the file declares too: Skeid starts degraded and
+# fail-closed, the file's config in force and no source rows, and keeps retrying. Before the
+# prefork manager forks, the connection this fetch opened is closed: each worker opens its own.
+if (my $source = $app->skeid->customer_source_status) {
+  print "Customer source: $source->{relation}\n";
+  if ($app->skeid->customer_source_startup_fetch) {
+    my $rows = $app->skeid->customer_source_status->{rows};
+    print "Customer source: $rows->{accepted} accepted, $rows->{rejected} rejected, "
+      . "$rows->{shadowed} shadowed\n";
+  } else {
+    warn "WARNING: customer_source: the first fetch failed; starting degraded and fail-closed "
+      . "(no source customer is let in until a fetch succeeds)\n";
+  }
+  $app->skeid->customer_source_release if $workers > 1;
+}
+
 if ($workers > 1) {
   my $prefork = Mojo::Server::Prefork->new(
     app     => $app,
