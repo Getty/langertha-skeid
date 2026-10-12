@@ -1,6 +1,6 @@
 # ADR 0022 — Customer keys can come from a database view, fetched in the background and merged at reload
 
-- Status: proposed (skeid k108) — design only, nothing implemented
+- Status: accepted (skeid k108)
 - Date: 2026-10-12
 - Tags: config, auth, identity, policy, postgresql, keys, async
 
@@ -276,20 +276,22 @@ A check against a real PostgreSQL (view, grant, `NOTIFY` trigger) belongs in the
 - Each worker holds one more database connection, two with `listen`.
 - `CONTEXT.md` gains **Customer source** and **Source snapshot** when this is accepted. The
   `skeid-core` and `skeid-service-stack` skills gain the section and the deployment notes then.
+- **Known gap: the connect blocks.** DBD::Pg has no asynchronous connect, so opening the
+  fetcher's connection blocks the worker's loop for up to `connect_timeout_s`. That happens once
+  per process while the connection lives, and once per retry while the database is unreachable.
+  Queries are async. Closing the gap (a TCP pre-check, or the connect in a subprocess) is a
+  follow-up card.
 
-## Open questions
+## Resolved questions
 
-1. **Async driver.** `Mojo::Pg` as a new `recommends` vs. hand-rolled DBD::Pg async with a
-   reactor watcher. `Mojo::Pg` is proposed because it brings reconnecting pubsub.
-2. **Startup when the database is down.** Degraded fail-closed start (proposed) vs. refusing to
-   start. Should there be a `required_at_start` switch?
-3. **`max_stale_s` default.** 0 (availability, proposed) vs. a finite default (revocation holds
-   during outages).
-4. **Should rows be able to carry `deny_tags` or a manifest?** Proposed no: residency stays in
-   the file.
-5. **Is `name` useful enough?** It is display-only. It could be dropped from the contract, or
-   later carried into usage reports.
-6. **Should a database name be referenceable from the file** (key rotation without touching the
-   file, ADR 0011)? Proposed no, because of offline checkability.
-7. **Is a real-PostgreSQL check wanted** beyond the manual compose procedure, for example an
-   env-gated `xt/` test? The house rules currently say no.
+Answered by the maintainer when the ADR was accepted:
+
+1. **Async driver:** `Mojo::Pg`, as a new `recommends` (see 8.).
+2. **Startup when the database is down:** degraded, fail-closed start (see 5.). There is no
+   `required_at_start` switch for now.
+3. **`max_stale_s` default:** 0, availability over revocation during an outage (see 5.).
+4. **`deny_tags` or a manifest per row:** no. Residency and the manifest stay in the file.
+5. **`name`:** stays in the contract, display-only.
+6. **Database names referenceable from the file:** no, the file stays checkable offline.
+7. **Real-PostgreSQL test:** no `xt/` test. The manual procedure in the `examples/service`
+   compose stack stays the only check against a real database.
