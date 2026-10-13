@@ -1,4 +1,4 @@
-# ADR 0023 — Usage events spool to a local directory while the database is down, and connects back off
+# ADR 0027 — Usage events spool to a local directory while the database is down, and connects back off
 
 - Status: accepted (skeid k110)
 - Date: 2026-10-13

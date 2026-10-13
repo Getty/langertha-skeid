@@ -186,6 +186,30 @@ Revision history for Langertha-Skeid
       longer forwarded to the node on any route. A node answering it with
       100 Continue could leave a streamed chat answer empty while the usage
       event said ok.
+    - customer_source: reads customer key ids (key_id, name, policy, models)
+      from a PostgreSQL table or view through Mojo::Pg (new recommends). The
+      rows are fetched in the background every refresh_interval_s and sooner
+      on LISTEN/NOTIFY, and merged into the file's config at reload. The ids
+      join client_auth; the file wins per key id. Bad rows are rejected and
+      reported by name or position only, never by content. When the database
+      is unreachable the last good set is kept (max_stale_s bounds how long);
+      a failed fetch at startup is degraded and the start fails closed.
+      Status is on /skeid/config and /health (ADR 0022).
+    - usage_store: { spool_dir: DIR } (sqlite and postgresql; off by default)
+      keeps the usage events the database cannot take while it is
+      unreachable: they are appended to a JSON Lines file in DIR (fsync'd,
+      one file per process, the event's columns only -- key ids, never a key
+      or the database password) instead of being reported lost, and replayed
+      after the next successful write and at start, 500 per batch, without a
+      second row for an event already in the table (request_id and
+      created_at). A store with a spool also starts while the database is
+      down and migrates on its first connect. An event the database refuses
+      is still reported lost (ADR 0027).
+    - A failed connect to the usage database is no longer repeated for every
+      event or flush: the next attempt waits 1s, doubling up to 60s, and
+      writes in between fail (or spool) at once without touching the network.
+    - The usage schema gains a non-unique index on usage_events(request_id),
+      created on start with auto_migrate.
 
 0.003     2026-10-01 21:30:07Z
 
