@@ -560,7 +560,9 @@ The provider manifest: C<enabled>, C<public_url>, C<provider_id> (default C<skei
     # postgresql: dsn, or host (127.0.0.1) / port (5432) / dbname or database (skeid);
     #             user, password or password_env, schema_file, auto_migrate (default on)
     # sqlite and postgresql: flush_interval_ms (default 0) -- above 0, queue events and
-    #             write them in one transaction per interval (write-behind)
+    #             write them in one transaction per interval (write-behind);
+    #             spool_dir (default off) -- a local directory, one per instance, that keeps
+    #             the events the database cannot take while it is down and replays them
 
 Where usage events go; see L<Langertha::Skeid::UsageStore/normalize_config> for the inference and
 the defaults. C<usage_db_path>, a top-level key, is the older spelling of a sqlite store and is
@@ -571,6 +573,13 @@ C<flush_interval_ms> moves a database write off the request path: the request is
 once and the queued events are written together once per interval. Queued events are held in
 memory until then; a process that is killed rather than stopped loses them. See
 L<Langertha::Skeid::UsageStore::DBI/flush_interval_ms> and ADR 0005.
+
+A failed connect to the usage database is not repeated per event: the next attempt waits for a
+backoff deadline (1 second, doubling up to 60). C<spool_dir> keeps the events of an outage: they
+are appended to a JSON Lines file in that directory -- key ids, never a key or the database
+password -- instead of being reported lost, and written once the database is back, without a second row for an event already in the
+table. With it, Skeid also starts while the database is down. See
+L<Langertha::Skeid::UsageStore::DBI/spool_dir> and ADR 0023.
 
 =head1 ENVIRONMENT
 
@@ -944,7 +953,8 @@ has query_usage_report => (
   $skeid->on_usage_lost(sub { my ($skeid, $event, $error) = @_; ... });
 
 Optional code ref (C<has_on_usage_lost> is its predicate), called for every usage event a
-write-behind store (C<usage_store.flush_interval_ms>) queued and then could not write. The
+write-behind store (C<usage_store.flush_interval_ms>) queued and then could not write, or a
+store's spool (C<usage_store.spool_dir>) could neither keep nor replay. The
 request was answered before the write was tried, so this is the only place that failure can be
 said. L<Langertha::Skeid::Proxy/build_app> sets it to the proxy's C<usage event lost> log line;
 without it Skeid C<warn>s. A failure of a synchronous write is the caller's to report, from the
@@ -2780,7 +2790,8 @@ sub _configure_usage_store {
     && (($old->{password} // '') eq ($normalized->{password} // ''))
     && (($old->{schema_file} // '') eq ($normalized->{schema_file} // ''))
     && ((($old->{auto_migrate} // 1) ? 1 : 0) == (($normalized->{auto_migrate} // 1) ? 1 : 0))
-    && (($old->{flush_interval_ms} // 0) == ($normalized->{flush_interval_ms} // 0));
+    && (($old->{flush_interval_ms} // 0) == ($normalized->{flush_interval_ms} // 0))
+    && (($old->{spool_dir} // '') eq ($normalized->{spool_dir} // ''));
 
   # Rebuild when the config changed, and also when there simply is no store object yet:
   # BUILD hands us the caller's raw config as $old, which can compare equal to its own
