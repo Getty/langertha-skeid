@@ -1841,8 +1841,10 @@ sub _proxy_openai_stream {
     my $translated = '';
     while ($pending =~ s/\A([^\n]*)\n//) {
       my $line = $1;
-      next unless $line =~ /^data: (.+?)\s*$/;
+      # SSE makes the space after the colon optional: `data:{...}` is as valid as `data: {...}`.
+      next unless $line =~ /^data:\s?(.*?)\s*$/;
       my $payload = $1;
+      next unless length $payload;
 
       # OpenAI closes with a literal [DONE] sentinel, which is not JSON and has no equivalent
       # in either target format -- the translated stream ends with its own closing events.

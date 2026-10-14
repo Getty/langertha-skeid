@@ -90,6 +90,34 @@ Revision history for Langertha-Skeid
       tool_calls and their tool messages, so the prompt prefix stays stable
       for prefix caching. Requests without such a message are translated as
       before.
+    - MCP gateway: an optional mcp: section assigns MCP servers to customer key
+      ids (servers: { name: { url, description, api_key_ref, api_key_env,
+      headers, keys: [...] } }). POST, GET and DELETE /mcp/<name>, and paths
+      below it, are relayed to the server's url for a key the server is
+      assigned to: the body as it came, Content-Type, Accept, Last-Event-ID
+      and the Mcp-* headers up; status, headers and body down, an event stream
+      unbuffered and opened as soon as the server's headers arrive. Nothing of
+      MCP is read and no tool lists are merged (ADR 0022). The client's
+      Authorization never goes upstream; the server gets its own key as
+      Authorization: Bearer from the key broker or a variable, like a node,
+      and is not called when a named key source yields none (503). A name
+      that is unknown, assigned to another key, a stdio entry or followed by a
+      path with a .. segment is one and the same 404. A server's 401 and a
+      redirect from it are answered 502 and logged. No key is 401; with
+      client_auth its list applies first.
+    - GET /v1/mcp/servers lists the MCP servers assigned to the presented key:
+      name, transport, description and the public url (mcp.public_url, else
+      the request's) of a relayed server, command, args and env of a
+      transport: stdio entry, which is a hint for a server on the customer's
+      machine and is never proxied. Upstream URLs, key references and static
+      headers are not shown.
+    - Each relayed MCP request writes a usage event with api_format mcp and
+      endpoint /mcp/<name>: customer key id, status, duration, the server's
+      url as route_url; no model, tokens or cost. No store schema change.
+      Without the mcp: section both routes are unknown paths, as before.
+    - A stream relay now meters and translates upstreams that write
+      `data:{...}` without a space; before, such a stream was billed as zero
+      tokens and answered empty on the Anthropic and Ollama faces.
 
 0.003     2026-10-01 21:30:07Z
 
