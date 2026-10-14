@@ -1285,16 +1285,21 @@ sub add_node {
   # answers every request with an error (skeid k92).
   my $rerank_format = Langertha::Skeid::Protocol::Rerank->normalize_format($node{rerank_format});
 
+  # Every check that can croak runs before the removal: a bad re-add must leave the working
+  # node in the inventory (skeid k98).
+  my $engine = $self->normalize_engine_id((defined($node{engine}) && length($node{engine})) ? $node{engine} : 'OpenAIBase');
+  my $tags   = $self->normalize_tags($node{tags});
+
   $self->remove_node($id);
   push @{$self->nodes}, {
     id          => $id,
     url         => $url,
     model       => ($node{model} // ''),
-    engine      => $self->normalize_engine_id((defined($node{engine}) && length($node{engine})) ? $node{engine} : 'OpenAIBase'),
+    engine      => $engine,
     weight      => (defined $node{weight} ? 0 + $node{weight} : 1),
     max_conns   => (defined $node{max_conns} ? 0 + $node{max_conns} : 0),
     healthy     => (exists $node{healthy} ? ($node{healthy} ? 1 : 0) : 1),
-    tags        => $self->normalize_tags($node{tags}),
+    tags        => $tags,
     metadata    => (ref($node{metadata}) eq 'HASH' ? $node{metadata} : {}),
     (defined($node{api_key_env}) && length($node{api_key_env})
       ? (api_key_env => "$node{api_key_env}")

@@ -14,6 +14,9 @@ Revision history for Langertha-Skeid
       tool definition spelled in wire order (ADR 0023).
     - A body that names model twice has both replaced by the served model, so
       no node reads a model the request was not routed for.
+    - add_node validates a node's engine before removing the node it
+      replaces, so a re-add with an unknown engine (POST /skeid/nodes,
+      nodes.add) no longer drops the working node from the inventory.
     - POST /v1/audio/transcriptions and /v1/audio/translations on the OpenAI
       face, for Whisper nodes (vLLM, speaches). The multipart form is routed by
       its model field like a chat request (aliases, tiers, key policy,
