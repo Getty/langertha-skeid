@@ -1017,14 +1017,8 @@ sub _handle_openai_audio {
       # headers and an asset, and an upload above 256 KiB is an asset on disk, so the file is
       # streamed from there and never copied into memory. The client's Content-Type travels in
       # the forwarded headers and its boundary is the one the body is written with.
-      #
-      # The client's `Expect: 100-continue` (curl sends one with every upload above 1 MiB) is
-      # not forwarded: the body is in hand, so nothing is expected of the node any more, and a
-      # node that answered the header with its `100 Continue` would have the user agent start
-      # a fresh response object -- one the stream relay is not listening on.
       request => sub {
         my ($ua, $url, $headers) = @_;
-        delete @{$headers}{ grep { lc($_) eq 'expect' } keys %$headers };
         return $ua->build_tx(POST => $url, $headers,
           multipart => $audio->upstream_parts($content, \%replace));
       },
@@ -2186,6 +2180,10 @@ sub _forward_headers {
     my $lc = lc($name);
     next if $HOP_BY_HOP{$lc};
     next if $lc eq 'host' || $lc eq 'content-length' || $lc eq 'accept-encoding';
+    # The body is in hand, so nothing is expected of the node. A node that answered `Expect:
+    # 100-continue` with its `100 Continue` would have the user agent start a fresh response
+    # object, one the stream relay is not listening on (skeid k96).
+    next if $lc eq 'expect';
     $fwd_headers{$name} = $c->req->headers->header($name);
   }
   return %fwd_headers;

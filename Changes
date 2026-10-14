@@ -118,6 +118,10 @@ Revision history for Langertha-Skeid
     - A stream relay now meters and translates upstreams that write
       `data:{...}` without a space; before, such a stream was billed as zero
       tokens and answered empty on the Anthropic and Ollama faces.
+    - Fix: a client's Expect: 100-continue (curl sends it above 1 MiB) is no
+      longer forwarded to the node on any route. A node answering it with
+      100 Continue could leave a streamed chat answer empty while the usage
+      event said ok.
 
 0.003     2026-10-01 21:30:07Z
 
