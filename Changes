@@ -14,6 +14,13 @@ Revision history for Langertha-Skeid
       tool definition spelled in wire order (ADR 0023).
     - A body that names model twice has both replaced by the served model, so
       no node reads a model the request was not routed for.
+    - The usage report lists by_key and by_model rows of equal cost in a
+      stable order (key id resp. model name, ascending) instead of Perl hash
+      order; the sqlite/postgresql ORDER BY gained the same final key.
+    - A node's hop-by-hop response headers (Connection, Keep-Alive, ...) are
+      no longer relayed to the client on the JSON and stream routes; a node's
+      `Connection: close` made Skeid drop the customer's keep-alive
+      connection. One filter now serves the JSON, stream and MCP relays.
     - add_node validates a node's engine before removing the node it
       replaces, so a re-add with an unknown engine (POST /skeid/nodes,
       nodes.add) no longer drops the working node from the inventory.

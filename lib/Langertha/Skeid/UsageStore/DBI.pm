@@ -616,7 +616,7 @@ sub _report {
      FROM usage_events
      $where_sql
      GROUP BY api_key_id
-     ORDER BY total_cost_usd DESC, requests DESC",
+     ORDER BY total_cost_usd DESC, requests DESC, api_key_id ASC",
     { Slice => {} },
     @bind,
   ) || [];
@@ -632,7 +632,7 @@ sub _report {
      FROM usage_events
      $where_sql
      GROUP BY model
-     ORDER BY total_cost_usd DESC, requests DESC",
+     ORDER BY total_cost_usd DESC, requests DESC, model ASC",
     { Slice => {} },
     @bind,
   ) || [];

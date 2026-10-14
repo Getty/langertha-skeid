@@ -304,10 +304,10 @@ sub report {
     totals  => \%totals,
     by_key  => [ map {
       +{ api_key_id => $_, requests => $by_key{$_}{requests}, total_tokens => $by_key{$_}{total_tokens}, audio_seconds => $by_key{$_}{audio_seconds}, documents => $by_key{$_}{documents}, total_cost_usd => $by_key{$_}{total_cost_usd} }
-    } sort { ($by_key{$b}{total_cost_usd} || 0) <=> ($by_key{$a}{total_cost_usd} || 0) } keys %by_key ],
+    } sort { ($by_key{$b}{total_cost_usd} || 0) <=> ($by_key{$a}{total_cost_usd} || 0) or $a cmp $b } keys %by_key ],
     by_model => [ map {
       +{ model => $_, requests => $by_model{$_}{requests}, total_tokens => $by_model{$_}{total_tokens}, audio_seconds => $by_model{$_}{audio_seconds}, documents => $by_model{$_}{documents}, total_cost_usd => $by_model{$_}{total_cost_usd} }
-    } sort { ($by_model{$b}{total_cost_usd} || 0) <=> ($by_model{$a}{total_cost_usd} || 0) } keys %by_model ],
+    } sort { ($by_model{$b}{total_cost_usd} || 0) <=> ($by_model{$a}{total_cost_usd} || 0) or $a cmp $b } keys %by_model ],
     recent  => [ map {
       +{
         id => ($_->{id} // ''), created_at => ($_->{created_at} // ''), api_format => ($_->{api_format} // ''),
