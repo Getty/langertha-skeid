@@ -1919,7 +1919,7 @@ sub _proxy_openai_stream {
       $c->res->code($status);
       for my $name (@{$tx->res->headers->names}) {
         my $lc = lc($name);
-        next if $lc eq 'content-length' || $lc eq 'transfer-encoding' || $lc eq 'content-encoding';
+        next if _skip_response_header($lc);
         # A translated stream is not the upstream's media type any more. Relaying
         # text/event-stream to an Ollama client tells it to parse something it does not speak.
         next if $stream && $lc eq 'content-type';
@@ -2250,7 +2250,7 @@ sub _render_upstream_response {
   $c->res->code($res->code);
   for my $name (@{$res->headers->names}) {
     my $lc = lc($name);
-    next if $lc eq 'content-length' || $lc eq 'transfer-encoding' || $lc eq 'content-encoding';
+    next if _skip_response_header($lc);
     $c->res->headers->header($name => $res->headers->header($name));
   }
   $c->res->headers->header('x-skeid-node' => $node_id);
@@ -2274,6 +2274,15 @@ my %HOP_BY_HOP = map { $_ => 1 } qw(
   transfer-encoding
   upgrade
 );
+
+# An upstream response header Skeid does not relay to the client: hop-by-hop headers describe
+# the node's connection to Skeid, not the client's (a relayed `Connection: close` makes Skeid
+# drop the customer's keep-alive connection), and the body is re-framed and never re-encoded
+# here. One filter for the JSON, stream and MCP relays (skeid k107). `$lc` is the lowercased name.
+sub _skip_response_header {
+  my ($lc) = @_;
+  return $HOP_BY_HOP{$lc} || $lc eq 'content-length' || $lc eq 'content-encoding' ? 1 : 0;
+}
 
 sub _forward_headers {
   my ($c) = @_;
@@ -2630,7 +2639,7 @@ sub _relay_mcp {
     $c->res->code($status);
     for my $name (@{$res->headers->names}) {
       my $lc = lc($name);
-      next if $HOP_BY_HOP{$lc} || $lc eq 'content-length' || $lc eq 'content-encoding';
+      next if _skip_response_header($lc);
       $c->res->headers->header($name => $res->headers->header($name));
     }
     $c->res->headers->header('x-request-id' => $request_id);
