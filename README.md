@@ -416,6 +416,54 @@ client_auth:
   nobody in.
 - With `routing.trust_key_id_header` the header's id is what has to be on the list.
 
+### Customer keys from a database view
+
+When another application -- a self-service console -- issues and revokes customer keys, Skeid
+can read them from a relation that application owns, instead of the file
+([ADR 0026](docs/adr/0026-customer-keys-can-come-from-a-database-view.md)). It needs
+`DBD::Pg` (a `recommends`; the Docker image has it). The connect and the query run in a child
+process, so a database that does not answer never blocks the event loop.
+
+```yaml
+client_auth:
+  keys: []                               # the source's ids join this list
+customer_source:
+  dsn: dbi:Pg:dbname=console;host=db     # or host / port / dbname, or from_usage_store: true
+  user: skeid_reader                     # needs SELECT on the relation, nothing else
+  password_env: SKEID_CUSTOMER_DB_PASSWORD
+  relation: skeid.customer_keys          # table or view, schema-qualified allowed
+  refresh_interval_s: 30                 # default 30
+  listen: skeid_customer_keys            # optional NOTIFY channel: a change is fetched at once
+  max_stale_s: 0                         # default 0: keep the last good keys while the DB is down
+  connect_timeout_s: 5                   # default 5; also bounds each query
+```
+
+- Skeid runs `SELECT key_id, name, policy, models FROM "skeid"."customer_keys"` and nothing
+  else. One row per key id: `key_id` (`k_` + 40 hex, from `skeid keyid`), `name` (a label for
+  logs and `/skeid/config`), `policy` (a profile from the file's `policies:`, `NULL` =
+  `default_policy`), `models` (`text[]`, overrides the profile's list; `NULL` keeps it). A row
+  present means the key is active; revoke by making the row disappear, e.g. a view filtered on
+  `revoked_at IS NULL`.
+- The file wins: a key id the file's `keys:` names (directly, via `names:`, or by short id)
+  ignores the row's policy. Profiles, `deny_tags`, aliases and nodes stay in the file.
+- The ids join `client_auth` beside the file's own; the database cannot revoke an id the file
+  lists. Without `client_auth`, the load warns: a revoked key would just fall back to
+  `default_policy`.
+- A bad row (malformed or duplicate id, unknown policy, bad models) is rejected and reported by
+  name or position, never by value. No row can fail a reload.
+- Fetched on the event loop, never per request: every `refresh_interval_s`, and about 250 ms
+  after a `NOTIFY` on `listen`. Each worker fetches for itself. A changed result reloads the
+  config; an unchanged one does nothing.
+- When the database is unreachable the last good keys stay in force (or, with `max_stale_s`,
+  until they are that old), retried with back-off. `skeid serve` fetches once before it
+  listens; if that fails it starts with the file's customers only and retries.
+- `GET /skeid/config` shows the source's state and the rejected and shadowed rows; `/health`
+  shows only `customer_source.ok`, `failed_at` and `failures`.
+
+Revocation takes effect within a second with `listen`, within `refresh_interval_s` without.
+Requests already admitted run to completion. The `examples/service` stack has a manual procedure
+for checking it against a real PostgreSQL.
+
 ### Uploads
 
 ```yaml
@@ -1155,7 +1203,7 @@ configured they answer `404`, with a wrong one `401`.
 | `POST /skeid/nodes/:id/health` | `{"healthy": false}` takes a node out of rotation |
 | `GET /skeid/metrics/nodes` | per-node `inflight`, `started`, `ok`, `error`, `duration_ms_total` and any current capacity reading; volatile, not billing data |
 | `GET /skeid/usage` | usage report: `since`, `api_key_id`, `model`, `limit` |
-| `GET /skeid/config` | last reload result: error, `failed_at`, consecutive failures |
+| `GET /skeid/config` | last reload result: error, `failed_at`, consecutive failures; with a `customer_source`, its fetch state and row counts |
 | `GET /skeid/openapi.json` | OpenAPI 3.1 description of the admin routes (and the registry snapshot when enabled) |
 | `GET /skeid/registry/snapshot` | the signed registry snapshot; also takes the registry read key |
 

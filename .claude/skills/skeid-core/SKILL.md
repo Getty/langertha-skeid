@@ -130,6 +130,7 @@ registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (A
 uploads:    { max_bytes: 26214400 }      # body limit of the upload routes (/v1/audio/*); ADR 0021
 client_auth: { keys: [name-or-key-id] }   # only these callers may use the client routes; 401 otherwise (ADR 0020)
 mcp:        { public_url, servers: { … } }   # MCP gateway (ADR 0022; skill skeid-relay-routes)
+customer_source: { dsn | from_usage_store, relation, … }   # customer key ids from a DB view (ADR 0026; skill skeid-routing)
 ```
 
 - **Admin key**, resolved on every applied config: explicit (`serve --admin-api-key`,

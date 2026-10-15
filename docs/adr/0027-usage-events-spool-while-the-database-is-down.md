@@ -14,7 +14,7 @@ cannot write is reported lost through `on_lost`: an `error` line naming the requ
 key id, for an operator to reconcile by hand.
 
 CitiAI runs Skeid on an edge machine so it keeps serving when the database machine fails. The
-caller side already survives that: `customer_source` keeps its last good snapshot (ADR 0022).
+caller side already survives that: `customer_source` keeps its last good snapshot (ADR 0026).
 The usage side did not:
 
 - **Every event of the outage was lost.** There was nothing to reconcile from but the log lines.

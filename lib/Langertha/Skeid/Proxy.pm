@@ -58,7 +58,8 @@ No Skeid credential is needed on these unless the config has a C<client_auth> se
 every one but C</health> answers C<401> to a key not on its list. See L</Customer identity>.
 The MCP routes exist only with an C<mcp> section and always need a key; see L</MCP routes>.
 
-  GET  /health                     {status: ok, proxy: skeid, config_reload: {...}}
+  GET  /health                     {status: ok, proxy: skeid, config_reload: {...},
+                                    customer_source: {...} with a customer_source}
   GET  /.well-known/langertha.json provider manifest for the presented key
   GET  /v1/models                  OpenAI: node models and alias names, once each
   POST /v1/chat/completions        OpenAI chat; a stream is relayed byte for byte
@@ -79,7 +80,9 @@ The MCP routes exist only with an C<mcp> section and always need a key; see L</M
   ANY  /mcp/:name/*path            the same, to a sub-path of it
 
 C</health> stays C<ok> while a config reload is failing -- the proxy serves under the config it
-kept -- and shows the reload state without its message. C</v1/models> and C</api/tags> list the
+kept -- and shows the reload state without its message. Likewise a failing customer source
+(L<Langertha::Skeid/customer_source>): C<customer_source> carries C<ok>, and C<failed_at> and
+C<failures> while it fails, never the message. C</v1/models> and C</api/tags> list the
 node models and the alias names, each once, so a client can discover what it may put in
 C<model>. The list follows the policy of the key presented (no key: the default policy): a name
 the key's C<models> do not grant, an alias with every tier denied and a model only denied nodes
@@ -276,7 +279,8 @@ C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
   GET  /skeid/nodes                {nodes}
   POST /skeid/nodes                body: a node, as a config nodes entry -> {ok, nodes}, or 400
   POST /skeid/nodes/:id/health     body: {"healthy": true|false} -> {ok}
-  GET  /skeid/config               {reload}: the config reload status, with its message
+  GET  /skeid/config               {reload}: the config reload status, with its message;
+                                   {customer_source}: the customer source status, with its message
   GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
   GET  /skeid/usage                ?since=&api_key_id=&model=&limit= (default 50) -> the report
   GET  /skeid/openapi.json         OpenAPI 3.1 description of the admin routes
@@ -400,7 +404,8 @@ With both C<OPENBAO_ROLE_ID> and C<OPENBAO_SECRET_ID> set, a
 L<Langertha::Skeid::KeyBroker::OpenBao> at C<OPENBAO_ADDR> (default C<http://127.0.0.1:8200>)
 becomes the key broker; if its login fails the proxy warns and runs without one. A broker that
 can renew its token starts renewing on a timer. The capacity probes of every node are started
-and restarted whenever the probed part of the inventory changes.
+and restarted whenever the probed part of the inventory changes, and the customer source of the
+config, if it has one, starts fetching (L<Langertha::Skeid/start_customer_source>).
 
 Upstream connections time out after 10s to connect, and at most C<SKEID_UPSTREAM_POOL>
 (default 100) are kept. An upstream request may take C<SKEID_UPSTREAM_TIMEOUT> seconds (default
@@ -462,6 +467,10 @@ sub build_app {
   # polling. Nodes with no capacity block get none, which is plain inflight admission.
   my $probes = Langertha::Skeid::CapacityProbe->start_for_skeid($skeid);
   my $probe_key = $skeid->_probe_inventory_key;
+
+  # The customer source's fetcher (ADR 0026): on the loop, never on the request path. Its
+  # connections open with the first fetch, in the process that runs the loop.
+  $skeid->start_customer_source;
 
   my $app = Mojolicious->new;
   $app->secrets(['skeid-proxy']);
@@ -649,7 +658,14 @@ sub _build_route_table {
       my ($c) = @_;
       my $reload = $c->skeid->reload_status;
       delete $reload->{error};
-      $c->render(json => { status => 'ok', proxy => 'skeid', config_reload => $reload });
+      # The customer source likewise: whether it fetches, never why not (ADR 0026).
+      my $source = $c->skeid->customer_source_status;
+      $source &&= {
+        ok => $source->{ok},
+        ($source->{failures} ? (failed_at => $source->{failed_at}, failures => $source->{failures}) : ()),
+      };
+      $c->render(json => { status => 'ok', proxy => 'skeid', config_reload => $reload,
+        ($source ? (customer_source => $source) : ()) });
     });
 
   # Provider manifest (skeid #29, ADR 0015): per customer key, never the whole catalog.
@@ -798,7 +814,9 @@ sub _build_route_table {
     tag => 'Admin', summary => 'Config reload status',
     handler => sub {
       my ($c) = @_;
-      $c->render(json => { reload => $c->skeid->call_function('config.status', {}) });
+      my $reload = $c->skeid->call_function('config.status', {});
+      my $source = $c->skeid->customer_source_status;
+      $c->render(json => { reload => $reload, ($source ? (customer_source => $source) : ()) });
     });
 
   $add->(id => 'admin_metrics_nodes', group => 'admin', paths => ['/skeid/metrics/nodes'],

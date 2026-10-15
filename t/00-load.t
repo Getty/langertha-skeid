@@ -22,6 +22,8 @@ my @modules = qw(
   Langertha::Skeid::CapacityProbe::Custom
   Langertha::Skeid::CapacityProbe::Registry
   Langertha::Skeid::Registry
+  Langertha::Skeid::CustomerSource
+  Langertha::Skeid::CustomerSource::DBI
   Langertha::Skeid::Secret
 );
 
