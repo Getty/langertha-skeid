@@ -89,7 +89,7 @@ unless the user names a specific issue.
 
 ## Specifics — reference, don't restate
 
-Architecture and invariants: `skeid-core`, `skeid-protocols`, `skeid-service-stack`,
-`skeid-benchmark`, `skeid-profiling`. Perl, Moo, POD and release conventions:
+Architecture and invariants: `skeid-core`, `skeid-routing`, `skeid-protocols`,
+`skeid-relay-routes`, `skeid-service-stack`, `skeid-benchmark`, `skeid-profiling`. Perl, Moo, POD and release conventions:
 `getty-perl-core`, `getty-perl-moo`, `getty-perl-pod`, `getty-perl-release-author-getty`.
 Vocabulary: `CONTEXT.md`. Decisions: `docs/adr/`.

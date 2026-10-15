@@ -5,6 +5,7 @@ model: inherit
 briefing:
   skills:
     - skeid-core
+    - skeid-routing
     - getty-perl-core
     - getty-perl-moo
     - perl-mojo

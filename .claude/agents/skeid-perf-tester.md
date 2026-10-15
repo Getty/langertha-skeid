@@ -7,6 +7,7 @@ briefing:
     - skeid-benchmark
     - skeid-profiling
     - skeid-core
+    - skeid-routing
     - kanban-issues-karr-ticket
 ---
 

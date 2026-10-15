@@ -5,6 +5,7 @@ model: sonnet
 briefing:
   skills:
     - skeid-core
+    - skeid-routing
     - skeid-protocols
     - getty-perl-core
     - perl-mojo

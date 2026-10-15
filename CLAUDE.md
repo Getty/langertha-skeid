@@ -20,7 +20,8 @@ principle and lane are in `.claude/rules/skeid-rules.md`. Agents in this repo:
 | Task | Agent |
 |---|---|
 | Implement / refactor / debug behavior-relevant code | `skeid-worker` (default) |
-| Wire protocols & services: OpenAI/Anthropic/Ollama formats, SSE, Langertha engines, MCP tools | `skeid-protocol-worker` |
+| Translated faces: OpenAI/Anthropic/Ollama formats, SSE, Langertha engines and tool calls, upstream auth | `skeid-protocol-worker` |
+| Relayed routes: `/v1/audio/*`, `/v1/rerank` (incl. `rerank_format: tei`), uploads, MCP gateway `/mcp/<name>` | `skeid-relay-worker` |
 | KeyBroker/OpenBao, `Secret`, compose stack, Dockerfile, ENV surface | `skeid-service-worker` |
 | Write/extend tests (`Test::Mojo`, fake upstream, usage stores) | `skeid-proxy-test-writer` |
 | Measure TTFT / throughput, run `bench/`, NYTProf profiling, compare against other proxies | `skeid-perf-tester` |
@@ -51,8 +52,10 @@ docs/adr/                         architecture decision records
 docs/bench/                       benchmark reports
 ```
 
-Which skill covers what: `skeid-core` (routing, admission, capacity probes, config, usage,
-admin API), `skeid-protocols` (the three client formats, streaming, Langertha engine IDs),
+Which skill covers what: `skeid-core` (nodes, routing, admission, config, usage, admin API),
+`skeid-routing` (aliases and tiers, per-key policy, prefork workers, capacity probes),
+`skeid-protocols` (the three client formats, upstream call, caller identity, streaming,
+Langertha engine IDs), `skeid-relay-routes` (audio, rerank, uploads, MCP gateway),
 `skeid-service-stack` (OpenBao, compose, ENV, deployment), `skeid-benchmark` (`bench/`, TTFT
 methodology, comparisons), `skeid-profiling` (Devel::NYTProf on a running server). Do NOT
 duplicate skill content here — reference it.
