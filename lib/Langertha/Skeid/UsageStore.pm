@@ -43,10 +43,11 @@ returns
     db_path  => '...',                  # DBI stores: the SQLite file, '' for postgresql
     log_path => '...',                  # jsonlog: the event directory or file
     totals   => { requests, input_tokens, output_tokens, total_tokens, cached_tokens,
-                  cache_write_tokens, tool_calls, audio_seconds, documents, total_cost_usd },
-    by_key   => [ { api_key_id, requests, total_tokens, audio_seconds, documents,
+                  cache_write_tokens, tool_calls, audio_seconds, documents, pages,
+                  total_cost_usd },
+    by_key   => [ { api_key_id, requests, total_tokens, audio_seconds, documents, pages,
                     total_cost_usd }, ... ],
-    by_model => [ { model, requests, total_tokens, audio_seconds, documents,
+    by_model => [ { model, requests, total_tokens, audio_seconds, documents, pages,
                     total_cost_usd }, ... ],
     recent   => [ { id, created_at, api_format, endpoint, api_key_id, model, requested_model,
                     node_id, status_code, ok, input_tokens, output_tokens, total_tokens,
@@ -55,7 +56,8 @@ returns
 
 or C<< { ok => 0, enabled => 0, error => $message } >>. The breakdowns are ordered by cost,
 highest first; C<recent> is newest first. C<audio_seconds> sums what the events of the audio
-routes carry and C<documents> what those of the rerank route carry
+routes carry, C<documents> what those of the rerank and documents routes carry and C<pages> what
+those of the documents routes read off their answers
 (L<Langertha::Skeid/Pluggable Usage Storage>); an event without the field adds nothing, so a
 sum is C<0> where no event had one.
 

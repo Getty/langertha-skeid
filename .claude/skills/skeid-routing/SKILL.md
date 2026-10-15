@@ -38,6 +38,23 @@ The two ways a tier fails differ, and that is the whole design:
 Requested vs served model diverge here: the upstream body carries the served model, the usage
 event both (`model`, `requested_model` — skill `skeid-core`, Usage).
 
+## Node kind and the routing key `documents`
+
+A node's `kind` (`chat` default; `documents` = docling-serve, ADR 0028) is a selector axis beside
+model, engine and tags. `route_plan(kind => …)` puts the kind on **every** tier, whatever an alias
+says; `_route_entry` keeps only nodes of exactly that kind, and a documents selection ignores the
+node's `model`. The kind is part of `_route_key`, so a chat model called `documents` and the
+documents route never share a cursor. A chat selection no longer takes a node with an empty
+`model` of another kind — the invariant the separation rests on (`t/88`, "kind keeps chat and
+documents nodes apart").
+
+The documents routes have no model name: they are planned and authorised under the fixed **routing
+key** `documents` (`Protocol::Documents->routing_key`). It goes through the same policy check as a
+model: `models: [qwen, documents]` grants it, a key whose `models` list leaves it out gets `403`
+before a node is picked, `deny_tags` apply, an alias named `documents` tiers the nodes by tags.
+The alias is excluded from `list_models`, documents nodes list no model, `_manifest_model_reachable`
+selects `kind => ''`. A new kind is a row in `Protocol::Documents`'s `%KIND`, not a branch.
+
 ## Per-key policy
 
 Who asks narrows what the plan may contain (ADR 0008). Resolved once at config load into

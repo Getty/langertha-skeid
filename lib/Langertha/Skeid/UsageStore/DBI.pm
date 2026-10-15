@@ -260,6 +260,9 @@ my @ADDED_COLUMNS = (
   ['audio_seconds', 'DOUBLE PRECISION'],
   # Documents a rerank request carried (skeid k92). Nullable: only a rerank event has a count.
   ['documents', 'BIGINT'],
+  # Pages a documents request converted (skeid k94, ADR 0028), read off the answer's
+  # json_content. Nullable: only a documents event whose answer carried a page count has one.
+  ['pages', 'BIGINT'],
 );
 
 sub _add_missing_columns {
@@ -693,7 +696,7 @@ my @EVENT_COLUMNS = qw(
   status_code ok duration_ms input_tokens output_tokens total_tokens cached_tokens tool_calls
   cost_input_usd cost_output_usd cost_total_usd error_type error_message requested_model
   content_bytes cost_cache_read_usd cost_cache_write_usd cache_write_tokens audio_seconds
-  documents
+  documents pages
 );
 # Nullable, written as NULL when the event has no such key -- "not measured", not a zero:
 #   cached_tokens          an event that carried no cache count
@@ -702,7 +705,8 @@ my @EVENT_COLUMNS = qw(
 #   cost_cache_write_usd   an event from a caller that does not price the cache apart
 #   cache_write_tokens     an event that carried no cache write count
 #   audio_seconds          only an audio route's event, and only when its node reported it
-#   documents              only a rerank event
+#   documents              only a rerank or documents event
+#   pages                  only a documents event whose answer said how many pages it was
 # requested_model falls back to model, then ''.
 my $INSERT_SQL = 'INSERT INTO usage_events (' . join(', ', @EVENT_COLUMNS) . ') VALUES ('
   . join(', ', ('?') x @EVENT_COLUMNS) . ')';
@@ -980,7 +984,8 @@ sub _schedule_replay {
   my $report = $store->report(\%filters);
 
 Aggregates in SQL: totals, per-key and per-model breakdowns (tokens, cost, the
-C<audio_seconds> the audio routes recorded and the C<documents> of the rerank route), and the
+C<audio_seconds> the audio routes recorded, the C<documents> of the rerank and documents routes and
+the C<pages> of the documents routes), and the
 newest C<limit> events.
 The same C<since> / C<api_key_id> / C<model> filter set applies to every part of the report, so
 the breakdowns always add up to the totals shown next to them. C<limit> defaults to 20. The shape
@@ -1037,6 +1042,7 @@ sub _report {
        COALESCE(SUM(tool_calls), 0) AS tool_calls,
        COALESCE(SUM(audio_seconds), 0) AS audio_seconds,
        COALESCE(SUM(documents), 0) AS documents,
+       COALESCE(SUM(pages), 0) AS pages,
        COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
      FROM usage_events $where_sql",
     undef,
@@ -1050,6 +1056,7 @@ sub _report {
        COALESCE(SUM(total_tokens), 0) AS total_tokens,
        COALESCE(SUM(audio_seconds), 0) AS audio_seconds,
        COALESCE(SUM(documents), 0) AS documents,
+       COALESCE(SUM(pages), 0) AS pages,
        COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
      FROM usage_events
      $where_sql
@@ -1066,6 +1073,7 @@ sub _report {
        COALESCE(SUM(total_tokens), 0) AS total_tokens,
        COALESCE(SUM(audio_seconds), 0) AS audio_seconds,
        COALESCE(SUM(documents), 0) AS documents,
+       COALESCE(SUM(pages), 0) AS pages,
        COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd
      FROM usage_events
      $where_sql
@@ -1104,6 +1112,7 @@ sub _report {
       tool_calls     => $num->($totals->{tool_calls}),
       audio_seconds  => $num->($totals->{audio_seconds}),
       documents      => $num->($totals->{documents}),
+      pages          => $num->($totals->{pages}),
       total_cost_usd => $num->($totals->{total_cost_usd}),
     },
     by_key   => [ map {
@@ -1113,6 +1122,7 @@ sub _report {
         total_tokens   => $num->($_->{total_tokens}),
         audio_seconds  => $num->($_->{audio_seconds}),
         documents      => $num->($_->{documents}),
+        pages          => $num->($_->{pages}),
         total_cost_usd => $num->($_->{total_cost_usd}),
       }
     } @$by_key ],
@@ -1123,6 +1133,7 @@ sub _report {
         total_tokens   => $num->($_->{total_tokens}),
         audio_seconds  => $num->($_->{audio_seconds}),
         documents      => $num->($_->{documents}),
+        pages          => $num->($_->{pages}),
         total_cost_usd => $num->($_->{total_cost_usd}),
       }
     } @$by_model ],

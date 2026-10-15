@@ -24,7 +24,9 @@ and out. Not negotiable:
   request builder.
 - A non-chat route of the OpenAI face (audio, rerank) is **relayed** to the node's endpoint of
   the same name, not translated into the chat call (ADR 0021) — a second path and body shape,
-  not a second proxy function.
+  not a second proxy function. Documents (`/v1/convert/*`, docling) follow the same rule with no
+  `model`: planned over nodes of `kind: documents` under the routing key `documents` (skill
+  `skeid-relay-routes`).
 
 ## Client edge
 
@@ -36,6 +38,7 @@ and out. Not negotiable:
 | Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
 | Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
 | API description, not a face (ADR 0025) | `GET /openapi.json` (client routes the config enables, behind the client gate), `GET /skeid/openapi.json` (admin key), `GET /docs` + `/docs/*` (Swagger UI, `openapi.swagger_ui`, fetched on first use and cached, else 404) | no |
+| Relayed, docling's own paths (ADR 0028) | `POST /v1/convert/file`, `POST /v1/convert/source` (sync only) | no — JSON or zip answer as the node gave it |
 | MCP gateway, not a face (ADR 0022) | `POST|GET|DELETE /mcp/<name>[/<path>]`, `GET /v1/mcp/servers` | yes — whatever the MCP server sends, unbuffered |
 
 - Embeddings take the chat path (`_begin_route_async`): nodes of one model share load with health,
@@ -110,6 +113,8 @@ overrides `Authorization`:
 2. **`api_key_env`** fallback — key from that environment variable.
 3. Neither **configured** → the client's own `Authorization` survives (pass-through deployments).
 
+A node with `api_key_header` (docling's `X-Api-Key`) gets the raw key in that header instead of
+`Authorization: Bearer`; dropping the client's credentials and the fail-closed rule are the same.
 - When a key is injected, the client's `Authorization` and `x-api-key` are dropped first, in any
   spelling (`_drop_client_credentials`; Mojolicious hands `X-Api-Key` on as written, and an
   exact-case delete forwards it beside the node's key) — an Anthropic-style client never leaks

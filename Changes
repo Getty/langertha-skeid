@@ -2,6 +2,30 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Document conversion through docling-serve: POST /v1/convert/file and
+      POST /v1/convert/source under docling's own paths, relayed (multipart
+      part for part from the spooled upload, a source body decoded once and
+      written again; the JSON or zip answer byte for byte), the synchronous
+      calls only. A request has no model: nodes get an option kind
+      (documents; default chat, unknown value fails the load) and the route
+      is planned over nodes of that kind under the routing key documents,
+      which a key policy's models grants (403 without it) and an alias of
+      that name tiers; chat routes, /v1/models and the manifest never see a
+      documents node and the reverse. New node option api_key_header
+      (RFC 7230 token, checked before the old node is removed): the node's key
+      goes raw in that header, X-Api-Key for docling, the client's credentials
+      still dropped. http_sources, callbacks and a target that is not
+      inbody/zip are 400 before admission (the field's name, never its value;
+      all spellings, a duplicate key) unless documents.allow_remote_sources.
+      uploads.documents_max_bytes (default 100 MiB) is the limit of both
+      routes, 413/401 before the body. New nullable usage field pages, read
+      off document.json_content.pages of a JSON answer up to 8 MiB (absent
+      otherwise, never 0): column in both schemas and by the additive
+      migration, jsonlog, the spool, totals/by_key/by_model, skeid usage.
+      documents counts the request's input documents. Relay hook
+      max_parse_bytes leaves a larger answer undecoded (k94, ADR 0028,
+      ADR 0021 Update).
+
     - MCP gateway, review follow-up: the server's response headers are an allowlist
       (Content-Type, Cache-Control, Retry-After, Mcp-*), no longer everything
       but hop-by-hop ones; an event stream is no longer cut at the user agent's

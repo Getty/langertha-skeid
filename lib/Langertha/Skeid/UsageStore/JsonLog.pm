@@ -217,7 +217,8 @@ sub store {
 
 Reads every event, applies the C<since> / C<api_key_id> / C<model> filters, and aggregates
 totals plus per-key and per-model breakdowns, the C<audio_seconds> of the audio routes and the
-C<documents> of the rerank route among them. C<recent> holds the newest C<limit> events
+C<documents> of the rerank and documents routes and the C<pages> of the documents routes
+among them. C<recent> holds the newest C<limit> events
 (default 20). Unreadable files and lines are skipped. The shape is described in
 L<Langertha::Skeid::UsageStore/The store contract>.
 
@@ -259,7 +260,7 @@ sub report {
     @events = grep { ($_->{model} // '') eq $filters->{model} } @events;
   }
 
-  my %totals = (requests => 0, input_tokens => 0, output_tokens => 0, total_tokens => 0, cached_tokens => 0, cache_write_tokens => 0, tool_calls => 0, audio_seconds => 0, documents => 0, total_cost_usd => 0);
+  my %totals = (requests => 0, input_tokens => 0, output_tokens => 0, total_tokens => 0, cached_tokens => 0, cache_write_tokens => 0, tool_calls => 0, audio_seconds => 0, documents => 0, pages => 0, total_cost_usd => 0);
   my (%by_key, %by_model);
   for my $ev (@events) {
     $totals{requests}++;
@@ -274,6 +275,8 @@ sub report {
     $totals{audio_seconds} += $num->($ev->{audio_seconds});
     # Likewise the documents of a rerank event (skeid k92).
     $totals{documents}     += $num->($ev->{documents});
+    # And the pages a documents event read off its answer (skeid k94).
+    $totals{pages}         += $num->($ev->{pages});
     $totals{total_cost_usd} += $num->($ev->{cost_total_usd});
 
     my $kid = $ev->{api_key_id} // '';
@@ -281,6 +284,7 @@ sub report {
     $by_key{$kid}{total_tokens}   += $num->($ev->{total_tokens});
     $by_key{$kid}{audio_seconds}  += $num->($ev->{audio_seconds});
     $by_key{$kid}{documents}      += $num->($ev->{documents});
+    $by_key{$kid}{pages}          += $num->($ev->{pages});
     $by_key{$kid}{total_cost_usd} += $num->($ev->{cost_total_usd});
 
     my $mid = $ev->{model} // '';
@@ -288,6 +292,7 @@ sub report {
     $by_model{$mid}{total_tokens}   += $num->($ev->{total_tokens});
     $by_model{$mid}{audio_seconds}  += $num->($ev->{audio_seconds});
     $by_model{$mid}{documents}      += $num->($ev->{documents});
+    $by_model{$mid}{pages}          += $num->($ev->{pages});
     $by_model{$mid}{total_cost_usd} += $num->($ev->{cost_total_usd});
   }
 
@@ -303,10 +308,10 @@ sub report {
     since    => ($filters->{since} // ''),
     totals  => \%totals,
     by_key  => [ map {
-      +{ api_key_id => $_, requests => $by_key{$_}{requests}, total_tokens => $by_key{$_}{total_tokens}, audio_seconds => $by_key{$_}{audio_seconds}, documents => $by_key{$_}{documents}, total_cost_usd => $by_key{$_}{total_cost_usd} }
+      +{ api_key_id => $_, requests => $by_key{$_}{requests}, total_tokens => $by_key{$_}{total_tokens}, audio_seconds => $by_key{$_}{audio_seconds}, documents => $by_key{$_}{documents}, pages => $by_key{$_}{pages}, total_cost_usd => $by_key{$_}{total_cost_usd} }
     } sort { ($by_key{$b}{total_cost_usd} || 0) <=> ($by_key{$a}{total_cost_usd} || 0) or $a cmp $b } keys %by_key ],
     by_model => [ map {
-      +{ model => $_, requests => $by_model{$_}{requests}, total_tokens => $by_model{$_}{total_tokens}, audio_seconds => $by_model{$_}{audio_seconds}, documents => $by_model{$_}{documents}, total_cost_usd => $by_model{$_}{total_cost_usd} }
+      +{ model => $_, requests => $by_model{$_}{requests}, total_tokens => $by_model{$_}{total_tokens}, audio_seconds => $by_model{$_}{audio_seconds}, documents => $by_model{$_}{documents}, pages => $by_model{$_}{pages}, total_cost_usd => $by_model{$_}{total_cost_usd} }
     } sort { ($by_model{$b}{total_cost_usd} || 0) <=> ($by_model{$a}{total_cost_usd} || 0) or $a cmp $b } keys %by_model ],
     recent  => [ map {
       +{

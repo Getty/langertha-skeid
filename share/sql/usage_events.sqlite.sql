@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   content_bytes INTEGER,
   audio_seconds REAL,
   documents INTEGER,
+  pages INTEGER,
   tool_calls INTEGER NOT NULL DEFAULT 0,
   cost_input_usd REAL NOT NULL DEFAULT 0,
   cost_output_usd REAL NOT NULL DEFAULT 0,

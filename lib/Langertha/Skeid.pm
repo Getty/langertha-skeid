@@ -15,6 +15,7 @@ use Langertha::Skeid::UsageStore;
 use Langertha::Skeid::CustomerSource;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
+use Langertha::Skeid::Protocol::Documents;
 use Langertha::Skeid::Protocol::MCP;
 use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Rerank;
@@ -146,6 +147,14 @@ node's C<x-compute-tokens> header (L<Langertha::Skeid::Protocol::Rerank/usage>).
 itself is recorded and not priced, and is stored like C<audio_seconds>: a nullable C<documents>
 column, a key in C<jsonlog>, a sum in the reports.
 
+A documents request's event (C</v1/convert/file>, C</v1/convert/source>; C<api_format> C<docling>,
+model C<documents>) carries C<documents> too -- the files or sources the request held, on the
+event of a request the node answered -- and C<pages>: the page count of the converted document,
+read off C<document.json_content.pages> of a JSON answer of up to 8 MiB. A zip, a larger answer,
+an answer without C<json_content> and a document format without pages leave C<pages> out: not
+measured, never a zero. It is the unit to bill a conversion by, recorded and not priced, stored
+like C<documents> (L<Langertha::Skeid::Protocol::Documents/pages>).
+
 When a callback or override is provided, the configured store is bypassed entirely
 and no database connection is created.  DBI, DBD::SQLite and DBD::Pg are C<recommends>
 dependencies — they are not required for C<jsonlog> or when usage is handled externally.
@@ -270,7 +279,9 @@ L</ENVIRONMENT>, else built in.
 
 =item * C<client_auth>: removed from the file, client authentication is off again.
 
-=item * C<uploads>: removed from the file, the upload limit is the built-in default again.
+=item * C<uploads>: removed from the file, the upload limits are the built-in defaults again.
+
+=item * C<documents>: removed from the file, remote sources are refused again.
 
 =item * C<mcp>: removed from the file, the MCP gateway is off again and its routes are unknown
 paths.
@@ -312,9 +323,11 @@ set by C<skeid serve --workers>).
       api_key_env: GROQ_API_KEY        # upstream key from this variable when the ref resolves none
       capacity: { probe: prometheus }  # default none: inflight admission, see below
       rerank_format: tei               # default none; a reranker that speaks TEI's dialect, see below
+      kind: documents                  # default chat; a docling-serve node, see below
+      api_key_header: X-Api-Key        # default none: the key goes in Authorization: Bearer
 
-An entry without C<id> or C<url> is skipped; one with an unknown C<engine> or C<rerank_format>
-fails the load. When
+An entry without C<id> or C<url> is skipped; one with an unknown C<engine>, C<rerank_format> or
+C<kind>, or an C<api_key_header> that is no header name, fails the load. When
 a node has a key of its own it replaces the client's C<Authorization> upstream (see
 L<Langertha::Skeid::Proxy>); otherwise the client's headers go through. Key references and
 variable names are the only key material a config holds (ADR 0003).
@@ -337,6 +350,19 @@ a C</v1/rerank> request is relayed to C<{url}/rerank> as it came. C<tei> is Hugg
 text-embeddings-inference: the request is translated and sent to C</rerank> at the server root
 (the node's C<url> with or without a trailing C</v1>), the answer translated back. It is the
 only value; see L<Langertha::Skeid::Proxy/Rerank route>.
+
+C<kind> says what a node serves. The default, C<chat>, is every node there was: chat completions
+and embeddings, matched by C<model>. C<documents> is a docling-serve node: it is reached by
+C</v1/convert/file> and C</v1/convert/source> and by nothing else, and the chat routes, the model
+lists and the manifest never see it (ADR 0028). Its C<model> is not read. The documents route
+is planned under the routing key C<documents>, which a policy's C<models> grants and an alias of
+that name tiers (by C<tags>); a key whose C<models> do not name it is answered C<403>.
+
+C<api_key_header> names the header a node's key is sent in, raw, instead of C<Authorization:
+Bearer>: C<X-Api-Key> for docling-serve, which takes no Bearer token. The key source
+(C<api_key_ref>, C<api_key_env>) is unchanged and the client's own credentials are dropped in
+every spelling, as for any node with a key. A name that is no RFC 7230 token fails the load;
+C<Authorization> is the default spelled out.
 
 =head2 pricing
 
@@ -502,7 +528,8 @@ loop. See L<Langertha::Skeid::CustomerSource> and L<Langertha::Skeid::CustomerSo
 =head2 uploads
 
   uploads:
-    max_bytes: 26214400   # default 26214400 (25 MiB); an integer of at least 1
+    max_bytes: 26214400            # default 26214400 (25 MiB); an integer of at least 1
+    documents_max_bytes: 104857600 # default 104857600 (100 MiB); an integer of at least 1
 
 The largest request body the upload routes take -- C</v1/audio/transcriptions> and
 C</v1/audio/translations>, the routes with a C<multipart/form-data> body: the file plus the form
@@ -511,6 +538,27 @@ see L<Langertha::Skeid::Proxy/Uploads>. Every other route keeps the server's own
 (Mojolicious' C<MOJO_MAX_MESSAGE_SIZE>, 16 MiB), whatever this says. The load fails on a section
 that is not a hash, an unknown key in it, and a C<max_bytes> that is not an integer of at least
 1 -- there is no "unlimited". A changed value holds from the next request.
+
+C<documents_max_bytes> is the limit of the documents routes, C</v1/convert/file> and
+C</v1/convert/source>, which have their own because documents are bigger than audio. It bounds
+the request body: a source request carries its files as base64 in JSON, a third more than the
+file, and is decoded in memory -- send large files to C</v1/convert/file>, which is spooled to
+disk. The node's own time to convert is the upstream timeout, unchanged.
+
+=head2 documents
+
+  documents:
+    allow_remote_sources: false   # default false
+
+Settings of the documents routes, C</v1/convert/file> and C</v1/convert/source>, which relay to
+nodes of C<kind: documents>. A request that makes the node fetch from, or write to, an address
+the client names -- docling's C<http_sources>, C<callbacks>, a C<target> that is not C<inbody> or
+C<zip>, a C<sources> entry that is not a file -- is a server-side request from inside the cluster
+network, and is answered C<400> before a node is chosen unless C<allow_remote_sources> is true.
+There is no model name here: the nodes are chosen by their kind, and the route is authorised under
+the routing key C<documents> (a policy's C<models>). The load fails on a section that is not a
+hash, an unknown key, and an C<allow_remote_sources> that is no boolean. Removed from the file,
+remote sources are refused again.
 
 =head2 openapi
 
@@ -986,6 +1034,36 @@ my $UPLOAD_MAX_BYTES = 26214400;
 has upload_max_bytes => (
   is      => 'rw',
   default => sub { $UPLOAD_MAX_BYTES },
+);
+
+=attr documents_max_bytes
+
+The largest request body, in bytes, the documents routes accept (default 104857600, 100 MiB;
+config C<uploads.documents_max_bytes>). It bounds the body: for C</v1/convert/source>, whose
+files travel as base64 in JSON, that is a third more than the file. See L</uploads>.
+
+=cut
+
+# uploads.documents_max_bytes (skeid k94, ADR 0028): the body limit of /v1/convert/file and
+# /v1/convert/source. Documents are bigger than audio, so it is a limit of its own.
+my $DOCUMENTS_MAX_BYTES = 104857600;
+
+has documents_max_bytes => (
+  is      => 'rw',
+  default => sub { $DOCUMENTS_MAX_BYTES },
+);
+
+=attr documents_allow_remote_sources
+
+Whether a documents request may name an address for the node to fetch from or call (docling's
+C<http_sources>, C<callbacks>, a C<target> to put to). Default false; config
+C<documents.allow_remote_sources>. See L</documents>.
+
+=cut
+
+has documents_allow_remote_sources => (
+  is      => 'rw',
+  default => sub { 0 },
 );
 
 =attr trust_key_id_header
@@ -1557,7 +1635,7 @@ sub BUILD {
 
 Adds a node, replacing any node with the same id. Takes the fields of a config C<nodes> entry
 and fills in their defaults (see L</nodes>). Returns 1. Croaks without C<id> or C<url>, on an
-unknown C<engine> or C<rerank_format>, and on a C<registry> capacity block that
+unknown C<engine>, C<rerank_format> or C<kind>, on an C<api_key_header> that is no header name, and on a C<registry> capacity block that
 L<Langertha::Skeid::CapacityProbe::Registry/validate_config> rejects. The C<nodes.add> function
 and C<POST /skeid/nodes> call it.
 
@@ -1579,6 +1657,12 @@ sub add_node {
   # An unknown format croaks, like an unknown engine: a TEI node called in the default dialect
   # answers every request with an error (skeid k92).
   my $rerank_format = Langertha::Skeid::Protocol::Rerank->normalize_format($node{rerank_format});
+
+  # The same for the kind of node and the header its key goes in (skeid k94, ADR 0028): a node of
+  # a kind nobody spelled right would be sent the wrong sort of request, and a header name that
+  # is no token could carry a line break upstream.
+  my $kind    = Langertha::Skeid::Protocol::Documents->normalize_kind($node{kind});
+  my $key_header = Langertha::Skeid::Protocol::Documents->normalize_key_header($node{api_key_header});
 
   # Every check that can croak runs before the removal: a bad re-add must leave the working
   # node in the inventory (skeid k98).
@@ -1608,6 +1692,13 @@ sub add_node {
     # The dialect the node's rerank route speaks when it is not the client's (skeid k92).
     # Absent means the request is relayed as it came.
     (length($rerank_format) ? (rerank_format => $rerank_format) : ()),
+    # What the node serves when it is not chat completions: `documents` is a docling-serve node,
+    # reached by the documents routes and by nothing else (ADR 0028). Absent means chat, which
+    # is every node there was before the option.
+    (length($kind) ? (kind => $kind) : ()),
+    # The header the node's key is sent in, raw, instead of `Authorization: Bearer` (docling's
+    # `X-Api-Key`). Absent means Authorization.
+    (length($key_header) ? (api_key_header => $key_header) : ()),
   };
   $self->_bump_inventory;
   return 1;
@@ -1743,10 +1834,15 @@ sub list_models {
   for my $n (@{$self->nodes || []}) {
     my $model = $n->{model};
     next unless defined $model && length $model;
+    # A documents node names no model a client can ask for (ADR 0028).
+    next if length($n->{kind} // '');
     next if $self->_node_has_any_tag($n, $deny);
     $entry{$model} //= { model => $model, engine => ($n->{engine} // '') };
   }
+  my $documents_key = Langertha::Skeid::Protocol::Documents->routing_key;
   for my $name (keys %{$self->model_aliases || {}}) {
+    # The alias of the documents routing key tiers documents nodes: it is not a chat model.
+    next if $name eq $documents_key;
     $entry{$name} //= { model => $name, engine => '' };
   }
 
@@ -1865,6 +1961,7 @@ my @CONFIG_STATE = qw(
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
   admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
+  documents_max_bytes documents_allow_remote_sources
   mcp_servers mcp_public_url mcp_max_request_bytes openapi_swagger_ui openapi_cache_dir
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
@@ -2183,6 +2280,16 @@ sub _apply_config {
     $self->_load_uploads($cfg->{uploads});
   } elsif ($before->{uploads}) {
     $self->upload_max_bytes($UPLOAD_MAX_BYTES);
+    $self->documents_max_bytes($DOCUMENTS_MAX_BYTES);
+  }
+
+  # Whether the documents routes pass requests that make the node fetch from an address the
+  # client names (skeid k94, ADR 0028). Removed from the file, it is refused again.
+  if (exists $cfg->{documents}) {
+    $declared{documents} = 1;
+    $self->_load_documents($cfg->{documents});
+  } elsif ($before->{documents}) {
+    $self->documents_allow_remote_sources(0);
   }
 
   if (exists $cfg->{aliases}) {
@@ -2930,7 +3037,7 @@ sub _manifest_model_reachable {
   my $plan = $self->route_plan(model => $model, api_key_id => $api_key_id);
   return 0 unless $plan->{permitted};
   for my $tier (@{$plan->{tiers}}) {
-    for my $node (@{$self->select_nodes(tags => $tier->{tags}, deny_tags => $tier->{deny_tags})}) {
+    for my $node (@{$self->select_nodes(tags => $tier->{tags}, deny_tags => $tier->{deny_tags}, kind => '')}) {
       my $served = $node->{model};
       return 1 if !defined($served) || !length($served) || $served eq $tier->{model};
     }
@@ -3118,8 +3225,8 @@ C<route_url>, C<status_code>, C<ok>, C<duration_ms>, C<error_type>, C<error_mess
 C<metrics> the token counts (C<input_tokens>, C<output_tokens>, C<total_tokens>,
 C<cached_tokens>, C<cache_write_tokens>), C<tool_calls> and the costs (C<cost_input_usd>,
 C<cost_output_usd>, C<cost_total_usd>, C<cost_cache_read_usd>, C<cost_cache_write_usd>). Costs
-arrive already priced; nothing is priced here. C<content_bytes>, C<audio_seconds> and
-C<documents> are set only when given. The C<usage.record> function calls it.
+arrive already priced; nothing is priced here. C<content_bytes>, C<audio_seconds>,
+C<documents> and C<pages> are set only when given. The C<usage.record> function calls it.
 
 =cut
 
@@ -3203,6 +3310,9 @@ sub record_usage {
   # How many documents a rerank request carried (skeid k92, ADR 0021), counted off the request
   # the node answered. Optional and additive like the two above; recorded, never priced.
   $event{documents} = _num($args{documents}) if defined $args{documents};
+  # The pages a documents request converted (skeid k94, ADR 0028), read off json_content of the
+  # answer when it carries one. Optional like audio_seconds: absent is not measured, never 0.
+  $event{pages} = _num($args{pages}) if defined $args{pages};
 
   return $self->_store_usage_event(\%event);
 }
@@ -3391,8 +3501,22 @@ sub _route_key {
   # Tags belong in the key: two selections over the same model address different node sets, and
   # a shared round-robin cursor across different-sized sets picks the wrong node. Denied tags
   # too -- a key that may not use cloud addresses a smaller set than one that may.
-  return join('|', $model, $engine, $tags, ($deny ? "-$deny" : ())) if length($tags) || length($deny);
+  # A kind other than chat addresses a different set of nodes under the same name (a chat model
+  # may be called `documents` too), so it is part of the key like the tags are.
+  my $kind = $self->_selector_kind(%args);
+  my @kind = length($kind) ? ("=$kind") : ();
+  return join('|', $model, $engine, $tags, ($deny ? "-$deny" : ()), @kind)
+    if length($tags) || length($deny) || @kind;
   return join('|', $model, $engine);
+}
+
+# The kind of node a selection is over: '' for chat, which is what every selection was before the
+# option, else a kind of Protocol::Documents.
+sub _selector_kind {
+  my ($self, %args) = @_;
+  my $kind = $args{kind};
+  return '' unless defined($kind) && length($kind) && $kind ne 'chat';
+  return $kind;
 }
 
 sub _node_can_take {
@@ -3575,8 +3699,14 @@ sub _route_entry {
   my $tags   = $self->normalize_tags($args{tags});
   my $deny   = $self->normalize_tags($args{deny_tags});
 
+  # Chat and documents nodes are never each other's: a documents node carries no model name
+  # Skeid reads, so a chat selection must not take it for one that serves any model, and a
+  # documents selection takes the nodes of its kind whatever they are called (ADR 0028).
+  my $kind = $self->_selector_kind(%args);
+
   my @nodes = grep {
-    (!defined($model) || !length($model) || !defined($_->{model}) || !length($_->{model}) || $_->{model} eq $model)
+    (($_->{kind} // '') eq $kind)
+      && (length($kind) || !defined($model) || !length($model) || !defined($_->{model}) || !length($_->{model}) || $_->{model} eq $model)
       && (!defined($engine) || !length($engine) || !defined($_->{engine}) || !length($_->{engine}) || $_->{engine} eq $engine)
       && (($_->{healthy} // 0) ? 1 : 0)
       && $self->_node_has_tags($_, $tags)
@@ -4106,13 +4236,42 @@ sub _load_uploads {
   croak 'uploads must be a hash, as in uploads: { max_bytes: 26214400 }'
     unless ref($section) eq 'HASH';
   for my $key (sort keys %$section) {
-    croak "uploads: unknown key '$key' (known: max_bytes)" unless $key eq 'max_bytes';
+    croak "uploads: unknown key '$key' (known: max_bytes, documents_max_bytes)"
+      unless $key eq 'max_bytes' || $key eq 'documents_max_bytes';
   }
-  my $max = $section->{max_bytes};
-  return $self->upload_max_bytes($UPLOAD_MAX_BYTES) unless exists $section->{max_bytes};
-  croak 'uploads.max_bytes must be an integer of at least 1 (bytes)'
-    unless defined($max) && !ref($max) && $max =~ /\A[0-9]+\z/ && $max >= 1;
-  $self->upload_max_bytes(0 + $max);
+  my %limit = (max_bytes => $UPLOAD_MAX_BYTES, documents_max_bytes => $DOCUMENTS_MAX_BYTES);
+  for my $key (sort keys %limit) {
+    next unless exists $section->{$key};
+    my $max = $section->{$key};
+    croak "uploads.$key must be an integer of at least 1 (bytes)"
+      unless defined($max) && !ref($max) && $max =~ /\A[0-9]+\z/ && $max >= 1;
+    $limit{$key} = 0 + $max;
+  }
+  $self->upload_max_bytes($limit{max_bytes});
+  $self->documents_max_bytes($limit{documents_max_bytes});
+  return;
+}
+
+# The documents section (skeid k94, ADR 0028). Strict like uploads: an unknown key or a switch
+# that is no boolean fails the load rather than leaving the default in force unnoticed. There is
+# no model name here: documents nodes are chosen by their kind.
+sub _load_documents {
+  my ($self, $section) = @_;
+  croak 'documents must be a hash, as in documents: { allow_remote_sources: false }'
+    unless ref($section) eq 'HASH';
+  for my $key (sort keys %$section) {
+    croak "documents: unknown key '$key' (known: allow_remote_sources)"
+      unless $key eq 'allow_remote_sources';
+  }
+  my $allow = 0;
+  if (defined(my $v = $section->{allow_remote_sources})) {
+    croak 'documents.allow_remote_sources must be true or false' if ref($v) && !blessed($v);
+    my $s = lc "$v";
+    if    ($s =~ /\A(?:1|true|yes|on)\z/)   { $allow = 1 }
+    elsif ($s =~ /\A(?:0|false|no|off|)\z/) { $allow = 0 }
+    else { croak 'documents.allow_remote_sources must be true or false' }
+  }
+  $self->documents_allow_remote_sources($allow);
   return;
 }
 
@@ -4233,6 +4392,10 @@ with no alias yields a single implicit tier that selects on the name itself and 
 global C<route_wait_timeout_ms>, which is what makes an aliasless config behave exactly as it
 did before aliases existed.
 
+C<kind> (default chat, else C<documents>) is the kind of node the route is over: it is put on
+every tier, so the selection and its round-robin cursor are over nodes of that kind only. The
+documents route plans under the model C<documents> (ADR 0028).
+
 C<permitted> is false when the policy does not grant this model, or when every tier of it was
 denied. Both mean the same thing to a caller — this key may not reach this model — and neither
 is a capacity problem, so they must not be reported as one.
@@ -4248,20 +4411,26 @@ sub route_plan {
   my $model  = $args{model} // '';
   my $policy = $self->policy_for_key($args{api_key_id});
   my $deny   = $policy ? $policy->{deny_tags} : [];
+  my $kind   = $self->_selector_kind(%args);
+  my @kind   = length($kind) ? (kind => $kind) : ();
 
   if ($policy && $policy->{allow_models} && !$policy->{allow_models}{$model}) {
     return { tiers => [], permitted => 0, reason => 'model_not_permitted' };
   }
 
+  # Every tier carries the kind of the route, whatever an alias says: a documents route plans
+  # over documents nodes and a chat route over chat nodes, so the alias named like the documents
+  # routing key tiers the one and finds nothing for the other.
   my $alias = $self->model_aliases->{$model};
   my @tiers = $alias
-    ? (map { +{ %$_, deny_tags => $deny } } @{$alias->{tiers}})
+    ? (map { +{ %$_, deny_tags => $deny, @kind } } @{$alias->{tiers}})
     : ({
         tags      => [],
         model     => $model,
         engine    => $self->normalize_engine_id($args{engine} // ''),
         wait_ms   => 0 + ($self->route_wait_timeout_ms // 0),
         deny_tags => $deny,
+        @kind,
       });
 
   my $before = scalar @tiers;
@@ -4285,7 +4454,9 @@ sub route_plan {
 
 Nodes carrying every listed tag, as copies. No tags selects everything. Selection is by tag,
 never by node id, so a config can talk about C<local> or C<cloud> without naming machines.
-C<deny_tags> drops every node carrying any of those tags. Health is not considered. The
+C<deny_tags> drops every node carrying any of those tags. C<kind> (C<''> for chat, or
+C<documents>), when given, keeps the nodes of that kind only; without it every kind is selected.
+Health is not considered. The
 C<nodes.select> function calls it.
 
 =cut
@@ -4294,9 +4465,13 @@ sub select_nodes {
   my ($self, %args) = @_;
   my $tags = $self->normalize_tags($args{tags});
   my $deny = $self->normalize_tags($args{deny_tags});
+  my $kind = exists($args{kind}) ? $self->_selector_kind(%args) : undef;
   return [
     map { +{%$_} }
-    grep { $self->_node_has_tags($_, $tags) && !$self->_node_has_any_tag($_, $deny) }
+    grep {
+      $self->_node_has_tags($_, $tags) && !$self->_node_has_any_tag($_, $deny)
+        && (!defined($kind) || ($_->{kind} // '') eq $kind)
+    }
     @{$self->nodes || []}
   ];
 }
@@ -4899,9 +5074,9 @@ function names a required argument.
   alias.set           name, alias (or the tiers inline)     { ok }
   policy.set          name, policy (or the spec inline)     { ok }
   policy.for_key      api_key_id                            { policy }
-  route.plan          model, engine, api_key_id             route_plan
-  route.next          model, engine, tags, deny_tags        { node } (pick_node)
-  route.state         model, engine, tags, deny_tags        route_state
+  route.plan          model, engine, api_key_id, kind       route_plan
+  route.next          model, engine, tags, deny_tags, kind  { node } (pick_node)
+  route.state         model, engine, tags, deny_tags, kind  route_state
   capacity.set        id, and the reading                   { capacity }
   capacity.get        id                                    { capacity }
   capacity.observe    id, headers, status                   { capacity }
@@ -4961,6 +5136,7 @@ sub call_function {
       model      => ($args->{model} // ''),
       engine     => $args->{engine},
       api_key_id => $args->{api_key_id},
+      kind       => $args->{kind},
     );
   }
   if ($name eq 'policy.set') {
@@ -4985,6 +5161,7 @@ sub call_function {
       engine => $self->normalize_engine_id($args->{engine} // ''),
       tags   => $args->{tags},
       deny_tags => $args->{deny_tags},
+      kind   => $args->{kind},
     );
     return { node => $node };
   }
@@ -4995,6 +5172,7 @@ sub call_function {
       engine => $engine,
       tags   => $args->{tags},
       deny_tags => $args->{deny_tags},
+      kind   => $args->{kind},
     );
   }
   if ($name eq 'capacity.set') {

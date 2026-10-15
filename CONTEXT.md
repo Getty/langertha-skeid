@@ -142,7 +142,8 @@ _Avoid_: liveness, readiness, up/down.
 **API format** (client protocol):
 The dialect the *client* speaks to Skeid: OpenAI (`/v1/chat/completions`, `/v1/embeddings`,
 `/v1/models`, and the **Relayed routes** `/v1/audio/transcriptions`, `/v1/audio/translations`
-and `/v1/rerank` with its alias `/rerank`),
+and `/v1/rerank` with its alias `/rerank`; docling's `/v1/convert/file` and `/v1/convert/source`
+are relayed too, under their own paths, see **Node kind**),
 Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/tags`, `/api/ps`). A property of the request. Code, config (`manifest.faces`) and ADRs call one API
 format's set of routes a **face** — "the Anthropic face".
 _Avoid_: engine, provider, frontend API.
@@ -155,13 +156,35 @@ _Avoid_: adapter, shim, conversion layer.
 
 **Relayed route**:
 A route of the OpenAI **API format** that is not a chat call and has one client dialect only —
-audio transcription and translation, and rerank. Its request goes to the node's endpoint of the
+audio transcription and translation, rerank, and document conversion (docling's own paths). Its request goes to the node's endpoint of the
 same name in its own shape (a multipart form, part for part; a rerank body, field for field) and
 the answer comes back as the node gave it; there is nothing to translate from or into, so no
 **Translation** (ADR 0021). Routing, **Policy**, **Admission** and the **Usage event** are those
 of every other route; only the served model is written into the request. The one exception is a
 node with a **Rerank format**.
 _Avoid_: passthrough (says nothing about routing and metering still applying), proxy route.
+
+**Node kind** (`kind`):
+A **Node** option saying what the node serves: `chat` (the default, every node there was: chat
+completions and embeddings, matched by `model`) or `documents` (a docling-serve node). The
+documents routes plan over nodes of kind `documents` and only them; chat routes, `/v1/models` and
+the manifest see chat nodes only. A documents request has no `model`: it is authorised and
+reported under the fixed **Routing key** `documents`, which a **Policy**'s `models` grants (ADR
+0028).
+_Avoid_: type, role, capability, service.
+
+**Routing key**:
+The name a request is planned, authorised and reported under, where a chat request has its
+`model`. For the documents routes it is the constant `documents`: a **Policy** lists it in
+`models`, an alias of that name tiers the documents nodes, the **Usage event** carries it as
+`model`. It is not a model name and no node carries it.
+_Avoid_: model name (a documents node serves no model), route name, service name.
+
+**Node key header** (`api_key_header`):
+A **Node** option naming the header the node's key is sent in, raw, instead of `Authorization:
+Bearer` — `X-Api-Key` for docling-serve. The key source and the dropping of the client's own
+credentials are unchanged.
+_Avoid_: auth scheme, key name (that is `api_key_ref`).
 
 **Rerank format** (`rerank_format`):
 A **Node** option naming the dialect its rerank endpoint speaks when that is not the one clients
@@ -248,7 +271,8 @@ _Avoid_: catalog, registry (that word means the snapshot), discovery document.
 
 **Usage event**:
 One record per forwarded request: identity, node, model, status, duration, tokens, cost, and
-where a route counts something else, its own usage unit (**Audio seconds**, **Documents**). The
+where a route counts something else, its own usage unit (**Audio seconds**, **Documents**,
+**Pages**). The
 billing unit
 and the reason Skeid exists between a client and a node.
 _Avoid_: log line, metric, sample.
@@ -261,12 +285,19 @@ Recorded, not priced (ADR 0021).
 _Avoid_: duration (that is the request's wall time, `duration_ms`), audio length, minutes.
 
 **Documents** (`documents`):
-How many documents a rerank request carried, on the **Usage event** of a request the node
-answered. Unlike **Audio seconds** Skeid counts it itself, off the request, so it does not depend
+How many documents a rerank or documents request carried, on the **Usage event** of a request
+the node answered (for a conversion: the files or sources of the request). Unlike **Audio seconds** Skeid counts it itself, off the request, so it does not depend
 on what the node reports; a failed request has no such field. Recorded, not priced. A reranker's
 tokens are not a unit of their own: they are input tokens, wherever the node reports them.
 _Avoid_: texts (TEI's word for them), passages, search units (Cohere's billing unit, not
 recorded), results (what comes back, cut to `top_n`).
+
+**Pages** (`pages`):
+The page count of a converted document, on the **Usage event** of a documents request: the unit
+a conversion is billed by. Read off `document.json_content.pages` of a JSON answer of at most
+8 MiB; absent for a zip, a larger answer, an answer without `json_content` and a format without
+pages — not measured, which is never `0`. Recorded, not priced (ADR 0028).
+_Avoid_: sheets, documents (the request's inputs, a different count), page_count.
 
 **Usage store**:
 The pluggable sink for usage events — `jsonlog` (recommended), `sqlite`, `postgresql`, or a

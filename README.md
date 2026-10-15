@@ -159,6 +159,8 @@ nodes:
     # api_key_env: GPU_API_KEY             # upstream key from this environment variable
     # capacity: { probe: prometheus, path: /metrics }   # see "Capacity"
     # rerank_format: tei                   # a reranker that speaks TEI's dialect, see below
+    # kind: documents                      # a docling-serve node, see below (default: chat)
+    # api_key_header: X-Api-Key            # send the key raw in this header, not as Bearer
     # metadata: { ... }                    # free-form, returned by the admin API
 ```
 
@@ -240,6 +242,26 @@ Without `rerank_format` the request is relayed to `{url}/rerank` as the client s
 is the only other value; an unknown one fails the load. The three nodes above serve one model
 and share its load, each asked in its own dialect. Clients reach them through
 [`/v1/rerank`](#client-protocols).
+
+**A document-conversion node** (docling-serve) is a node of `kind: documents`. It is reached by
+docling's own synchronous calls, `POST /v1/convert/file` and `POST /v1/convert/source`, and by
+nothing else — chat requests never get it, and it never gets one. It has no `model`, and docling
+takes its key in `X-Api-Key`, so the node names that header:
+
+```yaml
+nodes:
+  - id: docling-1
+    url: http://gpu-7:5001           # served at /v1/convert/file, /v1/convert/source
+    kind: documents
+    api_key_env: DOCLING_API_KEY     # DOCLING_SERVE_API_KEY of the node
+    api_key_header: X-Api-Key        # the raw key in this header instead of Authorization: Bearer
+    max_conns: 4                     # docling's own worker count; at least Skeid's --workers
+```
+
+The route is authorised under the name `documents` where a chat request has its model: a key
+with a policy that lists `models` has to list `documents` too, or it is answered `403`; an alias
+named `documents` tiers several docling nodes by tags. Clients reach it through
+[`/v1/convert/file`](#client-protocols).
 
 **An embedding node** is a node like any other too: `POST /v1/embeddings` is routed, admitted
 and metered like a chat request, so several servers of one model share its load, `healthy`,
@@ -468,7 +490,8 @@ for checking it against a real PostgreSQL.
 
 ```yaml
 uploads:
-  max_bytes: 26214400     # default: 25 MiB, OpenAI's own limit for an audio file
+  max_bytes: 26214400            # default: 25 MiB, OpenAI's own limit for an audio file
+  documents_max_bytes: 104857600 # default: 100 MiB, for /v1/convert/file and /v1/convert/source
 ```
 
 The largest request body the upload routes (`/v1/audio/transcriptions`,
@@ -481,6 +504,12 @@ holds while the body arrives, not after it was stored: a request that declares a
 default applies again. An unknown key in it or a value that is not an integer of at least 1
 fails the load. Every other route keeps the server's own request limit (16 MiB,
 `MOJO_MAX_MESSAGE_SIZE`).
+
+`documents_max_bytes` is the same limit for the document-conversion routes, which have their own
+because documents are larger than audio. It counts the request body: `/v1/convert/source` carries
+its files as base64 in JSON, a third larger than the file, and Skeid decodes that body once, in
+memory — send large files to `/v1/convert/file`, which is spooled to disk and relayed from there.
+The time a conversion may take is the upstream timeout, unchanged (`SKEID_UPSTREAM_TIMEOUT`).
 
 Behind a reverse proxy, its own body limit applies first (nginx: `client_max_body_size`).
 
@@ -688,6 +717,7 @@ balancer in front of Skeid needs a read timeout at least as long.
 | `POST /v1/audio/transcriptions` | OpenAI | multipart upload, relayed to the node's own endpoint; answer and stream relayed as they are |
 | `POST /v1/audio/translations` | OpenAI | the same, to the node's translations endpoint |
 | `POST /v1/rerank`, `POST /rerank` | OpenAI | one route under two names; relayed to the node's own endpoint, translated for a `rerank_format: tei` node |
+| `POST /v1/convert/file`, `POST /v1/convert/source` | docling-serve | document conversion under docling's own paths, relayed to a `kind: documents` node; JSON or zip answer as the node gave it |
 | `GET /v1/models` | OpenAI | node models and alias names, per key policy |
 | `POST /v1/messages` | Anthropic | translated to and from OpenAI |
 | `POST /api/chat` | Ollama | translated; streams unless `"stream": false` |
@@ -771,6 +801,28 @@ curl -s http://127.0.0.1:8090/v1/rerank -H "Authorization: Bearer $KEY" \
   with one failed usage event (the node was admitted by then, the slot is given back).
 - Metering: [`documents`](#usage-and-billing) and the node's tokens as input tokens.
 
+**Documents** (`/v1/convert/file`, `/v1/convert/source`). docling-serve's synchronous
+conversion, under its own paths, so a docling client only changes its base URL
+([ADR 0028](docs/adr/0028-documents-routes-are-relayed-over-nodes-of-a-kind.md)):
+
+```sh
+curl -s http://127.0.0.1:8090/v1/convert/file -H "Authorization: Bearer $KEY" \
+  -F files=@report.pdf -F to_formats=md -F do_ocr=true
+```
+
+- The form goes to the node's `/v1/convert/file` part for part and unchanged, the file sent from
+  the spooled upload; a source body is decoded once and written again. The answer is the node's,
+  byte for byte: JSON, or a zip when several documents or outputs come back.
+- There is no `model`. The route is planned over `kind: documents` nodes and authorised under the
+  name `documents` (see [Nodes](#nodes)); a key restricted by `models` without it gets `403`.
+- **Remote sources are refused**: `http_sources`, `callbacks`, a `target` that is not `inbody` or
+  `zip` and a `sources` entry that is not an inline file make the *node* call an address the
+  *client* chose, from inside your network. They are answered `400` (naming the field, never its
+  value) before a node is picked. `documents: {allow_remote_sources: true}` lets them through.
+- Only the synchronous calls are offered. The `/async` calls, status polling and results need
+  task affinity and are a later phase with an ADR of their own.
+- Metering: [`documents` and `pages`](#usage-and-billing); no tokens, nothing priced.
+
 **Anthropic** (`/v1/messages`). Messages, system prompt, images (base64 or URL source) and
 function tools are translated; `tool_use` / `tool_result` round-trips work, including images
 inside a tool result. Streaming emits the Anthropic event sequence (`message_start`,
@@ -836,8 +888,10 @@ Every forwarded request writes one usage event after it finishes, failures inclu
   observation, never turned into tokens)
 - audio routes only, and only when the node reports it: `audio_seconds`, the seconds of audio
   the node worked on
-- the rerank route only, on a request the node answered: `documents`, the number of documents
-  the request carried
+- the rerank and documents routes only, on a request the node answered: `documents`, the number
+  of documents the request carried (files or sources, counted off the request)
+- the documents routes only, and only when the answer carries it: `pages`, the page count of the
+  converted document
 
 Streamed requests are priced from the upstream's usage frame exactly like a non-streamed
 answer. A stream cut short is recorded as failed, and billed from its usage frame if one
@@ -851,6 +905,15 @@ measured, never `0`. Ask for `response_format=verbose_json` where seconds are wh
 A node that reports tokens instead (OpenAI's `gpt-4o-transcribe`, vLLM's stream usage frame)
 fills the token fields as on a chat request. Seconds are recorded, not priced: `pricing` has
 no per-second rate ([ADR 0021](docs/adr/0021-non-chat-routes-are-relayed-not-translated.md)).
+
+`pages` is read off `document.json_content.pages` of the node's JSON answer, which docling returns
+when `json` is among the requested `to_formats`. Skeid decodes at most 8 MiB of answer for it: a
+zip, a larger answer, an answer without `json_content` and a format without pages leave the field
+out -- not measured, never `0`. Reading it costs one bounded JSON decode on the request path
+(none beyond 8 MiB); a deployment that converts big documents should measure it with `bench/`
+([ADR 0028](docs/adr/0028-documents-routes-are-relayed-over-nodes-of-a-kind.md)). Pages are
+recorded, not priced. The column is added to an existing table on start; `skeid usage` prints
+`pages` where there are some.
 
 `documents` is counted by Skeid off the request, so it is there whatever the node reports; a
 failed rerank request has no such field. The event's `endpoint` is `/v1/rerank` for both

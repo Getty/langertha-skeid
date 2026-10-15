@@ -21,6 +21,7 @@ Langertha::Skeid          nodes, routing, admission, config, pricing, usage, reg
   ::Protocol::Audio       /v1/audio/* relayed, not translated: form fields, usage units (ADR 0021)
   ::Protocol::Rerank      /v1/rerank relayed; a rerank_format: tei node translated upstream (ADR 0021)
   ::Protocol::MCP         MCP gateway wire: relayed headers, upstream URL, listing entry (ADR 0022)
+  ::Protocol::Documents   /v1/convert/{file,source} relayed: remote-source fields, pages, node kind (ADR 0028)
   ::UsageStore            config normalization + backend factory
   ::UsageStore::JsonLog   append-only JSON events (recommended default)
   ::UsageStore::DBI       sqlite + postgresql
@@ -47,7 +48,14 @@ api_key_ref: secret/…  # key reference resolved through the KeyBroker per requ
 api_key_env: VAR       # fallback: key from this environment variable
 capacity: { probe: … } # optional capacity probe (skeid-routing)
 rerank_format: tei     # optional: the node's rerank endpoint speaks TEI's dialect, not the client's
+kind: documents        # optional: a docling-serve node; default chat (ADR 0028, skill skeid-routing)
+api_key_header: X-Api-Key  # optional: the key goes raw in this header, not Authorization: Bearer
 ```
+
+- `kind` and `api_key_header` are validated in `add_node` (`Protocol::Documents->normalize_kind`,
+  `normalize_key_header`) before `remove_node`, so a bad re-add keeps the working node (k98). An
+  unknown kind croaks; a header that is no RFC 7230 token croaks; `Authorization` is the default
+  spelled out and not kept. `kind` is a node option, never an `engine` branch.
 
 - `rerank_format` is validated in `add_node` by `Protocol::Rerank->normalize_format`; an unknown
   value croaks (failed config load), like an unknown `engine`. Absent = rerank is relayed. A node
@@ -127,7 +135,8 @@ admin_api_key: "…"               # or admin_api_key_env:, or admin: { api_key 
 usage_store: { backend: …, … }
 manifest:   { enabled, public_url, … }   # provider manifest, per-key grants in keys: (ADR 0015)
 registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
-uploads:    { max_bytes: 26214400 }      # body limit of the upload routes (/v1/audio/*); ADR 0021
+uploads:    { max_bytes: 26214400, documents_max_bytes: 104857600 }   # body limits: /v1/audio/* (ADR 0021), /v1/convert/* (ADR 0028)
+documents:  { allow_remote_sources: false }   # may /v1/convert/* name an address for the node to fetch (default: 400)
 client_auth: { keys: [name-or-key-id] }   # only these callers may use the client routes; 401 otherwise (ADR 0020)
 mcp:        { public_url, servers: { … } }   # MCP gateway (ADR 0022; skill skeid-relay-routes)
 customer_source: { dsn | from_usage_store, relation, … }   # customer key ids from a DB view (ADR 0026; skill skeid-routing)
@@ -168,8 +177,9 @@ hands the event to the store.
   whole migration story; it never drops or rewrites a column.
 - Optional fields say "not measured" by being **absent, never `0`** (ADR 0021): `content_bytes`
   (streams only), `audio_seconds` (audio, only when the node reports a duration), `documents`
-  (rerank, counted off the request, only when the node answered); the last two recorded, not
-  priced. A new usage unit follows the same path: `record_usage` argument, nullable column via
+  (rerank and documents, counted off the request, only when the node answered), `pages`
+  (documents, read off `document.json_content.pages` of a JSON answer up to 8 MiB); the last
+  three recorded, not priced. A new usage unit follows the same path: `record_usage` argument, nullable column via
   `@ADDED_COLUMNS` in `UsageStore::DBI`, a key `jsonlog` writes as is, and a sum in the report's
   `totals` / `by_key` / `by_model` that `skeid usage` prints only when non-zero.
 - Backend selection (`UsageStore->normalize_config`) is inference-first: explicit `backend` wins,

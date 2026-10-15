@@ -214,6 +214,8 @@ sub _run_usage {
   printf "Audio:  seconds=%s\n", _seconds($tot->{audio_seconds}) if $tot->{audio_seconds};
   # Likewise the documents of the rerank route (skeid k92).
   printf "Rerank: documents=%d\n", $tot->{documents} if $tot->{documents};
+  # And the pages of the documents routes (skeid k94): one line, only where there are pages.
+  printf "Pages:  pages=%d\n", $tot->{pages} if $tot->{pages};
 
   print "\nBy API key:\n";
   print "  (none)\n" unless @{$report->{by_key} || []};
@@ -262,7 +264,8 @@ sub _row_units {
   my ($row) = @_;
   return join '',
     ($row->{audio_seconds} ? ' audio_seconds=' . _seconds($row->{audio_seconds}) : ()),
-    ($row->{documents}     ? ' documents=' . (0 + $row->{documents})             : ());
+    ($row->{documents}     ? ' documents=' . (0 + $row->{documents})             : ()),
+    ($row->{pages}         ? ' pages=' . (0 + $row->{pages})                     : ());
 }
 
 # Seconds of audio for the report: a float sum, printed without the noise binary fractions
@@ -390,7 +393,8 @@ C<configured DSN>), totals, per API key id, per model, and the newest events. Wh
 routes recorded any, an C<Audio: seconds=...> line follows the totals and the rows that have some
 end in C<audio_seconds=...>; a store without such events prints neither. The rerank route's
 documents are printed the same way: a C<Rerank: documents=...> line and C<documents=...> on the
-rows that have some. The store is the
+rows that have some, and the pages the documents routes (C</v1/convert/*>) read off their answers
+as a C<Pages: pages=...> line and C<pages=...> on the rows. The store is the
 config's C<usage_store>; any of C<--backend>, C<--log-path>, C<--db>, C<--dsn>, C<--db-user>,
 C<--db-pass> or C<--db-pass-env> replaces it with a store built from those options alone. Exits
 0, or 2 after printing C<ERROR: ...> when the report fails (no store configured, say) or

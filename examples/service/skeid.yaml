@@ -21,6 +21,22 @@ nodes:
   #   engine: openai
   #   api_key_ref: secret/skeid/remote/openai
 
+# A docling-serve node (ADR 0028) is a node of kind documents: reached by /v1/convert/file and
+# /v1/convert/source only, authorised under the name `documents` (a key policy with `models:`
+# has to list it), and called with its key in X-Api-Key. No model is configured.
+#
+#   - id: docling-1
+#     url: http://docling:5001
+#     kind: documents
+#     api_key_env: SKEID_DOCLING_KEY
+#     api_key_header: X-Api-Key
+#     max_conns: 4
+#
+# uploads:
+#   documents_max_bytes: 104857600   # default 100 MiB
+# documents:
+#   allow_remote_sources: false      # true: http_sources / callbacks are passed to the node
+
 # Usage storage via PostgreSQL.
 # This stack chooses postgresql over the (faster, simpler) jsonlog dir mode on
 # purpose: it is a multi-frontend deployment that wants one queryable billing

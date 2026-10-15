@@ -104,7 +104,7 @@ sub form_fields {
     my $part = $parts->[$index];
     return ({}, 'Nested multipart parts are not supported') if $part->is_multipart;
     my $disposition = $part->headers->content_disposition // next;
-    my ($names, $is_file, $extended) = $class->_disposition_names($disposition);
+    my ($names, $is_file, $extended) = $class->disposition_names($disposition);
     return ({}, 'A form field name in the extended notation (name*) is not supported')
       if $extended;
     next if $is_file;
@@ -119,9 +119,18 @@ sub form_fields {
   return (\%field, undef);
 }
 
-# What a part's Content-Disposition says the part is: every value of a `name` parameter, whether
-# it has a file name, and whether a name is given in the extended notation (`name*`, `name*0`).
-sub _disposition_names {
+=method disposition_names
+
+  my ($names, $is_file, $extended) =
+    Langertha::Skeid::Protocol::Audio->disposition_names($part->headers->content_disposition);
+
+What a part's C<Content-Disposition> says the part is: every value of its C<name> parameter, read
+as liberally as L</form_fields> says, whether it has a file name, and whether a name is given in
+the extended notation (C<name*>, C<name*0>). The documents routes read their form with it too.
+
+=cut
+
+sub disposition_names {
   my ($class, $disposition) = @_;
   my (@names, $is_file, $extended);
   while ($disposition =~ /(?:\A|[;,])\s*([^\s=;,"]+)\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^;,\s]*))/g) {

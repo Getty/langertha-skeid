@@ -115,6 +115,30 @@ my %SCHEMA = (
     },
     required => [ 'file', 'model' ],
   },
+  DocumentsFileRequest => {
+    type       => 'object',
+    description => 'docling-serve\'s form: the files plus its option fields, relayed as sent.',
+    properties => {
+      files => { type => 'array', items => { type => 'string', contentMediaType => 'application/octet-stream' } },
+    },
+    required => ['files'],
+  },
+  DocumentsSourceRequest => {
+    type       => 'object',
+    description => 'docling-serve\'s source body: inline files (base64) and options, relayed as sent.',
+    properties => {
+      file_sources => {
+        type  => 'array',
+        items => {
+          type       => 'object',
+          properties => { base64_string => { type => 'string' }, filename => { type => 'string' } },
+          required   => [ 'base64_string', 'filename' ],
+        },
+      },
+      options => { type => 'object' },
+    },
+    required => ['file_sources'],
+  },
   AnthropicMessagesRequest => {
     type       => 'object',
     properties => {
@@ -156,6 +180,8 @@ my %EXAMPLE = (
   ChatCompletionRequest    => sub { +{ model => $_[0], messages => [ { role => 'user', content => 'Hello' } ] } },
   EmbeddingsRequest        => sub { +{ model => $_[0], input => 'The quick brown fox' } },
   RerankRequest            => sub { +{ model => $_[0], query => 'What is Skeid?', documents => [ 'A routing proxy.', 'A fruit.' ] } },
+  DocumentsSourceRequest   => sub { +{ options => { to_formats => ['md'] },
+    file_sources => [ { base64_string => 'JVBERi0xLjQK', filename => 'document.pdf' } ] } },
   AnthropicMessagesRequest => sub { +{ model => $_[0], max_tokens => 256, messages => [ { role => 'user', content => 'Hello' } ] } },
   OllamaChatRequest        => sub { +{ model => $_[0], stream => \0, messages => [ { role => 'user', content => 'Hello' } ] } },
   OllamaGenerateRequest    => sub { +{ model => $_[0], stream => \0, prompt => 'Hello' } },

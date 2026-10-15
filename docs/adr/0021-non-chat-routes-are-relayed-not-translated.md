@@ -1,6 +1,6 @@
 # ADR 0021 — Non-chat routes of the OpenAI face are relayed, not translated; their usage units are optional event fields
 
-- Status: accepted — implemented for audio (skeid k91) and rerank (skeid k92, see Update)
+- Status: accepted — implemented for audio (skeid k91), rerank (skeid k92) and documents (skeid k94), see the Updates
 - Date: 2026-10-03
 - Tags: protocols, relay, audio, rerank, uploads, usage, metering, pricing
 
@@ -206,3 +206,25 @@ admission, TEI's translation with ordering, `top_n`, `return_documents`, the nod
 without `/v1`, the refusal after admission, a non-array answer, load sharing with `max_conns`
 and health, the `401` before anything is forwarded, every exit path's `request.finish` and one
 event, and the stores.
+
+## Update (skeid k94, 2026-10-15): the documents routes are the third relayed route family
+
+`POST /v1/convert/file` and `POST /v1/convert/source` — docling-serve's synchronous conversion,
+under its own paths — are relayed under every rule above: the form goes upstream part for part, a
+source body is decoded and written again so the node sees exactly one reading of it, the answer
+(JSON or zip) comes back byte for byte, one `$relay`, no second proxy function. The face has no
+`model`, so three things are new, and ADR 0028 decides them:
+
+- **A route is planned over nodes of a kind** (`kind: documents`), authorised under the routing
+  key `documents` that a key policy's `models` grants. Chat nodes and documents nodes never
+  serve each other's routes.
+- **Remote sources and callbacks are refused by default** (`400`, before admission): the node
+  would fetch from an address the client names.
+- **The unit is `pages`**, an optional nullable event field like `audio_seconds`, read off the
+  answer when it is a JSON answer of at most 8 MiB, else absent. `documents` is counted off the
+  request as rerank counts it.
+
+The upload limit became a route table: `uploads.max_bytes` for audio, `uploads.documents_max_bytes`
+(100 MiB) for the documents routes. Not a pattern yet: one form of `$relay` (`max_parse_bytes`)
+was added, no new upstream dialect. A route with upstream dialects of its own still needs its own
+ADR, as the rerank Update says.

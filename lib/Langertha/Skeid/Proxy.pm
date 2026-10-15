@@ -21,6 +21,7 @@ use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Anthropic::Stream;
 use Langertha::Skeid::Protocol::Audio;
+use Langertha::Skeid::Protocol::Documents;
 use Langertha::Skeid::Protocol::MCP;
 use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Ollama::Stream;
@@ -175,6 +176,37 @@ C<usage.prompt_tokens>, else C<usage.total_tokens>, else Cohere's C<meta.tokens.
 or a TEI node's C<x-compute-tokens>. A node that reports none leaves an event without tokens.
 infinity counts characters unless it runs with C<lengths_via_tokenize>; Skeid records what the
 node says. See L<Langertha::Skeid/Pluggable Usage Storage>.
+
+=head2 Documents routes
+
+C<POST /v1/convert/file> and C<POST /v1/convert/source> are the synchronous calls of docling-serve
+under its own paths (skeid k94, ADR 0028), so a docling client only changes its base URL. They
+are relayed like the audio routes: the multipart form goes upstream part for part, a source body
+(JSON, files as base64) is decoded once and written again, and the node's answer -- JSON, or a
+zip when several documents or outputs come back -- is relayed byte for byte, whatever its
+status. The asynchronous calls are not offered.
+
+The request has no C<model>. It is planned over the nodes of C<kind: documents>
+(L<Langertha::Skeid/nodes>) under the routing key C<documents>: a key whose policy lists C<models>
+must list C<documents> or is answered C<403>; an alias named C<documents> tiers the nodes by
+tags; chat requests never reach these nodes and these never reach chat nodes, and C</v1/models>
+lists none of it. Before a node is chosen, a request that makes the node fetch from or call an
+address the client names -- C<http_sources>, C<callbacks>, a C<target> that is not C<inbody> or
+C<zip>, a C<sources> entry that is not a file, in any spelling, named twice or not -- is a C<400>
+that names the field and costs no slot and no event, unless C<documents.allow_remote_sources>.
+
+The body limit is C<uploads.documents_max_bytes> (default 100 MiB), applied as for audio before
+the body is read: C<413>, or C<401> for a caller C<client_auth> refuses. A form is spooled to disk
+and sent from there; a source body is decoded in memory, once, which is CPU on the event loop
+proportional to its size -- big files belong to C</v1/convert/file>. The node's key goes in the
+header its C<api_key_header> names (C<X-Api-Key> for docling-serve), the client's credentials are
+dropped. The wait for a conversion is the upstream timeout, unchanged.
+
+The event has C<api_format> C<docling>, C<model> C<documents>, C<documents> (files or sources the
+request held, on a request the node answered) and C<pages>, read off
+C<document.json_content.pages> of a JSON answer up to 8 MiB -- nothing is decoded beyond that, a
+zip is not decoded at all, and an answer without a page count leaves C<pages> out. No tokens,
+nothing priced. See L<Langertha::Skeid::Protocol::Documents>.
 
 =head2 MCP routes
 
@@ -718,6 +750,20 @@ sub _build_route_table {
       handler => sub { _handle_openai_rerank($_[0]) });
   }
 
+  # Documents (skeid k94, ADR 0028): docling-serve's synchronous conversion, under its own paths.
+  # Relayed like audio; planned over the nodes of kind `documents`, not by a model name.
+  for my $endpoint (Langertha::Skeid::Protocol::Documents->routes) {
+    my $file = $endpoint =~ /file\z/;
+    (my $id = $endpoint) =~ s{[^A-Za-z0-9]+}{_}g;
+    $add->(id => 'documents' . $id, group => 'openai', methods => ['POST'], paths => [$endpoint],
+      tag => 'Documents', summary => 'Convert ' . ($file ? 'uploaded files' : 'sources') . ' to a document',
+      request => ($file ? 'DocumentsFileRequest' : 'DocumentsSourceRequest'),
+      ($file ? (request_type => 'multipart') : ()),
+      description => 'docling-serve\'s own call, relayed to a node of kind documents; the answer '
+        . '(JSON, or a zip) is the node\'s. Authorised under the model name documents.',
+      handler => sub { _handle_documents($_[0], $endpoint) });
+  }
+
   # The description of the client routes themselves. Behind the client gate like /v1/models:
   # the examples carry model names, and those are per key.
   $add->(id => 'openapi', group => 'openai', paths => ['/openapi.json'], tag => 'Service',
@@ -1217,16 +1263,25 @@ sub _handle_openai_embeddings {
 # - A caller the client gate is going to refuse is cut off the same way, so its 401 does not
 #   cost an upload spooled to disk first. The gate itself still runs and renders the 401.
 #
+# Which limit a route has is the route table below: the audio routes the uploads.max_bytes, the
+# documents routes (a form, and base64 in JSON for /v1/convert/source) uploads.documents_max_bytes.
+# A new upload route is an entry there, or it runs under the server's 16 MiB.
+#
 # The limit is read off the Skeid here, after picking up a changed config, so a reload holds
 # from the next upload. Every other route keeps the server's own limit: nothing is set for it.
 # A failure here leaves the server's limit in force and the route's own checks to decide.
+my %UPLOAD_ROUTE = (
+  (map { $_ => 'upload_max_bytes' }    Langertha::Skeid::Protocol::Audio->routes),
+  (map { $_ => 'documents_max_bytes' } Langertha::Skeid::Protocol::Documents->routes),
+);
+
 sub _limit_upload {
   my ($app, $tx) = @_;
   my $req = $tx->req;
   (my $path = $req->url->path->to_route) =~ s{/\z}{};
   return _limit_mcp_request($app, $tx) if $path =~ m{\A/mcp/};
   return unless uc($req->method // '') eq 'POST';
-  return unless Langertha::Skeid::Protocol::Audio->upstream_path($path);
+  my $limit = $UPLOAD_ROUTE{$path} or return;
 
   my $done = eval {
     my $c = $app->build_controller($tx);
@@ -1238,7 +1293,7 @@ sub _limit_upload {
       return 1;
     }
 
-    my $max = $skeid->upload_max_bytes;
+    my $max = $skeid->$limit;
     my $declared = $req->headers->content_length;
     if (!$req->content->is_chunked && defined($declared) && $declared =~ /\A[0-9]+\z/ && $declared > $max) {
       $req->max_message_size(1);
@@ -1359,6 +1414,110 @@ sub _handle_openai_audio {
       _render_upstream_response($c, $res, $node_id);
     }, undef, $relay);
   });
+}
+
+# POST /v1/convert/file and POST /v1/convert/source (skeid k94, ADR 0028): docling-serve's
+# synchronous conversion under its own paths, relayed in its own shape like the audio routes
+# (ADR 0021) -- a form goes upstream part for part, a source body is decoded once and written
+# again so the node reads exactly what Skeid did, and the answer (JSON, or a zip) comes back byte
+# for byte. There is no `model` field: the route is planned over the nodes of kind `documents`
+# under the routing key `documents`, which is what a key's policy grants. Skeid refuses what makes
+# the node fetch from an address the client names, unless documents.allow_remote_sources: that
+# is a server-side request from inside the cluster network. The wire is
+# Langertha::Skeid::Protocol::Documents's to know.
+sub _handle_documents {
+  my ($c, $endpoint) = @_;
+  my $docs = 'Langertha::Skeid::Protocol::Documents';
+  _extend_client_timeout($c);
+  my $req   = $c->req;
+  my $skeid = $c->skeid;
+
+  # A request cut off by _limit_upload has no complete body. The size is checked again,
+  # exactly, for what the limit set there lets through.
+  my $max = $skeid->documents_max_bytes;
+  if ($req->is_limit_exceeded || ($req->body_size // 0) > $max) {
+    _render_error($c, 413, "Maximum content size limit ($max bytes) exceeded", 'invalid_request_error');
+    return;
+  }
+
+  my ($remote, $count, $body, $content);
+  if ($endpoint =~ /file\z/) {
+    $content = $req->content;
+    unless ($content->is_multipart) {
+      _render_error($c, 400, 'Expected a multipart/form-data body', 'invalid_request_error');
+      return;
+    }
+    my ($names, $problem) = $docs->form_remote_fields($content);
+    if (defined $problem) {
+      _render_error($c, 400, $problem, 'invalid_request_error');
+      return;
+    }
+    $remote = $names;
+    $count  = $docs->document_count($content);
+  }
+  else {
+    $body = $req->json;
+    unless (ref($body) eq 'HASH') {
+      _render_error($c, 400, 'Expected a JSON object', 'invalid_request_error');
+      return;
+    }
+    $remote = $docs->json_remote_fields($body, $req->body);
+    $count  = $docs->document_count($body);
+  }
+
+  # Before admission, so it costs no slot and no event. The message names the field and never
+  # what it holds: the value is an address the caller chose.
+  if (@$remote && !$skeid->documents_allow_remote_sources) {
+    _render_error($c, 400,
+      "The '$remote->[0]' field is not accepted: requests that make the node fetch from or call "
+      . 'an address are disabled (documents.allow_remote_sources)', 'invalid_request_error');
+    return;
+  }
+
+  my $routing_key = $docs->routing_key;
+  my $api_key_id  = _request_api_key_id($c);
+  _begin_route_async($c, $routing_key, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
+    return unless $route;
+
+    my $url = _endpoint_url_for_node($route->{url}, $docs->upstream_path($endpoint));
+    my $meta = {
+      api_format => $docs->api_format,
+      endpoint   => $endpoint,
+      api_key_id => $api_key_id,
+      provider   => 'skeid',
+      engine     => ($route->{engine} // 'openaibase'),
+      model            => $routing_key,
+      requested_model  => $routing_key,
+      route_url        => ($route->{url} // ''),
+    };
+    my $relay = {
+      # The form is built from the parts the server parsed: a part is its headers and an asset,
+      # and a file above 256 KiB is an asset on disk, sent from there and never copied. The
+      # client's Content-Type, boundary included, travels in the forwarded headers.
+      ($content ? (request => sub {
+        my ($ua, $url, $headers) = @_;
+        return $ua->build_tx(POST => $url, $headers,
+          multipart => Langertha::Skeid::Protocol::Audio->upstream_parts($content, {}));
+      }) : ()),
+      # Not decoded past what is worth the CPU of the event loop; and no tokens to read.
+      max_parse_bytes => $docs->max_parse_bytes,
+      usage => sub { return },
+      units => sub {
+        my ($payload, $res) = @_;
+        return unless $res->is_success;
+        my $pages = $docs->pages($payload, $res);
+        return (documents => $count, (defined $pages ? (pages => $pages) : ()));
+      },
+    };
+
+    $c->render_later;
+    _proxy_openai_json_async($c, $url, ($body // {}), $node_id, $started, $meta, sub {
+      my ($res, $err, $status) = @_;
+      return if $err;
+      _render_upstream_response($c, $res, $node_id);
+    }, undef, $relay);
+  }, kind => 'documents');
 }
 
 # POST /v1/rerank and POST /rerank (skeid k92). A JSON body in the shape Cohere, vLLM, Jina and
@@ -1626,14 +1785,18 @@ sub _handle_ollama {
 # $cb is called with ($route, $node_id, $started, $tier) on success and with nothing on failure,
 # after the error has been rendered.
 sub _begin_route_async {
-  my ($c, $model, $api_key_id, $cb) = @_;
+  my ($c, $model, $api_key_id, $cb, %route) = @_;
   $cb ||= sub { };
+  # What the route is over besides a model name: `documents` plans over the nodes of that kind
+  # (ADR 0028). Chat routes pass nothing.
+  my @kind = length($route{kind} // '') ? (kind => $route{kind}) : ();
   my $wait_poll_ms = 0 + ($c->skeid->route_wait_poll_ms // 25);
   $wait_poll_ms = 1 if $wait_poll_ms < 1;
 
   my $decision = $c->skeid->call_function('route.plan', {
     model      => ($model // ''),
     api_key_id => $api_key_id,
+    @kind,
   });
 
   # The key's policy does not grant this model, or grants it but forbids every tier that serves
@@ -1664,6 +1827,7 @@ sub _begin_route_async {
         my $state = $c->skeid->call_function('route.state', {
           model => ($tier->{model} // ''),
           tags  => ($tier->{tags} || []),
+          @kind,
         });
         $without_deny = 1, last if ref($state) eq 'HASH' && $state->{has_eligible};
       }
@@ -1698,6 +1862,7 @@ sub _begin_route_async {
       tags      => ($tier->{tags} || []),
       deny_tags => ($tier->{deny_tags} || []),
       (length($tier->{engine} // '') ? (engine => $tier->{engine}) : ()),
+      @kind,
     );
 
     my $state = $c->skeid->call_function('route.state', \%selector);
@@ -1911,7 +2076,10 @@ sub _proxy_openai_json_async {
     }
 
     my $status = $res->code // 200;
-    my $payload = eval { $res->json };
+    # A route that names a bound leaves a larger answer undecoded (a converted document is
+    # megabytes, and decoding it is CPU on the loop); its units then say nothing.
+    my $payload = (defined($relay->{max_parse_bytes}) && ($res->body_size // 0) > $relay->{max_parse_bytes})
+      ? undef : eval { $res->json };
 
     my $translated;
     if ($translate || $relay->{answer}) {
@@ -2562,7 +2730,10 @@ sub _inject_node_auth_async {
 
     if (defined $key) {
       _drop_client_credentials($headers_ref);
-      $headers_ref->{Authorization} = "Bearer $key";
+      # The header the node names carries the raw key; without one it is a Bearer token.
+      my $header = $node->{api_key_header};
+      if (defined($header) && length($header)) { $headers_ref->{$header} = $key }
+      else                                     { $headers_ref->{Authorization} = "Bearer $key" }
       return $cb->();
     }
 
@@ -3091,6 +3262,8 @@ sub _record_usage_event {
       (defined($args->{audio_seconds}) ? (audio_seconds => 0 + $args->{audio_seconds}) : ()),
       # The rerank route only, and only for a request the node answered (skeid k92).
       (defined($args->{documents}) ? (documents => 0 + $args->{documents}) : ()),
+      # The documents routes, when the answer carried a page count (skeid k94, ADR 0028).
+      (defined($args->{pages}) ? (pages => 0 + $args->{pages}) : ()),
       metrics       => $safe_metrics,
     });
   };
