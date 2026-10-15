@@ -330,7 +330,7 @@ _Avoid_: login, access control, key check, refusal (that word means the policy's
 
 **Customer source** (`customer_source:`):
 An optional database relation, `SELECT key_id, name, policy, models`, that another application
-owns and Skeid only reads (ADR 0024). One row per active **Customer key ID**; a revoked key is a
+owns and Skeid only reads (ADR 0026). One row per active **Customer key ID**; a revoked key is a
 row that is absent. It adds customers to the file — the file wins per id — and names the file's
 **Policy** profile each one runs under; it defines no routing semantics itself. Fetched in the
 background, never on the request path.
@@ -489,6 +489,6 @@ _Avoid_: hot reload, restart, refresh.
   `Langertha::Skeid::Registry`, ADR 0017), and — in ADR 0011 and `key_id_for_name` — the
   `names:` section. The bare word means the snapshot; the other is the **Customer name** map.
 - **"snapshot"** is two things: the **Registry snapshot** (Skeid-to-Skeid, signed, ADR 0017) and
-  the customer **Snapshot** of a **Customer source** (ADR 0024). Say which.
+  the customer **Snapshot** of a **Customer source** (ADR 0026). Say which.
 - **"backend"** appears both as the usage-store driver name (`backend: postgresql`, correct)
   and colloquially for an upstream node (wrong). Upstream side is **Node**.

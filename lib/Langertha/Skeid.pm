@@ -426,7 +426,7 @@ key id is what has to be on the list.
     listen: skeid_customers      # optional
 
 The caller side of the config -- who may call and under which profile -- read from a database
-view another application owns (ADR 0024, skeid k108, k109). Skeid reads
+view another application owns (ADR 0026, skeid k108, k109). Skeid reads
 C<SELECT key_id, name, policy, models FROM E<lt>relationE<gt>>: one row per active customer key
 id, a revoked key is a row that is absent. Rows are validated one by one before they merge; a
 row with a malformed C<key_id>, a C<policy> the file's C<policies:> does not define, a C<models>
@@ -1371,7 +1371,7 @@ has registry_error_window_s => (is => 'rw', default => sub { 60 });
 # node_id => { last_at => epoch, buckets => { epoch_second => count } }. Failed requests, for
 # the registry snapshot's errors_in_window and last_failure_at. Reported, never consulted by
 # admission: health is operator state (ADR 0009, ADR 0017).
-# The customer source (ADR 0024, skeid k108): what the database view said about who may call and
+# The customer source (ADR 0026, skeid k108): what the database view said about who may call and
 # under which profile. The fetcher is built from the config's customer_source section and holds
 # the snapshot; names and the merge report are what the last applied config made of it.
 has customer_source_factory => (is => 'ro', predicate => 'has_customer_source_factory');
@@ -1949,7 +1949,7 @@ sub _customer_snapshot_moved {
 
   my $status = $skeid->customer_source_status;   # undef without a customer_source section
 
-The state of the customer source (ADR 0024): whether a snapshot is in force and how old it is,
+The state of the customer source (ADR 0026): whether a snapshot is in force and how old it is,
 the last fetch failure's kind (never its text), and what the applied config made of the rows --
 C<accepted>, C<shadowed> (named by the file, which wins) and C<rejected> counts. Also served,
 under C<customer_source>, by L</reload_status> and so by C<GET /skeid/config>.
@@ -2056,7 +2056,7 @@ sub _read_config {
     ? "version:$version"
     : 'digest:' . _config_digest($cfg);
 
-  # The customer snapshot is part of what the config is (ADR 0024): the same file with another
+  # The customer snapshot is part of what the config is (ADR 0026): the same file with another
   # snapshot is another config, applied through this same path and rolled back by it.
   my $fetcher = $self->_customer_fetcher;
   if (ref($cfg->{customer_source}) eq 'HASH' && $fetcher
@@ -2125,7 +2125,7 @@ sub _apply_config {
   my $before = $self->_config_declared;
   my (%declared, @notices);
 
-  # The customer source (ADR 0024): validated here, so a bad section fails the load and rolls
+  # The customer source (ADR 0026): validated here, so a bad section fails the load and rolls
   # back like any other. Its snapshot -- the one the fingerprint was read with -- is merged into
   # a copy of the config, which the sections below then load as if the file had said it.
   $self->_customer_next(undef);

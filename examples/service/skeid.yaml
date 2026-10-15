@@ -100,7 +100,7 @@ routing:
 # client_auth:
 #   keys: [shared]          # with names: { shared: k_... } above, or the k_... id directly
 
-# Customer source (ADR 0024). Customers created and revoked by another application that owns a
+# Customer source (ADR 0026). Customers created and revoked by another application that owns a
 # database: Skeid reads one view, `SELECT key_id, name, policy, models FROM <relation>`, one row
 # per ACTIVE key id (a revoked key is a row that is absent), and never writes. key_id is
 # k_ + 40 hex from `skeid keyid`, policy names a profile in policies: above (NULL = default_policy),

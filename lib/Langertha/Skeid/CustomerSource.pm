@@ -25,7 +25,7 @@ use Langertha::Skeid::CustomerSource::DBI;
 =head1 DESCRIPTION
 
 An optional C<customer_source:> section names a database relation Skeid reads for the caller
-side of its config (ADR 0024). The contract is
+side of its config (ADR 0026). The contract is
 
   SELECT key_id, name, policy, models FROM <relation>
 
@@ -675,7 +675,7 @@ sub _allowed_list {
 
 =over 4
 
-=item * F<docs/adr/0024-customer-keys-can-come-from-a-database-view.md>
+=item * F<docs/adr/0026-customer-keys-can-come-from-a-database-view.md>
 
 =item * L<Langertha::Skeid::CustomerSource::DBI> -- the blocking read that runs in the child
 

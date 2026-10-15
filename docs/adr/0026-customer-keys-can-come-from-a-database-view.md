@@ -1,4 +1,4 @@
-# ADR 0024 — Customer keys, names and policies can come from a database view, fetched in the background
+# ADR 0026 — Customer keys, names and policies can come from a database view, fetched in the background
 
 - Status: accepted — implemented (skeid k108, k109)
 - Date: 2026-10-15

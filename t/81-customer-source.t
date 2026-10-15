@@ -9,7 +9,7 @@ use YAML::PP;
 use Langertha::Skeid;
 use Langertha::Skeid::CustomerSource;
 
-# skeid k108/k109, ADR 0024: customer keys, names and policies from a database view, fetched in
+# skeid k108/k109, ADR 0026: customer keys, names and policies from a database view, fetched in
 # the background by a child process. Everything offline: a DBD::SQLite file stands in for
 # PostgreSQL and the subprocess path runs against it; a fake source object covers the failure
 # modes a database would need a network for.
