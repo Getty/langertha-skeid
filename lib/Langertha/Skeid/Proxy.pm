@@ -18,6 +18,7 @@ use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Anthropic::Stream;
 use Langertha::Skeid::Protocol::Audio;
+use Langertha::Skeid::Protocol::MCP;
 use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Ollama::Stream;
 use Langertha::Skeid::Protocol::RawBody;
@@ -52,6 +53,7 @@ blocks the loop.
 
 No Skeid credential is needed on these unless the config has a C<client_auth> section; then
 every one but C</health> answers C<401> to a key not on its list. See L</Customer identity>.
+The MCP routes exist only with an C<mcp> section and always need a key; see L</MCP routes>.
 
   GET  /health                     {status: ok, proxy: skeid, config_reload: {...}}
   GET  /.well-known/langertha.json provider manifest for the presented key
@@ -67,6 +69,9 @@ every one but C</health> answers C<401> to a key not on its list. See L</Custome
   POST /api/generate               Ollama generate; streams unless "stream": false
   GET  /api/tags                   Ollama: the same names as /v1/models
   GET  /api/ps                     Ollama: always an empty list
+  GET  /v1/mcp/servers             the MCP servers assigned to the presented key
+  ANY  /mcp/:name                  POST, GET, DELETE: relayed to that MCP server
+  ANY  /mcp/:name/*path            the same, to a sub-path of it
 
 C</health> stays C<ok> while a config reload is failing -- the proxy serves under the config it
 kept -- and shows the reload state without its message. C</v1/models> and C</api/tags> list the
@@ -163,6 +168,74 @@ or a TEI node's C<x-compute-tokens>. A node that reports none leaves an event wi
 infinity counts characters unless it runs with C<lengths_via_tokenize>; Skeid records what the
 node says. See L<Langertha::Skeid/Pluggable Usage Storage>.
 
+=head2 MCP routes
+
+The MCP gateway (skeid k103, ADR 0022): a customer reaches the MCP servers the config assigned
+to its key (L<Langertha::Skeid/mcp>) with that key, one route per server. Skeid relays MCP's
+Streamable HTTP transport and reads none of it -- no JSON-RPC, no tool list, no session. What it
+knows of the wire is in L<Langertha::Skeid::Protocol::MCP>.
+
+Both routes sit behind one check, in this order. Without an C<mcp> section they are unknown
+paths and answer as one, C<404>, whatever the caller presents. Then client authentication, as
+on every client route (L</Customer identity>). Then a key at all: no key is C<401> C<Missing
+API key> also while C<client_auth> is off, because a server is assigned to a key id and no key
+has none. The identity is the one every route uses, C<routing.trust_key_id_header> included.
+
+C<GET /v1/mcp/servers> lists the servers assigned to the presented key, sorted by name:
+
+  { "object": "list", "data": [
+    { "name": "bookrag", "transport": "streamable-http",
+      "url": "https://llm.example.com/mcp/bookrag", "description": "..." },
+    { "name": "files", "transport": "stdio", "command": "mcp-files",
+      "args": ["--root", "/srv/data"], "env": {}, "description": "..." } ] }
+
+C<url> is C<mcp.public_url> (else the scheme and host of this request) plus C</mcp/E<lt>nameE<gt>>.
+A C<stdio> entry is a hint for a server on the customer's own machine. The upstream URL, the
+key reference, the variable name and the static headers are never in it. A key with no
+assignment gets an empty list. The answer is C<Cache-Control: private, no-store>.
+
+C<POST>, C<GET> and C<DELETE> on C</mcp/E<lt>nameE<gt>> are relayed to the server's C<url>; a
+path after the name is appended to it segment by segment, and the client's query to its query.
+Everything that is not a relayed server of the presented key is the same C<404> C<not_found>: an
+unknown name, a server assigned to another key, a C<stdio> entry, a sub-path with a C<.> or
+C<..> segment or a backslash. A key cannot tell which names exist.
+
+Upstream go the method, the body as the bytes it came in, and of the client's headers
+C<Content-Type>, C<Accept>, C<Last-Event-ID> and every C<Mcp-*> header (C<Mcp-Session-Id>,
+C<Mcp-Protocol-Version>) -- nothing else, so never the client's C<Authorization>, C<X-Api-Key> or
+cookies. Then the server's static C<headers>, and C<Authorization: Bearer> with the server's
+own key when it names a key source. A server that names one which yields no key is not called:
+C<503> C<upstream_key_unavailable>, logged with the key reference.
+
+The answer comes back as the server gave it: its status, its headers but for the hop-by-hop
+ones, C<Content-Length> and C<Content-Encoding>, and its body. The response is opened when the
+upstream's headers arrive, before any body byte, and every chunk is written as it is read, so
+an event stream (C<text/event-stream>) is not buffered and a standing C<GET> stream is open for
+the client before its first event. An answer without a body (C<202>, C<204>) is relayed as one.
+The upstream's own C<4xx> and C<5xx> are relayed too -- a C<404> for an expired session has to
+reach the client -- with two exceptions, both answered C<502> C<upstream_error> and logged. An
+upstream C<401>, because towards the client C<401> means its Skeid key was not let in, while the
+upstream's is about the key Skeid presented. And a redirect (C<3xx>): its C<Location> is an
+upstream URL, and Skeid follows none -- configure the URL it leads to, a trailing slash
+included. A server that cannot be reached is C<502>
+C<upstream_error>; a request body over the server's request limit is C<413>.
+
+The upstream call runs under the upstream timeout of L</build_app> (C<SKEID_UPSTREAM_TIMEOUT>),
+and the client's connection is given the same time: a standing stream is cut after it, and an
+MCP client reconnects with C<Last-Event-ID>. A client that hangs up closes the upstream
+connection. There is no routing and no admission -- an MCP server is not a node: no
+C<max_conns>, no health, no capacity probe.
+
+Each relayed request writes one usage event with C<api_format> C<mcp>, C</mcp/E<lt>nameE<gt>> as
+its C<endpoint> (without the sub-path), the customer key id, the server's C<url> as
+C<route_url>, the status and the duration; no model, node, tokens or cost. C<ok> is the status
+below 500. A refusal for want of an upstream key is a C<503> event, an upstream C<401> a C<502>
+event with C<error_type> C<upstream_unauthorized>, a redirect one with C<upstream_redirect>, an
+unreachable server a C<502> event. A
+client that leaves before a plain answer is complete is the C<499> C<client_abort> of every
+route; an event stream that was opened is recorded under its status however it ends, since
+closing it is how such a stream ends. C<401> and C<404> write nothing.
+
 =head2 Uploads
 
 The audio routes are the upload routes: their request limit is the config's
@@ -216,7 +289,8 @@ instead.
 
 With C<client_auth>, that key id has to be on the section's list. Every client route checks it
 first -- C</v1/models>, C</v1/chat/completions>, C</v1/embeddings>, the C</v1/audio/*> routes,
-C</v1/rerank> and C</rerank>, C</v1/messages>, every C</api/*> route and C</.well-known/langertha.json> -- after picking up a
+C</v1/rerank> and C</rerank>, C</v1/messages>, every C</api/*> route, C</.well-known/langertha.json> and,
+with an C<mcp> section, the MCP routes -- after picking up a
 changed config
 (L<Langertha::Skeid/maybe_reload_config>), so a list change holds from the next request.
 No key is C<401> C<Missing API key>, a key whose id is not listed C<401> C<Invalid API key>,
@@ -276,6 +350,12 @@ C<{error: {message, type}}>, Anthropic's envelope
 (L<Langertha::Skeid::Protocol::Anthropic/error_body>) on C</v1/messages>, and Ollama's
 C<{error: "..."}> on C</api/*>. A stream that fails after it opened ends with the face's in-band
 error event where it has one.
+
+The MCP routes answer their own errors in the OpenAI shape: C<401> without a key, C<404>
+C<not_found> for whatever is not a relayed server of the presented key, C<413> for a body over
+the request limit, C<502> C<upstream_error> for a server that is unreachable, answers C<401> or
+redirects, C<503> C<upstream_key_unavailable> for one whose key is missing. Every other status
+on C</mcp/E<lt>nameE<gt>> is the MCP server's own, body included; see L</MCP routes>.
 
 =head1 METHODS
 
@@ -560,6 +640,28 @@ sub build_app {
     my ($c) = @_;
     $c->render(json => { models => [] });
   });
+
+  # MCP gateway (skeid k103, ADR 0022): the MCP servers assigned to the presented key, listed
+  # and relayed. Its bridge answers as an unknown path while the config has no mcp: section,
+  # before the client gate can turn that 404 into a 401. The relaxed placeholder takes a name
+  # with a dot in it; what follows the name is the sub-path, for an upstream with more than one
+  # endpoint.
+  my $mcp = $r->under(sub {
+    my ($c) = @_;
+    return _authorize_mcp_client($c);
+  });
+
+  $mcp->get(Langertha::Skeid::Protocol::MCP->listing_path => sub {
+    my ($c) = @_;
+    _handle_mcp_servers($c);
+  });
+
+  for my $pattern ('/mcp/#mcp_server', '/mcp/#mcp_server/*mcp_path') {
+    $mcp->any([qw( GET POST DELETE )] => $pattern => sub {
+      my ($c) = @_;
+      _handle_mcp($c);
+    });
+  }
 
   # Skeid-to-Skeid registry (skeid #18, ADR 0017): a fronting tier's CapacityProbe::Registry
   # pulls this. 404 unless registry.enabled, and never unsigned. No store may keep it: a cached
@@ -2217,9 +2319,38 @@ sub _inject_node_auth_async {
     return $cb->("node '$node_id' is no longer in the inventory, its key source is unknown");
   }
 
-  my $ref = $node->{api_key_ref};
+  _upstream_key_async($skeid, $node, sub {
+    my ($key, $reason) = @_;
+
+    if (defined $key) {
+      _drop_client_credentials($headers_ref);
+      $headers_ref->{Authorization} = "Bearer $key";
+      return $cb->();
+    }
+
+    # A node with no key of its own: the documented pass-through.
+    return $cb->() unless defined $reason;
+
+    # A key source was named and produced nothing. Take the client's credentials out of what
+    # would go upstream as well, so a caller that ignored the reason still could not leak them.
+    _drop_client_credentials($headers_ref);
+    $cb->($reason);
+  });
+  return;
+}
+
+# Resolves the upstream key of $source -- a node, or an MCP server (skeid k103): whatever names
+# its key by api_key_ref and api_key_env. The broker is asked first, the variable stands in when
+# the reference resolves nothing. The callback runs exactly once, and always: with the key; with
+# nothing when $source names no key source; with undef and a reason when it names one and none
+# produced a key. The reason names the key reference and the variable, never a key, and is for
+# the log and the usage event (ADR 0003).
+sub _upstream_key_async {
+  my ($skeid, $source, $cb) = @_;
+
+  my $ref = $source->{api_key_ref};
   $ref = undef unless defined($ref) && length($ref);
-  my $env_name = $node->{api_key_env};
+  my $env_name = $source->{api_key_env};
   $env_name = undef unless defined($env_name) && length($env_name);
 
   my $apply = sub {
@@ -2232,19 +2363,10 @@ sub _inject_node_auth_async {
       }
     }
 
-    if (defined($key) && length($key)) {
-      _drop_client_credentials($headers_ref);
-      $headers_ref->{Authorization} = "Bearer $key";
-      return $cb->();
-    }
-
-    # A node with no key of its own: the documented pass-through.
+    return $cb->($key) if defined($key) && length($key);
     return $cb->() unless defined($ref) || defined($env_name);
 
-    # A key source was named and produced nothing. Take the client's credentials out of what
-    # would go upstream as well, so a caller that ignored the reason still could not leak them.
-    _drop_client_credentials($headers_ref);
-    $cb->(join('; ',
+    $cb->(undef, join('; ',
       (defined($ref) ? "api_key_ref '$ref' $ref_failure" : ()),
       (defined($env_name)
         ? "api_key_env '$env_name' is " . (defined($ENV{$env_name}) ? 'empty' : 'not set')
@@ -2334,6 +2456,279 @@ sub _refuse_unsendable_request {
     metrics       => {},
   });
   _render_error($c, 400, $message, 'invalid_request_error');
+  return;
+}
+
+# The bridge of the MCP routes (skeid k103, ADR 0022). Three answers before a handler runs, in
+# this order. Without an mcp: section the routes do not exist: the answer is the one an unknown
+# path gets, and it comes before the client gate, so a Skeid that has no MCP servers does not
+# start answering 401 where it answered 404. Then the client gate, as on every client route.
+# Then a key at all, also while client authentication is off: an MCP server is assigned to a
+# customer key id, `anonymous` can hold none, and a caller that forgot its key is better told
+# so than shown an empty list.
+sub _authorize_mcp_client {
+  my ($c) = @_;
+  my $skeid = $c->skeid;
+  $skeid->maybe_reload_config;
+  unless ($skeid->mcp_enabled) {
+    $c->reply->not_found;
+    return undef;
+  }
+  return undef unless _authorize_client($c);
+
+  my $api_key_id = _request_api_key_id($c);
+  return 1 if defined($api_key_id) && $api_key_id ne 'anonymous';
+
+  $c->res->headers->header('WWW-Authenticate' => 'Bearer realm="skeid"');
+  _render_error($c, 401, 'Missing API key', 'invalid_request_error', 'invalid_api_key');
+  return undef;
+}
+
+# GET /v1/mcp/servers: the servers assigned to the presented key, and only what a client needs
+# to connect -- the public URL of a relayed server, the command of a stdio one. Whose answer it
+# is depends on the key, so it carries the manifest's cache headers. The public URL is the
+# config's, else the one this request came in on.
+sub _handle_mcp_servers {
+  my ($c) = @_;
+  my $mcp = 'Langertha::Skeid::Protocol::MCP';
+  my $skeid = $c->skeid;
+  _manifest_cache_headers($c);
+
+  my $base = $skeid->mcp_public_url;
+  unless (defined $base) {
+    my $abs = $c->req->url->to_abs;
+    $base = $abs->scheme . '://' . $abs->host_port;
+  }
+  $c->render(json => {
+    object => 'list',
+    data   => [ map { $mcp->listing_entry($_, $base) } @{$skeid->mcp_servers_for_key(_request_api_key_id($c))} ],
+  });
+  return;
+}
+
+# POST|GET|DELETE /mcp/<name>[/<path>] (skeid k103): relayed to the MCP server of that name, if
+# it is assigned to the presented key. Everything that is not such a server is one 404 -- an
+# unknown name, another key's server, a stdio entry, a sub-path that climbs -- so a key cannot
+# learn which names exist. Skeid reads nothing of the request (ADR 0022): the body goes up as
+# the bytes it came in, with the headers Protocol::MCP lets through, the server's static
+# headers and the server's own key. The client's credentials are never among them.
+sub _handle_mcp {
+  my ($c) = @_;
+  my $mcp = 'Langertha::Skeid::Protocol::MCP';
+  my $skeid = $c->skeid;
+  my $req = $c->req;
+
+  my $api_key_id = _request_api_key_id($c);
+  my $server = $skeid->mcp_server_for_key($c->stash('mcp_server'), $api_key_id);
+  my $url = ($server && $mcp->is_relayed($server->{transport}))
+    ? $mcp->upstream_url($server->{url}, $c->stash('mcp_path'), $req->url->query)
+    : undef;
+  unless ($url) {
+    _render_error($c, 404, 'No MCP server of this name is available for this key', 'not_found');
+    return;
+  }
+
+  # A body cut off at the server's request limit is not the body the client sent.
+  if ($req->is_limit_exceeded) {
+    _render_error($c, 413, 'Maximum message size exceeded', 'invalid_request_error');
+    return;
+  }
+
+  _extend_client_timeout($c);
+  # Before the key resolution: a cold broker cache answers on a later tick.
+  $c->render_later;
+  my $started = time;
+  my $meta = {
+    api_format => 'mcp',
+    endpoint   => $mcp->endpoint($server->{name}),
+    api_key_id => $api_key_id,
+    provider   => 'skeid',
+    route_url  => $server->{url},
+  };
+  my %headers = ($mcp->request_headers($req->headers), %{$server->{headers} || {}});
+
+  _upstream_key_async($skeid, $server, sub {
+    my ($key, $no_key) = @_;
+
+    # The client hung up while the key was being resolved: nothing went upstream, nothing is
+    # metered, as on every other route.
+    return if _client_gone($c);
+
+    # A key source was named and produced no key: the server is not called without it.
+    if (defined $no_key) {
+      $c->app->log->error("No upstream key for MCP server '$server->{name}', request refused: $no_key");
+      _record_usage_event($c, {
+        %$meta,
+        status_code   => 503,
+        ok            => 0,
+        duration_ms   => _duration_ms($started),
+        error_type    => 'upstream_key_unavailable',
+        error_message => $no_key,
+        metrics       => {},
+      });
+      _render_error($c, 503, 'The upstream key for this MCP server is not available',
+        'upstream_key_unavailable');
+      return;
+    }
+
+    $headers{Authorization} = "Bearer $key" if defined $key;
+    _relay_mcp($c, $server, $url, \%headers, $meta, $started);
+  });
+  return;
+}
+
+# The relay of one MCP request. Its own function, not _proxy_openai_stream: there is no node --
+# no slot to give back, no capacity headers, no usage frame to read along -- and an answer's
+# shape is not known before it arrives: one JSON body, an event stream, or nothing (202).
+# So every answer is relayed the same way, as it arrives. The response is opened -- status and
+# headers written out -- the moment the upstream's headers are parsed, before any body byte: a
+# standing GET stream is open for the client before its first event. Every chunk is then written
+# as it was read. Mojolicious buffers what the client has not taken yet and keeps the order.
+#
+# Two answers are not relayed, because they are about this gateway and not for its client. An
+# upstream 401: towards the client 401 says "your Skeid key is not let in", and an MCP client
+# acts on it; the upstream's 401 is about the key Skeid presented. And a redirect: its Location
+# is an upstream URL, which a customer is never shown, and Skeid follows none -- the server's
+# key would travel along. Both are the operator's to fix: logged, answered 502.
+#
+# One usage event per request, written when it ends. An event stream has no end that could be
+# checked without reading MCP, so however it ends -- the client leaves, the upstream closes it,
+# the time limit cuts it -- it is recorded under the status it was opened with. Any other answer
+# is held to its framing, and a client that leaves before it is complete is a 499.
+sub _relay_mcp {
+  my ($c, $server, $url, $headers, $meta, $started) = @_;
+  my $mcp = 'Langertha::Skeid::Protocol::MCP';
+
+  my $body = $c->req->body;
+  my $tx = $c->app->ua->build_tx($c->req->method => $url => $headers => (length($body) ? ($body) : ()));
+  # As for every relayed stream: the bytes, not Mojolicious' own SSE events (skeid karr #30).
+  $tx->res->content(Langertha::Skeid::Proxy::RelayContent->new);
+
+  # Taken now: the request may be past its transaction when the answer opens.
+  my $request_id = _request_id($c);
+  my ($opened, $event_stream, $status) = (0, 0, 0);
+  # Why the upstream's answer is not relayed, once its status says so: see above.
+  my $unrelayed = sub {
+    my ($code) = @_;
+    return undef unless defined $code;
+    return 'unauthorized' if $code == 401;
+    return 'redirect' if $code >= 300 && $code < 400;
+    return undef;
+  };
+  my $refused;
+  # Set by whichever comes first, the upstream's completion or the client hanging up, so that
+  # the usage event is written once.
+  my $closed = 0;
+
+  my $record = sub {
+    my (%event) = @_;
+    _record_usage_event($c, { %$meta, duration_ms => _duration_ms($started), metrics => {}, %event });
+  };
+  my $open = sub {
+    my ($res) = @_;
+    $status = $res->code;
+    $c->res->code($status);
+    for my $name (@{$res->headers->names}) {
+      my $lc = lc($name);
+      next if $HOP_BY_HOP{$lc} || $lc eq 'content-length' || $lc eq 'content-encoding';
+      $c->res->headers->header($name => $res->headers->header($name));
+    }
+    $c->res->headers->header('x-request-id' => $request_id);
+    $opened = 1;
+  };
+
+  $tx->res->content->unsubscribe('read')->on(read => sub {
+    my ($content, $bytes) = @_;
+    return if $closed || $refused;
+    unless ($opened) {
+      # The first read comes with the upstream's headers, with or without a first chunk.
+      return if defined($refused = $unrelayed->($tx->res->code));
+      $open->($tx->res);
+      $event_stream = $mcp->is_event_stream($tx->res->headers->content_type);
+      $c->write_chunk;
+    }
+    $c->write_chunk($bytes) if length $bytes;
+  });
+
+  $c->tx->on(finish => sub {
+    # Also emitted when the answer is complete, and then there is nothing left to do here.
+    return if $closed;
+    $closed = 1;
+    $tx->res->content->unsubscribe('read');
+    $record->(($opened && $event_stream)
+      ? (status_code => $status, ok => ($status < 500 ? 1 : 0))
+      : _client_abort_event());
+    _cancel_upstream($tx);
+  });
+
+  $c->app->ua->start($tx => sub {
+    my ($ua, $done) = @_;
+    # The read listener closes over the upstream transaction and the client controller: remove
+    # it on every path, or the completed transaction owns the listener that owns it.
+    $done->res->content->unsubscribe('read');
+
+    # The client hung up and its request was closed then; this is the cancelled transaction.
+    return if $closed;
+    $closed = 1;
+
+    my $res  = $done->res;
+    my $err  = $done->error;
+    my $code = $res->code;
+    # Mojo reports an HTTP 4xx/5xx as an error with a code; one without is the connection's.
+    my $broken = ($err && !$err->{code}) ? ($err->{message} // 'unknown') : undef;
+
+    $refused //= $unrelayed->($code) unless $opened;
+    if (defined($refused) && $refused eq 'unauthorized') {
+      $c->app->log->error("MCP server '$server->{name}' answered 401 to the key Skeid presented ("
+        . (join(', ', map { "$_ '$server->{$_}'" } grep { defined $server->{$_} } qw( api_key_ref api_key_env ))
+          || 'it names no key source') . ')');
+      $record->(status_code => 502, ok => 0, error_type => 'upstream_unauthorized',
+        error_message => 'The MCP server answered 401 to the upstream key');
+      _render_error($c, 502, 'Upstream error: the MCP server did not accept the gateway\'s credential',
+        'upstream_error');
+      return;
+    }
+    if (defined $refused) {
+      my $location = $res->headers->location // '';
+      $c->app->log->error("MCP server '$server->{name}' answered $code with a redirect to '$location': "
+        . 'no redirect is followed, configure the URL it leads to');
+      $record->(status_code => 502, ok => 0, error_type => 'upstream_redirect',
+        error_message => "The MCP server answered $code with a redirect");
+      _render_error($c, 502, 'Upstream error: the MCP server answered with a redirect', 'upstream_error');
+      return;
+    }
+
+    unless ($opened) {
+      # No answer, or one whose connection broke before its body began.
+      if (!defined($code) || defined($broken)) {
+        my $message = $broken // 'unknown';
+        $record->(status_code => 502, ok => 0, error_type => 'upstream_error', error_message => $message);
+        _render_error($c, 502, "Upstream error: $message", 'upstream_error');
+        return;
+      }
+      # An answer without a body (202, 204): no read ever came.
+      $open->($res);
+      $record->(status_code => $status, ok => ($status < 500 ? 1 : 0));
+      $c->rendered;
+      return;
+    }
+
+    # The answer is open, so its status is sent. An event stream ends however it ends. Anything
+    # else is held to its framing: Mojo::UserAgent reports an upstream that hangs up mid-body as
+    # no error at all once the status line has arrived.
+    my $cut;
+    unless ($event_stream) {
+      my $content = $res->content;
+      my $framed = $content->is_chunked || length($content->headers->content_length // '');
+      $cut = $broken // (($framed && !$content->is_finished) ? 'Premature connection close' : undef);
+    }
+    $record->(
+      status_code => $status,
+      ok          => (!defined($cut) && $status < 500) ? 1 : 0,
+      (defined($cut) ? (error_type => 'upstream_error', error_message => $cut) : ()),
+    );
+    $c->finish;
+  });
   return;
 }
 
@@ -2644,6 +3039,8 @@ translated faces
 =item * L<Langertha::Skeid::Protocol::Audio> -- the wire of the relayed audio routes
 
 =item * L<Langertha::Skeid::Protocol::Rerank> -- the wire of the rerank route, and its TEI dialect
+
+=item * L<Langertha::Skeid::Protocol::MCP> -- the wire of the MCP gateway
 
 =item * L<Langertha::Skeid::KeyBroker::OpenBao> -- upstream keys from OpenBao
 

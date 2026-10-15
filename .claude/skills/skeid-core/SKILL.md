@@ -19,6 +19,7 @@ Langertha::Skeid          nodes, routing, admission, config, pricing, usage, reg
   ::Protocol::Ollama      /api/chat, /api/generate <-> OpenAI (+ ::Stream)
   ::Protocol::Audio       /v1/audio/* relayed, not translated: form fields, usage units (ADR 0021)
   ::Protocol::Rerank      /v1/rerank relayed; a rerank_format: tei node translated upstream (ADR 0021)
+  ::Protocol::MCP         MCP gateway wire: relayed headers, upstream URL, listing entry (ADR 0022)
   ::UsageStore            config normalization + backend factory
   ::UsageStore::JsonLog   append-only JSON events (recommended default)
   ::UsageStore::DBI       sqlite + postgresql
@@ -283,7 +284,16 @@ manifest:   { enabled, public_url, … }   # provider manifest, per-key grants i
 registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
 uploads:    { max_bytes: 26214400 }      # body limit of the upload routes (/v1/audio/*); ADR 0021
 client_auth: { keys: [name-or-key-id] }   # only these callers may use the client routes; 401 otherwise (ADR 0020)
+mcp:        { public_url, servers: { name: { url, description, api_key_ref, api_key_env, headers, keys } } }   # MCP gateway (ADR 0022)
 ```
+
+`mcp:` (skeid k103) is resolved by `_load_mcp` after the policies into `mcp_servers` (name →
+entry with a `keys` id set) and `mcp_public_url`, both in `@CONFIG_STATE`. An **MCP server** is
+not a **Node**: no routing, no admission, no health, no probe. `mcp_server_for_key($name, $id)`
+answers undef for an unknown name and for another key's server alike. A server's `keys:` and
+`client_auth.keys` share `_key_id_set` (entry check, error by position, short-id prefix).
+Strict section: unknown keys, keys of the other transport (`stdio` vs `streamable-http`), a URL
+with userinfo and a credential under `headers:` fail the load.
 
 The admin key is resolved on every applied config as explicit (`serve --admin-api-key`,
 `build_app(admin_api_key)`, `new(admin_api_key)`, `set_admin_api_key`) > config (first of the

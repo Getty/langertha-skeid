@@ -9,6 +9,7 @@ my @modules = qw(
   Langertha::Skeid::Protocol
   Langertha::Skeid::Protocol::Anthropic
   Langertha::Skeid::Protocol::Audio
+  Langertha::Skeid::Protocol::MCP
   Langertha::Skeid::Protocol::Ollama
   Langertha::Skeid::Protocol::RawBody
   Langertha::Skeid::Protocol::Rerank

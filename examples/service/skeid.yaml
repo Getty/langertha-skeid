@@ -100,6 +100,29 @@ routing:
 # client_auth:
 #   keys: [shared]          # with names: { shared: k_... } above, or the k_... id directly
 
+# MCP servers (ADR 0022). Assign MCP servers to customer key ids; a customer then reaches
+# /mcp/<name> with its own Skeid key, and GET /v1/mcp/servers tells it what it was assigned.
+# Skeid relays MCP's Streamable HTTP and reads none of it. The client's key never goes upstream:
+# a server's own key is named like a node's -- api_key_ref through OpenBao, or api_key_env --
+# and sent as Authorization: Bearer. `transport: stdio` entries are not proxied; they tell the
+# customer what to run on its own machine, so keep secrets out of command, args and env.
+# Without this section the routes do not exist.
+#
+# mcp:
+#   public_url: https://llm.example.com   # where clients reach Skeid; else taken from the request
+#   servers:
+#     bookrag:
+#       url: http://bookrag-mcp:8080/mcp
+#       description: Book search over the house library
+#       api_key_ref: secret/skeid/mcp/bookrag
+#       keys: [alice]                     # names: entries or key ids from `skeid keyid`
+#     files:
+#       transport: stdio
+#       command: mcp-files
+#       args: ["--root", "/srv/data"]
+#       description: Files on your own machine
+#       keys: [alice]
+
 # Capacity probes (ADR 0009). inflight counts only what THIS Skeid sent, so two frontends in
 # front of the same GPU each think it is half as busy as it is. A probe reads what the node
 # itself reports, including traffic Skeid never saw.

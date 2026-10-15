@@ -394,7 +394,8 @@ client_auth:
 ```
 
 - Every client route -- `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`,
-  `/v1/audio/*`, `/v1/rerank` and `/rerank`, `/v1/messages`, every `/api/*` route and `/.well-known/langertha.json` --
+  `/v1/audio/*`, `/v1/rerank` and `/rerank`, `/v1/messages`, every `/api/*` route, `/.well-known/langertha.json`
+  and, with an `mcp:` section, `/v1/mcp/servers` and `/mcp/*` --
   answers `401` with
   `WWW-Authenticate: Bearer realm="skeid"` to a request without a key (`Missing API key`) or
   with a key whose id is not listed (`Invalid API key`). The body is in the route's dialect:
@@ -432,6 +433,88 @@ fails the load. Every other route keeps the server's own request limit (16 MiB,
 `MOJO_MAX_MESSAGE_SIZE`).
 
 Behind a reverse proxy, its own body limit applies first (nginx: `client_max_body_size`).
+
+### MCP servers
+
+Skeid can put MCP servers behind the same key a customer already uses for models
+([ADR 0022](docs/adr/0022-mcp-servers-are-relayed-per-customer-key-not-aggregated.md)). The
+operator assigns servers to customer key ids; the customer adds each assigned server to its
+client (Claude Code, Codex, Hermes Agent) as a Streamable HTTP server with its Skeid key as
+the bearer token. Skeid authenticates the key, checks the assignment and relays -- it does not
+read MCP and does not merge the tools of several servers.
+
+```yaml
+names:
+  alice: k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b   # bin/skeid keyid <key> -- never the key
+mcp:
+  public_url: https://llm.example.com    # optional: where clients reach Skeid
+  servers:
+    bookrag:                             # the name in /mcp/bookrag
+      url: http://bookrag-mcp.internal:8080/mcp
+      description: Book search over the house library
+      api_key_ref: secret/skeid/mcp/bookrag   # the server's key, through the key broker
+      api_key_env: BOOKRAG_MCP_KEY            # ... or from this variable
+      headers: { X-Tenant: example }          # static headers that are no secret
+      keys: [alice]                           # the assignment: names: entries or key ids
+    files:
+      transport: stdio                   # a hint: runs on the customer's own machine
+      command: mcp-files
+      args: ["--root", "/srv/data"]
+      description: Files on your own machine
+      keys: [alice]
+```
+
+- `POST`, `GET` and `DELETE /mcp/<name>` are relayed to the server's `url`, a path after the
+  name to the same path below it. What is not a relayed server of the presented key -- an
+  unknown name, a server assigned to another key, a `stdio` entry, a path with a `..` segment
+  -- is one and the same `404`, so a key cannot find out which names exist.
+- `GET /v1/mcp/servers` lists the servers assigned to the presented key:
+
+  ```json
+  {"object":"list","data":[
+    {"name":"bookrag","transport":"streamable-http","url":"https://llm.example.com/mcp/bookrag","description":"Book search over the house library"},
+    {"name":"files","transport":"stdio","command":"mcp-files","args":["--root","/srv/data"],"env":{},"description":"Files on your own machine"}
+  ]}
+  ```
+
+  `url` is `public_url` plus `/mcp/<name>`; without `public_url` it is built from the request,
+  which behind a TLS proxy says `http://` -- set it there. The upstream `url`, the key
+  reference and the static headers never appear.
+- Both routes need a key: no key is `401`, with or without
+  [client authentication](#client-authentication); with it, a key that is not on its list is
+  `401` as on every client route. Being on that list assigns nothing.
+- The client's `Authorization` never goes upstream. Of the client's headers only
+  `Content-Type`, `Accept`, `Last-Event-ID` and the `Mcp-*` headers (`Mcp-Session-Id`,
+  `Mcp-Protocol-Version`) do; the body goes as the bytes it came in. The server gets its own
+  key as `Authorization: Bearer`, from `api_key_ref` (key broker) or `api_key_env` like a
+  node. A server that names a key source which yields no key is not called (`503`); one that
+  names none is called without a credential.
+- The answer is the server's: status, headers and body, an event stream chunk by chunk and
+  unbuffered, opened for the client as soon as the server's headers arrive. Two exceptions,
+  both answered `502` and logged: a server's `401` -- it is about the key Skeid presented, and
+  a `401` would send an MCP client looking for a login -- and a redirect, whose `Location` is
+  an internal URL. Skeid follows no redirect: configure the URL it leads to (some servers
+  redirect `/mcp` to `/mcp/`).
+- A `stdio` entry is not proxied. It tells the customer what to run locally; `command`, `args`
+  and `env` are shown to the assigned key as written, so keep secrets out of them.
+- The upstream call has the time limit of an LLM stream (`SKEID_UPSTREAM_TIMEOUT`, 300s). A
+  standing `GET` stream is cut after it; MCP clients reconnect.
+- The section is hot-reloaded: an assignment added or taken away holds from the next request.
+  Without it both routes are unknown paths (`404`), as before. A misspelled key, a `url` that
+  is not `http(s)` or carries `user:password@`, or a credential header under `headers` fails
+  the load.
+- Each relayed request writes a [usage event](#usage-and-billing) with `api_format: mcp` and
+  `endpoint: /mcp/<name>`: key id, status and duration, no tokens and no cost.
+
+A client is then configured with the listed `url` and the customer's key, for example:
+
+```
+claude mcp add --transport http bookrag https://llm.example.com/mcp/bookrag \
+  --header "Authorization: Bearer $SKEID_KEY"
+```
+
+Behind nginx, switch response buffering off for `/mcp/` (`proxy_buffering off`) and give it a
+read timeout above `SKEID_UPSTREAM_TIMEOUT`, or event streams arrive late or are cut early.
 
 ### Pricing
 
@@ -520,6 +603,8 @@ balancer in front of Skeid needs a read timeout at least as long.
 | `POST /api/generate` | Ollama | translated; streams unless `"stream": false` |
 | `GET /api/tags` | Ollama | the same names as `/v1/models` (size, digest etc. left empty) |
 | `GET /api/ps` | Ollama | always an empty list |
+| `GET /v1/mcp/servers` | — | the [MCP servers](#mcp-servers) assigned to the calling key |
+| `POST`, `GET`, `DELETE /mcp/<name>` | MCP | relayed to an assigned MCP server; nothing is read or translated |
 | `GET /health` | — | `{status, proxy, config_reload}`; no auth |
 | `GET /.well-known/langertha.json` | — | provider manifest for the calling key |
 
@@ -691,6 +776,14 @@ characters, not tokens**, unless it runs with `lengths_via_tokenize` -- Skeid re
 node says, so price such a node per character or turn the option on; and Cohere's
 `meta.billed_units.search_units` is not recorded. `documents` is recorded, not priced: there
 is no per-document or per-search rate.
+
+A request relayed to an [MCP server](#mcp-servers) is an event as well: `api_format` is `mcp`,
+`endpoint` is `/mcp/<name>` whichever path below it was called, `route_url` is the server's
+configured URL, and `model`, `node_id`, the token and the cost fields are empty. `ok` is a
+status below 500; a server's `401` or redirect and an unreachable server are `502`, a missing
+upstream key `503`. An event stream is recorded once, when it ends, under the status it was
+opened with, and `duration_ms` is how long it was open. These events share the ledger with the
+LLM ones: a report counts them in `requests` and lists them under model `(none)`.
 
 Without a `usage_store` (and without `SKEID_USAGE_DB`) nothing is recorded. When the store
 cannot write an event (a full disk, a dropped table, a lost database), the request is still

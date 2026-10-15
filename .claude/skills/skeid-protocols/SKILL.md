@@ -34,6 +34,7 @@ in and out. Consequences that are not negotiable:
 | OpenAI, relayed (ADR 0021) | `POST /v1/rerank`, `POST /rerank` (one route) | no |
 | Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
 | Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
+| MCP gateway, not a face (ADR 0022) | `POST|GET|DELETE /mcp/<name>[/<path>]`, `GET /v1/mcp/servers` | yes — whatever the MCP server sends, unbuffered |
 
 Embeddings take the chat path (`_begin_route_async`): several nodes of one model share load, with
 health, `max_conns`, capacity readings, aliases and tiers; one request is one slot whatever its batch
@@ -163,6 +164,37 @@ form fields, the upstream parts, where an answer reports usage; its names
   `lengths_via_tokenize`. No `search_units`, no streaming, no `/v2/rerank`.
 - `t/69-rerank.t`; 26 mutations of the logic were checked to fail it.
 
+## MCP gateway
+
+`/mcp/<name>` relays MCP Streamable HTTP to an **MCP server** assigned to the presented key
+(`mcp:` section, skill `skeid-core`); `Langertha::Skeid::Protocol::MCP` owns the wire. Skeid
+reads nothing of MCP. It is **not** a relayed route in ADR 0021's sense and does not go through
+`_begin_route_async` or `_proxy_openai_*`: there is no node, so no `request.start` /
+`request.finish`, no capacity headers, no usage frame. `_relay_mcp` is its own function.
+
+- Bridge `_authorize_mcp_client`, in this order: reload; no `mcp:` section → `reply->not_found`
+  (the unknown path it was, **before** the client gate); `_authorize_client`; no key → `401`
+  even without `client_auth`.
+- `404 not_found`, one body, for an unknown name, another key's server, a `stdio` entry and a
+  sub-path with a `.`/`..` segment or a backslash (`upstream_url` returns nothing). Never tell
+  these apart in an answer.
+- Up: method, body bytes (`$c->req->body`), `Content-Type`, `Accept`, `Last-Event-ID`, every
+  `Mcp-*` header — an allowlist (`request_headers`), not `_forward_headers`. Then the server's
+  static `headers`, then `Authorization: Bearer` from `_upstream_key_async` (the broker / env
+  lookup `_inject_node_auth_async` uses too). A named key source without a key: `503`, no call.
+  No key source: no `Authorization` at all — there is no pass-through of the client's.
+- Down: the response is opened on the first `read` (upstream headers parsed) and flushed with
+  an argument-less `$c->write_chunk`, then every chunk is written as read. An answer without a
+  body (`202`) never emits `read` and is rendered in the completion callback. Hop-by-hop
+  headers, `Content-Length` and `Content-Encoding` are not copied.
+- Upstream `401` → `502 upstream_error` + error log (`upstream_unauthorized` on the event); an
+  upstream `3xx` likewise (`upstream_redirect`; no redirect is followed, `Location` is never
+  relayed). Every other status is the server's, `404` for an expired session included.
+- Usage event: `api_format: mcp`, `endpoint: /mcp/<name>`, no model/node/tokens. An opened
+  event stream is recorded under its status however it ends; a plain answer the client
+  abandons is `499 client_abort`.
+- `t/72-mcp-gateway.t`; 14 mutations of the logic were checked to fail it.
+
 ## Upstream call
 
 The call is `POST {node.url}/chat/completions` or `/embeddings`; a relayed route posts to its
@@ -214,7 +246,8 @@ suggestion. `t/26-key-policies.t` fails if that check goes away.
 the config, then answers `401` + `WWW-Authenticate` in the face's dialect to an id not on the
 list — before body parsing, `request.start`, broker, upstream or usage event. A new client
 route goes behind the bridge of its face, or it is an open door. `/health` and `/skeid/*` stay
-outside. `t/67-client-auth.t`.
+outside. `t/67-client-auth.t`. The MCP routes call the same gate from their own bridge, after
+answering `404` while there is no `mcp:` section.
 
 `x-request-id` is honoured if present, otherwise a `req_<ms>_<rand>` id is generated.
 
