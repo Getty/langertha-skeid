@@ -1,0 +1,34 @@
+---
+claimed_at: 2026-10-15T04:28:48Z
+claimed_by: claude-k110
+class: standard
+completed: 2026-10-15T04:28:48Z
+created: 2026-10-13T03:58:46Z
+id: 110
+priority: medium
+started: 2026-10-13T04:09:21Z
+status: done
+tags:
+- usage
+- dbi
+- resilience
+title: Usage events are lost while the usage database is down
+updated: 2026-10-15T04:29:27Z
+---
+
+From CitiAI (2026-10-13): Skeid will run on the edge machine so it keeps serving when the database machine fails (customer_source keeps the last good snapshot, ADR 0022). UsageStore::DBI then reports each event as lost (on_lost) and tries one synchronous reconnect per event — with the DB host unreachable that connect can block the loop up to the connect timeout on every flush (ADR 0005 accepts one connect, but not repeated stalls during an outage). Wish: (1) bounded in-memory (or local spool) buffer that replays after the DB returns, never a secret on disk; (2) reconnect backoff instead of a connect per event while down. Decision and ADR belong to the maintainer.
+
+2026-10-13 04:02 2026-10-13 Richtung (CitiAI-Betreiber): Der vorhandene Flush-Weg (flush_interval_ms-Queue + on_lost) soll Ereignisse, die er nicht schreiben kann, in einen lokalen Spool auf dem Volume legen (z. B. JSON-Lines unter einem konfigurierten Verzeichnis, nur Schluessel-IDs, nie Secrets) und nach Rueckkehr der DB nachliefern (idempotent, request_id als Schluessel gegen Doppelte). Waehrend die DB weg ist: Reconnect mit Backoff statt einem Connect je Ereignis. Spaeter laufen mehrere Skeid-Instanzen hinter einem Load Balancer — der Spool ist je Instanz.
+
+2026-10-13 04:29 k110 report (claude):
+DONE — pushed to origin/main: e80a49c (ADR 0023 accepted: usage events spool while the database is down), 059c15c (implementation).
+- UsageStore::DBI `spool_dir` (opt-in; unset = old behaviour). Events that fail for lack of a connection (connect failed / reconnect failed / backoff active) are appended as JSONL (event columns only — never DSN/password/key material, fsync per append) to usage-spool-<host>-<pid>.jsonl under flock. Events the DB refuses on a live handle still go to on_lost (a replay would loop). Spool write failure -> on_lost with both errors.
+- Replay after every successful write and at prepare (restart survival); batches of 500 per transaction, further batches via Mojo::IOLoop->timer(0); lines removed only after commit; claim-by-rename so writers never wait on a DB transaction.
+- Idempotent: SELECT by (request_id, created_at) before insert — created_at included because the proxy reuses a client x-request-id. New non-unique index usage_events(request_id) in both schemas (unique would break auto_migrate on tables with duplicate ids). Events without request_id: at-least-once.
+- Reconnect backoff in dbh, with or without spool: 1s doubling to 60s, reset on success; no connect attempt inside the window.
+- With spool_dir set, prepare no longer dies when the DB is down at startup (warns, starts in backoff, migrates on first connect).
+- POD (DBI.pm, UsageStore.pm, Skeid.pm), Changes (3 entries under {{$NEXT}}).
+VERIFIED — prove -lr t/: Files=81, Tests=5075, PASS. New t/76-usage-dbi-spool.t (107 tests): spool on failure, replay on recovery, restart survival, no duplicates (repeated/interrupted replay, event already present), backoff (10 events + 5 flushes = 1 connect), no secret in the spool. Worker ran 5 mutations, all turned red. t/60 and t/66: one line each sets _reconnect_at(0) before the recovery assertion — the immediate per-event reconnect they assumed is exactly what the backoff replaces.
+LEFT — (1) PostgreSQL path untested offline (created_at text->timestamptz compare; the index build locks the table once at first start on a large table) — manual check in the examples/service stack. (2) CONTEXT.md "usage spool", skeid-core/skeid-service-stack skills to mention spool_dir, compose volume for the spool dir. (3) Replay refusals during prepare at startup only warn (on_lost is set after prepare). (4) A new spool file's directory entry is not fsync'd (listed in the ADR as still lost). No release, no tags, no docker push.
+
+2026-10-15 Koordinator: e80a49c/059c15c von origin/main per cherry-pick auf lokales main (ADR 0023->0027, t/76->t/82, Nummernkollision); Suite 89 Dateien/5756 gruen.
