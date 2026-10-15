@@ -1,6 +1,6 @@
 # ADR 0024 — Customer keys, names and policies can come from a database view, fetched in the background
 
-- Status: proposed
+- Status: accepted — implemented (skeid k108, k109)
 - Date: 2026-10-15
 - Tags: config, auth, postgresql, keys, async
 - Karr: k108 (source), k109 (blocking connect)
@@ -146,6 +146,28 @@ tests. `DBD::Pg` stays an optional dependency, needed only when a `dbi:Pg:` DSN 
   one TCP probe per interval, not a fork and not a stalled loop.
 - Not covered, on purpose: per-row `deny_tags`/profiles/manifest, writing back to the
   database, and a database holding *upstream* secrets (the key broker's job, ADR 0011).
+
+## Implementation notes (as built)
+
+Where the code made the decision sharper than the text above:
+
+- **`models` only narrows.** It is intersected with the profile's (or `default_policy`'s) list;
+  a disjoint, empty or `*` value rejects the row. A row can never widen what the file allows.
+- **A duplicated `key_id` rejects every row that carries it** — no "first wins" arbitrariness.
+- **The `policy` name is checked at merge, not at fetch**, because `policies:` comes from the
+  file and can change between two fetches.
+- **Only the full id (`k_` + 40 hex) is valid** in the view. A database id whose short form the
+  file lists is counted as shadowed rather than failing the load.
+- **Status carries counts and `error_kind` only** (`tcp`/`connect`/`query`/`timeout`), never
+  error text: `/health` prints `reload_status`. `from_usage_store` reuses the store's DSN, user
+  and password in a connection of its own.
+- **The TCP pre-check runs only for an IP literal, or when `Net::DNS::Native` is installed**
+  (otherwise Mojo resolves the host name synchronously); the child covers the rest.
+- **In loader-only mode** (`config_loader`, no file) a new snapshot is applied at the next
+  `config_reload_interval` tick.
+- **Not verified offline:** libpq against a real server and `LISTEN/NOTIFY`; the manual
+  procedure is in `examples/service/skeid.yaml`. The fetcher starts in `build_app` before the
+  fork, like the capacity probes, so under prefork it runs per worker — unchecked.
 
 ## Tests
 

@@ -328,6 +328,20 @@ metered; without it Skeid identifies callers but lets every key in. It decides *
 comes in, never *what* it reaches — that stays the **Policy**.
 _Avoid_: login, access control, key check, refusal (that word means the policy's 403).
 
+**Customer source** (`customer_source:`):
+An optional database relation, `SELECT key_id, name, policy, models`, that another application
+owns and Skeid only reads (ADR 0024). One row per active **Customer key ID**; a revoked key is a
+row that is absent. It adds customers to the file — the file wins per id — and names the file's
+**Policy** profile each one runs under; it defines no routing semantics itself. Fetched in the
+background, never on the request path.
+_Avoid_: customer database, key store, user table.
+
+**Snapshot** (customer snapshot):
+The rows of the **Customer source** as the last successful fetch read them, kept whole across a
+failed fetch and dropped only by `max_stale_s`. Part of the config fingerprint, so a changed one
+is applied like a changed file. Not the **Registry snapshot**.
+_Avoid_: cache, copy, sync.
+
 **Provider manifest**:
 The `/.well-known/langertha.json` document telling one customer key which endpoints, faces and
 models it may use (ADR 0015). Opt-in per key (`keys: <id>: {manifest: {models: [...]}}`),
@@ -474,5 +488,7 @@ _Avoid_: hot reload, restart, refresh.
 - **"registry"** names two things: the Skeid-to-Skeid **Registry snapshot** (`registry:` config,
   `Langertha::Skeid::Registry`, ADR 0017), and — in ADR 0011 and `key_id_for_name` — the
   `names:` section. The bare word means the snapshot; the other is the **Customer name** map.
+- **"snapshot"** is two things: the **Registry snapshot** (Skeid-to-Skeid, signed, ADR 0017) and
+  the customer **Snapshot** of a **Customer source** (ADR 0024). Say which.
 - **"backend"** appears both as the usage-store driver name (`backend: postgresql`, correct)
   and colloquially for an upstream node (wrong). Upstream side is **Node**.

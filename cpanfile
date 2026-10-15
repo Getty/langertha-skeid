@@ -12,6 +12,7 @@ requires 'HTTP::Tiny', '0.080';
 requires 'Digest::SHA', '6.02';
 
 recommends 'DBD::Pg';
+recommends 'Net::DNS::Native';
 
 on test => sub {
   requires 'Test2::Suite';

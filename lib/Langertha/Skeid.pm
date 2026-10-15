@@ -11,6 +11,7 @@ use Scalar::Util qw(blessed looks_like_number refaddr reftype weaken);
 use Time::HiRes ();
 use YAML::PP;
 use Langertha ();
+use Langertha::Skeid::CustomerSource;
 use Langertha::Skeid::UsageStore;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
@@ -411,6 +412,40 @@ C<default_policy>: being let in does not widen what a key's policy routes it to.
 
 The check takes the same identity routing does: with C<routing.trust_key_id_header> the header's
 key id is what has to be on the list.
+
+=head2 customer_source
+
+  customer_source:
+    dsn: dbi:Pg:dbname=customers;host=db.internal
+    user: skeid_ro
+    password_env: SKEID_CUSTOMERS_PASSWORD
+    relation: skeid_customer_keys
+    poll_interval_s: 30
+    max_stale_s: 0
+    connect_timeout_s: 5
+    listen: skeid_customers      # optional
+
+The caller side of the config -- who may call and under which profile -- read from a database
+view another application owns (ADR 0024, skeid k108, k109). Skeid reads
+C<SELECT key_id, name, policy, models FROM E<lt>relationE<gt>>: one row per active customer key
+id, a revoked key is a row that is absent. Rows are validated one by one before they merge; a
+row with a malformed C<key_id>, a C<policy> the file's C<policies:> does not define, a C<models>
+that is not a JSON list of model names, or a C<key_id> that is not unique grants nothing and
+never fails a reload (the position and the reason are logged, never the value). A C<models>
+list narrows the profile it sits on, it does not widen it. The file wins per key id; with a
+C<client_auth> section the accepted ids join its list, without one the source does not switch
+client authentication on. C<deny_tags>, the profiles, C<aliases:> and the manifest stay in the
+file.
+
+Rows come from a background fetcher, never from the request path: a child process
+(L<Mojo::IOLoop/subprocess>) connects and queries, a non-blocking TCP connect first skips the
+fork when the port is closed, and a child that overruns C<connect_timeout_s> plus a margin is
+killed. The last good snapshot stays in force across an outage; C<max_stale_s> above 0 drops one
+older than that. The snapshot is part of the config fingerprint, so a changed one is applied by
+the next L</maybe_reload_config> like a changed file. Until the first fetch has succeeded Skeid
+runs on the file alone. C<password_env> names the variable holding the password -- a literal
+C<password> fails the load -- and C<from_usage_store: true> borrows the usage store's DSN and
+credentials, never its connection. See L</customer_source_status>.
 
 =head2 uploads
 
@@ -1336,6 +1371,38 @@ has registry_error_window_s => (is => 'rw', default => sub { 60 });
 # node_id => { last_at => epoch, buckets => { epoch_second => count } }. Failed requests, for
 # the registry snapshot's errors_in_window and last_failure_at. Reported, never consulted by
 # admission: health is operator state (ADR 0009, ADR 0017).
+# The customer source (ADR 0024, skeid k108): what the database view said about who may call and
+# under which profile. The fetcher is built from the config's customer_source section and holds
+# the snapshot; names and the merge report are what the last applied config made of it.
+has customer_source_factory => (is => 'ro', predicate => 'has_customer_source_factory');
+has _customer_fetcher => (is => 'rw', default => sub { undef });
+has _customer_fetcher_key => (is => 'rw', default => sub { undef });
+has _customer_next => (is => 'rw', default => sub { undef });
+has _customer_read_digest => (is => 'rw', default => sub { undef });
+has _customer_read_snapshot => (is => 'rw', default => sub { undef });
+has _customer_applied_digest => (is => 'rw', default => sub { undef });
+has customer_names => (is => 'rw', default => sub { {} });
+has customer_report => (is => 'rw', default => sub { {} });
+
+=attr customer_source_factory
+
+Optional code ref called with the normalized C<customer_source> section and returning the object
+that reads the relation (C<fetch>, C<tcp_target>, C<listen_loop>; see
+L<Langertha::Skeid::CustomerSource::DBI>). Absent, the DBI source is built from the section. For
+tests and for a deployment that reads its customers from somewhere that is not a database.
+
+=attr customer_names
+
+Hash ref, key id to the display C<name> column of the accepted rows of the applied snapshot.
+Informational: a name grants nothing and is not referenceable from the file.
+
+=attr customer_report
+
+Hash ref C<< { accepted, shadowed, rejected } >>: what the applied config made of the snapshot's
+rows, as counts.
+
+=cut
+
 has _failures => (
   is      => 'rw',
   default => sub { {} },
@@ -1740,6 +1807,7 @@ my @CONFIG_STATE = qw(
   admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
   mcp_servers mcp_public_url mcp_max_request_bytes openapi_swagger_ui openapi_cache_dir
+  customer_names customer_report
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
 
@@ -1769,6 +1837,7 @@ sub reload_config {
   # set -- for a config that did not change (skeid #38).
   my $last = $self->_config_fingerprint;
   if (defined($last) && $last eq $fingerprint) {
+    $self->_customer_applied_digest($self->_customer_read_digest);
     $self->_clear_reload_failure;
     return $cfg;
   }
@@ -1791,6 +1860,8 @@ sub reload_config {
   if (eval { ($nodes_print, $declared, $notices) = $self->_apply_config($cfg); 1 }) {
     $self->_forget_departed_nodes;
     $self->_config_fingerprint($fingerprint);
+    $self->_customer_applied_digest($self->_customer_read_digest);
+    $self->_config_fingerprint($self->_sync_customer_fetcher($fingerprint));
     $self->_nodes_fingerprint($nodes_print);
     $self->_config_declared($declared);
     $self->_clear_reload_failure;
@@ -1817,6 +1888,78 @@ sub reload_config {
     $self->_rr_cursor($rr_cursor);
   }
   die $err;
+}
+
+# What the fetcher was built from: the section, and -- for from_usage_store -- the usage store
+# it borrows its DSN from. Another key is another fetcher, and the old snapshot goes with it:
+# customers of one database must not outlive the pointer to it.
+sub _customer_key {
+  my ($self, $cfg) = @_;
+  my $section = $cfg->{customer_source};
+  return _config_digest([ $section, (ref($section) eq 'HASH' && $section->{from_usage_store}
+    ? $cfg->{usage_store} : undef) ]);
+}
+
+# After a config applied: starts, keeps or stops the fetcher the config calls for. Not in
+# _apply_config, because a failed apply is rolled back and must not leave a fetcher running for
+# a config that is not in force. Returns the fingerprint the config now stands under: a fresh
+# fetcher has a snapshot of 'none', which the fingerprint carries from here on, so the first
+# fetch is the only change a reload sees.
+sub _sync_customer_fetcher {
+  my ($self, $fingerprint) = @_;
+  my $next = $self->_customer_next;
+  my $current = $self->_customer_fetcher;
+  unless ($next) {
+    if ($current) {
+      $current->stop;
+      $self->_customer_fetcher(undef);
+      $self->_customer_fetcher_key(undef);
+    }
+    $self->_customer_applied_digest(undef);
+    return $fingerprint;
+  }
+  return $fingerprint if $current && $self->_customer_fetcher_key eq $next->{key};
+  $current->stop if $current;
+
+  weaken(my $weak = $self);
+  my $norm = $next->{config};
+  my $source = $self->has_customer_source_factory ? $self->customer_source_factory->($norm) : undef;
+  my $fetcher = Langertha::Skeid::CustomerSource->new(
+    config => $norm,
+    ($source ? (source => $source) : ()),
+    clock  => sub { $weak ? $weak->_now : Time::HiRes::time() },
+  );
+  $self->_customer_fetcher($fetcher);
+  $self->_customer_fetcher_key($next->{key});
+  $self->_customer_applied_digest('none');
+  $fetcher->start;
+  return $fingerprint . '+customers:none';
+}
+
+# True when the customer snapshot in force is not the one the applied config was built from:
+# a fetch landed, or max_stale_s dropped the snapshot. Two string compares on the request path.
+sub _customer_snapshot_moved {
+  my ($self) = @_;
+  my $fetcher = $self->_customer_fetcher or return 0;
+  my $applied = $self->_customer_applied_digest;
+  return defined($applied) && $fetcher->digest ne $applied ? 1 : 0;
+}
+
+=method customer_source_status
+
+  my $status = $skeid->customer_source_status;   # undef without a customer_source section
+
+The state of the customer source (ADR 0024): whether a snapshot is in force and how old it is,
+the last fetch failure's kind (never its text), and what the applied config made of the rows --
+C<accepted>, C<shadowed> (named by the file, which wins) and C<rejected> counts. Also served,
+under C<customer_source>, by L</reload_status> and so by C<GET /skeid/config>.
+
+=cut
+
+sub customer_source_status {
+  my ($self) = @_;
+  my $fetcher = $self->_customer_fetcher or return;
+  return { %{ $fetcher->status }, %{ $self->customer_report || {} } };
 }
 
 # A reload that drops a node drops what was known about it too, as remove_node does: its
@@ -1866,13 +2009,16 @@ C<failed_at> and C<failures>, never the message, which can name customers and mo
 sub reload_status {
   my ($self) = @_;
   my $err = $self->last_reload_error;
-  return { ok => 1 } unless defined $err;
+  my $customers = $self->customer_source_status;
+  my @customers = $customers ? (customer_source => $customers) : ();
+  return { ok => 1, @customers } unless defined $err;
   (my $message = $err) =~ s/\s+\z//;
   return {
     ok        => 0,
     error     => $message,
     failed_at => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime($self->last_reload_error_at // time)),
     failures  => 0 + ($self->reload_failures // 0),
+    @customers,
   };
 }
 
@@ -1909,6 +2055,20 @@ sub _read_config {
   my $fingerprint = defined($version) && !ref($version)
     ? "version:$version"
     : 'digest:' . _config_digest($cfg);
+
+  # The customer snapshot is part of what the config is (ADR 0024): the same file with another
+  # snapshot is another config, applied through this same path and rolled back by it.
+  my $fetcher = $self->_customer_fetcher;
+  if (ref($cfg->{customer_source}) eq 'HASH' && $fetcher
+      && $self->_customer_fetcher_key eq $self->_customer_key($cfg)) {
+    my $snapshot = $fetcher->effective_snapshot;
+    $self->_customer_read_snapshot($snapshot);
+    $self->_customer_read_digest($snapshot ? $snapshot->{digest} : 'none');
+    $fingerprint .= '+customers:' . $self->_customer_read_digest;
+  } else {
+    $self->_customer_read_snapshot(undef);
+    $self->_customer_read_digest(undef);
+  }
   return ($cfg, $fingerprint);
 }
 
@@ -1964,6 +2124,33 @@ sub _apply_config {
   my ($self, $cfg) = @_;
   my $before = $self->_config_declared;
   my (%declared, @notices);
+
+  # The customer source (ADR 0024): validated here, so a bad section fails the load and rolls
+  # back like any other. Its snapshot -- the one the fingerprint was read with -- is merged into
+  # a copy of the config, which the sections below then load as if the file had said it.
+  $self->_customer_next(undef);
+  my $customer_names = {};
+  my $customer_report = {};
+  if (exists $cfg->{customer_source}) {
+    $declared{customer_source} = 1;
+    my $norm = Langertha::Skeid::CustomerSource->normalize_config(
+      $cfg->{customer_source}, usage_store => $cfg->{usage_store});
+    $self->_customer_next({ config => $norm, key => $self->_customer_key($cfg) });
+    my ($merged, $report) = Langertha::Skeid::CustomerSource->merge($cfg, $self->_customer_read_snapshot);
+    $cfg = $merged;
+    $customer_names = $report->{names};
+    $customer_report = { map { $_ => $report->{$_} } qw(accepted shadowed) };
+    $customer_report->{rejected} = scalar @{ $report->{rejected} };
+    if (@{ $report->{rejected} }) {
+      my @shown = @{ $report->{rejected} };
+      my $more = @shown > 10 ? ' (and ' . (@shown - 10) . ' more)' : '';
+      splice(@shown, 10) if @shown > 10;
+      push @notices, 'customer_source: ' . scalar(@{ $report->{rejected} }) . ' row(s) rejected, '
+        . 'they grant nothing: ' . join('; ', map { 'row ' . $_->{position} . ': ' . $_->{reason} } @shown) . $more;
+    }
+  }
+  $self->customer_names($customer_names);
+  $self->customer_report($customer_report);
 
   if (exists $cfg->{pricing}) {
     $declared{pricing} = 1;
@@ -2188,7 +2375,7 @@ sub maybe_reload_config {
 
   my $mtime = (stat($file))[9] || 0;
   my $last  = $self->_config_mtime;
-  if (!defined($last) || $mtime > $last) {
+  if (!defined($last) || $mtime > $last || $self->_customer_snapshot_moved) {
     my $failed = $self->_config_file_failed_mtime;
     my $retry  = $self->_config_file_retry_at;
     return 0 if defined($failed) && $mtime == $failed
@@ -4593,6 +4780,7 @@ sub call_function {
 
 sub DEMOLISH {
   my ($self) = @_;
+  if (my $fetcher = $self->_customer_fetcher) { $fetcher->stop }
   $self->_disconnect_usage_store;
 }
 
