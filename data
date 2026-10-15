@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-10-15T04:44:24Z
+claimed_by: claude
+class: standard
+completed: 2026-10-15T03:15:50Z
+created: 2026-10-12T05:30:30Z
+id: 109
+priority: medium
+started: 2026-10-15T02:02:18Z
+status: done
+tags:
+- customer-source
+- async
+- postgresql
+title: 'customer_source: the Mojo::Pg connect blocks the event loop'
+updated: 2026-10-15T05:26:20Z
+---
+
+Follow-up to k108 / ADR 0022. DBD::Pg has no async connect: opening the CustomerSource::Pg connection blocks the worker loop up to connect_timeout_s (min ~2 s in libpq), once per process and once per retry while the DB is unreachable — a blackholed host stalls all in-flight streams per retry (ADR 0005). Options: TCP pre-check on the reactor before connecting, or connect+query in a Mojo::IOLoop->subprocess. Decide, amend ADR 0022, implement with an offline test. Also: real Pg fetcher has never run against Mojo::Pg/DBD::Pg on this box — verify via the manual procedure in examples/service/skeid.yaml.
+
+2026-10-15 Entscheidung: connect+query in Mojo::IOLoop->subprocess, TCP-Vorpruefung nur Ergaenzung (IP-Literal oder Net::DNS::Native), Deadline connect_timeout_s+5s mit SIGKILL. Reproduziert: Loop blockiert 2.03 s ohne Fix, mit Fix groesste Timer-Luecke 0.05 s; Regressionstest in t/77. Commit 6a3961d (Branch worktree-b-108-109, ein Commit mit k108, weil untrennbar), ADR 0024 ergaenzt. Echter PG-Lauf offen (manuelles Verfahren in examples/service/skeid.yaml).
+
+
+
+2026-10-15 Integration: Der Neubau (Branch worktree-b-108-109, ADR 0024/0026-Duplikat, t/81) ist verworfen; die Original-Umsetzung von k108 (origin/main) ist die Basis. k109 als Delta auf Branch k108-integrate (Merge a800c20): CustomerSource::DBI ersetzt CustomerSource::Pg (Mojo::Pg faellt als Abhaengigkeit weg), fetch = Mojo::IOLoop->subprocess, LISTEN in zweitem Kindprozess, Kill bei Deadline (connect_timeout_s + 2 s). Original-ADR heisst jetzt 0026 (Abschnitt 'Update: connect and query run in a child process'); Tests t/83-86 (ex t/72-75) + neues t/87. Bewusst NICHT portiert: TCP-Vorpruefung (war nur Ergaenzung; libpq connect_timeout + Kill reichen, kein Net::DNS::Native-Zweig), config-Schluessel poll_interval_s etc. des Neubaus (Original: refresh_interval_s). Offen: echter PostgreSQL-Lauf (text[] models, LISTEN-Kind) nur ueber das manuelle Verfahren in examples/service/skeid.yaml.
+
+2026-10-15 05:26 Echter PG-Lauf erledigt (t/90, PostgreSQL 18.6): connect+query im Kindprozess mit DBD::Pg ok (text[] models), Loop-unabhaengig; Reconnect nach pg_terminate_backend und Ausfall (ALLOW_CONNECTIONS false) ok, letzter guter Snapshot bleibt; Prefork --workers 3 ok nach Fix: customer_source_release plant fetch_now per next_tick, damit jeder Worker sofort fetcht und seinen LISTEN-Kind startet (vorher erst nach refresh_interval_s). Details in k108.
