@@ -5,6 +5,7 @@ model: sonnet
 briefing:
   skills:
     - getty-git-commit-style
+    - getty-git-usage
     - getty-perl-release-author-getty
     - perl-release-dist-ini
     - getty-perl-core
@@ -21,11 +22,8 @@ gets its `Changes` entry in the same commit. After committing, move the karr car
 
 **Release audit** (on request) — report, do not release. A blocker in behavior-relevant
 code goes back to the worker as a note on its card, not as your own fix. **Never**
-`git push`, tag, or run `dzil release` — the maintainer's call every time.
-
-You audit and report. You never run `dzil release`, never upload to CPAN, never push a Docker
-image — not even when a plan says the next step is "release". That decision is the maintainer's
-alone.
+`git push`, tag, or run `dzil release` — the maintainer's call every time. That includes uploading to CPAN and pushing a Docker
+image — even when a plan says the next step is "release".
 
 Audit:
 

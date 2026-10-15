@@ -21,8 +21,9 @@ principle and lane are in `.claude/rules/skeid-rules.md`. Agents in this repo:
 |---|---|
 | Implement / refactor / debug behavior-relevant code | `skeid-worker` (default) |
 | Wire protocols & services: OpenAI/Anthropic/Ollama formats, SSE, Langertha engines, MCP tools | `skeid-protocol-worker` |
+| KeyBroker/OpenBao, `Secret`, compose stack, Dockerfile, ENV surface | `skeid-service-worker` |
 | Write/extend tests (`Test::Mojo`, fake upstream, usage stores) | `skeid-proxy-test-writer` |
-| Measure TTFT / throughput, run `bench/`, compare against other proxies | `skeid-perf-tester` |
+| Measure TTFT / throughput, run `bench/`, NYTProf profiling, compare against other proxies | `skeid-perf-tester` |
 | Commits, `Changes`, card → done, pre-release audit | `skeid-release-manager` |
 
 The agents carry their skills via `briefing.skills` (see `.claude/agents/`); the main agent
