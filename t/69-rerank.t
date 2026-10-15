@@ -258,7 +258,7 @@ sub paired {
   my ($skeid, $id, $label) = @_;
   my $m = $skeid->node_metrics($id);
   is $m->{inflight}, 0, "$label: nothing in flight on $id";
-  is $m->{ok} + $m->{error} + $m->{aborted}, $m->{started},
+  is $m->{ok} + $m->{error} + $m->{aborted} + $m->{rejected}, $m->{started},
     "$label: every request.start on $id has its request.finish";
   return $m;
 }

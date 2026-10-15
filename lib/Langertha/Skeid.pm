@@ -1273,6 +1273,13 @@ has _failures => (
   default => sub { {} },
 );
 
+# The same shape for requests the client's own fault ended (k99): the registry snapshot's
+# rejected_in_window. Kept apart from _failures so errors_in_window keeps its meaning.
+has _rejections => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
 has _stats => (
   is      => 'rw',
   default => sub { {} },
@@ -1432,6 +1439,7 @@ sub remove_node {
   if ($removed) {
     $self->forget_capacity($id);
     delete $self->_failures->{$id};
+    delete $self->_rejections->{$id};
   }
   return $removed ? 1 : 0;
 }
@@ -1750,7 +1758,7 @@ sub reload_config {
 sub _forget_departed_nodes {
   my ($self) = @_;
   my %present = map { (($_->{id} // '') => 1) } @{$self->nodes};
-  for my $store ($self->_capacity, $self->_failures) {
+  for my $store ($self->_capacity, $self->_failures, $self->_rejections) {
     delete $store->{$_} for grep { !$present{$_} } keys %$store;
   }
   return;
@@ -4139,12 +4147,15 @@ sub start_request {
 
   $skeid->finish_request('gpu-1', ok => 1, duration_ms => 840);
   $skeid->finish_request('gpu-1', aborted => 1);   # the client hung up
+  $skeid->finish_request('gpu-1', rejected => 1);  # the request was the client's to fix
 
 Releases the slot L</start_request> took and counts the outcome for L</node_metrics>. There are
-three outcomes: C<ok>, failed (neither C<ok> nor C<aborted>), and C<aborted> -- the client went
-away, which says nothing about the node. A failed request counts toward the registry snapshot's
-C<errors_in_window> and C<last_failure_at>; an aborted one is counted apart and toward neither.
-C<aborted> wins over C<ok>. Never touches C<healthy>. Returns 1. The C<request.finish> function calls it.
+four outcomes: C<ok>, failed (none of the others), C<aborted> -- the client went away -- and
+C<rejected> -- the client sent something no node would take (400, 404, 413, 422; not 401, 403 or
+429, which speak of the node's key or capacity). Both say nothing about the node. A failed request
+counts toward the registry snapshot's C<errors_in_window> and C<last_failure_at>; an aborted one is
+counted apart and toward neither; a rejected one is counted apart and shows as C<rejected_in_window>.
+C<aborted> wins over C<rejected>, which wins over C<ok>. Never touches C<healthy>. Returns 1. The C<request.finish> function calls it.
 
 =cut
 
@@ -4159,6 +4170,10 @@ sub finish_request {
   if ($args{aborted}) {
     # The client left. The node did nothing wrong: not an error, not a failure in the window.
     $self->_stats->{$node_id}{aborted} = 1 + ($self->_stats->{$node_id}{aborted} // 0);
+  } elsif ($args{rejected}) {
+    # The client's to fix: not an error, not a failure in the window, and not the node's ok.
+    $self->_stats->{$node_id}{rejected} = 1 + ($self->_stats->{$node_id}{rejected} // 0);
+    $self->_record_failure($node_id, $self->_rejections);
   } elsif ($args{ok}) {
     $self->_stats->{$node_id}{ok} = 1 + ($self->_stats->{$node_id}{ok} // 0);
   } else {
@@ -4177,9 +4192,9 @@ sub finish_request {
 # One bucket per second, pruned to the window on every write, so a node that fails a lot costs
 # at most error_window_s buckets.
 sub _record_failure {
-  my ($self, $node_id) = @_;
+  my ($self, $node_id, $store) = @_;
   my $now = Time::HiRes::time();
-  my $f = $self->_failures->{$node_id} //= { buckets => {} };
+  my $f = ($store || $self->_failures)->{$node_id} //= { buckets => {} };
   $f->{last_at} = $now;
   $f->{buckets}{int $now}++;
   my $oldest = int($now - (0 + ($self->registry_error_window_s || 60)));
@@ -4190,8 +4205,8 @@ sub _record_failure {
 }
 
 sub _errors_in_window {
-  my ($self, $node_id) = @_;
-  my $f = $self->_failures->{$node_id} or return 0;
+  my ($self, $node_id, $store) = @_;
+  my $f = ($store || $self->_failures)->{$node_id} or return 0;
   my $oldest = int(Time::HiRes::time() - (0 + ($self->registry_error_window_s || 60)));
   my $count = 0;
   for my $second (keys %{$f->{buckets}}) {
@@ -4206,7 +4221,8 @@ sub _errors_in_window {
 
 What this Skeid publishes to a fronting tier (ADR 0017): schema C<version> 1, C<instance>,
 C<generated_at>, C<ttl>, C<workers>, and per node C<id>, C<tags>, C<healthy>, C<inflight>,
-C<max_conns> (this process's share), C<errors_in_window>, C<last_failure_at> and, when a
+C<max_conns> (this process's share), C<errors_in_window>, C<last_failure_at>,
+C<rejected_in_window> (requests the client's own fault ended, counted apart; ADR 0024) and, when a
 current reading exists, C<capacity> (C<used>, C<limit>, C<source>, C<retry_after>).
 
 Built from a whitelist, so it cannot carry what it must not: no node URL, no key reference, no
@@ -4235,6 +4251,7 @@ sub registry_snapshot {
       max_conns        => 0 + $self->worker_max_conns($node),
       errors_in_window => 0 + $self->_errors_in_window($id),
       last_failure_at  => ($failure && defined $failure->{last_at} ? 0 + $failure->{last_at} : undef),
+      rejected_in_window => 0 + $self->_errors_in_window($id, $self->_rejections),
       ($reading ? (capacity => {
         used   => (defined $reading->{used}  ? 0 + $reading->{used}  : undef),
         limit  => (defined $reading->{limit} ? 0 + $reading->{limit} : undef),
@@ -4260,7 +4277,7 @@ sub registry_snapshot {
   my $all = $skeid->node_metrics;
 
 Volatile per-process counters for operations, never billed: C<node_id>, C<inflight>,
-C<started>, C<ok>, C<error>, C<aborted>, C<duration_ms_total>, and C<capacity> while a current reading
+C<started>, C<ok>, C<error>, C<aborted>, C<rejected>, C<duration_ms_total>, and C<capacity> while a current reading
 exists. With no id, an arrayref with one entry per node. Served by C<GET /skeid/metrics/nodes>.
 
 =cut
@@ -4277,6 +4294,7 @@ sub node_metrics {
       ok => 0 + ($s->{ok} // 0),
       error => 0 + ($s->{error} // 0),
       aborted => 0 + ($s->{aborted} // 0),
+      rejected => 0 + ($s->{rejected} // 0),
       duration_ms_total => 0 + ($s->{duration_ms_total} // 0),
       # Present only when a probe has something current to say. A report must not present a
       # measured node and an inferred one as equally known (ADR 0009).
@@ -4320,7 +4338,7 @@ function names a required argument.
   capacity.observe    id, headers, status                   { capacity }
   capacity.forget     id (optional)                         { ok }
   request.start       id                                    { ok }
-  request.finish      id, ok|aborted, duration_ms                 { ok }
+  request.finish      id, ok|aborted|rejected, duration_ms                 { ok }
   config.reload                                             { config } (dies on failure)
   config.status                                             reload_status
   usage.record        as record_usage                       record_usage

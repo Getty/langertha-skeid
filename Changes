@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - request.finish has a fourth outcome, `rejected`, for a request the
+      client got wrong (upstream 400, 404, 413, 422, or a request refused
+      after admission as unsendable). It no longer counts as a node error:
+      not in the error counter, errors_in_window or last_failure_at. 401,
+      403, 429 and 5xx stay node errors. The registry snapshot carries the
+      count in a new node field, rejected_in_window; version stays 1 and the
+      existing fields keep their meaning (ADR 0024).
     - The request goes upstream as the client spelled it. /v1/chat/completions
       and /v1/embeddings forward the client's bytes with only model replaced,
       instead of decoding the body and encoding it again -- which wrote every

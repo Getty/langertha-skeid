@@ -325,7 +325,8 @@ A client that closes its connection before the answer is complete ends its reque
 moment. While it waits for capacity it stops waiting and takes no slot. Once a node was called,
 the upstream connection is closed -- which is how the node learns to stop generating -- and is
 not returned to the pool; the slot is given back with a C<request.finish> marked C<aborted> -- counted apart, not as a node
-error, so the node's error counter and the registry snapshot's C<errors_in_window> stay untouched --
+error (and a request the node refused as the client's own fault, 400, 404, 413 or 422, is marked C<rejected>
+and counted apart the same way, ADR 0024), so the node's error counter and the registry snapshot's C<errors_in_window> stay untouched --
 and the one usage event is written with C<ok = 0>, C<status_code> 499 and C<error_type>
 C<client_abort>, priced from the usage the stream had reported until then (nothing, for a
 request that was not streamed). A client that leaves while the node's key is still being
@@ -1566,6 +1567,13 @@ sub _cancel_upstream {
   return;
 }
 
+# A status that says the request, not the node, was at fault (k99, ADR 0024). 401, 403 and 429
+# are not here: they speak of the node's key or capacity and stay node errors.
+sub _client_fault {
+  my ($status) = @_;
+  return (defined $status && $status =~ /\A(?:400|404|413|422)\z/) ? 1 : 0;
+}
+
 # What a request its client abandoned records (ADR 0004): failed, under the status nginx made
 # the convention for "client closed request" -- no answer was delivered, and 499 can be told
 # from every status a node or Skeid itself answers with.
@@ -1666,6 +1674,7 @@ sub _proxy_openai_json_async {
       $c->skeid->call_function('request.finish', {
         id => $node_id,
         ok => 0,
+        _client_fault($err->{code}) ? (rejected => 1) : (),
         duration_ms => $duration_ms,
       });
       _record_usage_event($c, {
@@ -2046,6 +2055,7 @@ sub _proxy_openai_stream {
         $c->skeid->call_function('request.finish', {
           id => $node_id,
           ok => 0,
+          _client_fault($err_status) ? (rejected => 1) : (),
           duration_ms => $duration_ms,
         });
         _record_usage_event($c, {
@@ -2126,6 +2136,8 @@ sub _proxy_openai_stream {
     $c->skeid->call_function('request.finish', {
       id => $node_id,
       ok => ($had_error || $status >= 500) ? 0 : 1,
+      # An upstream 4xx relayed after the headers went out is still the client's to fix.
+      ($had_error && _client_fault($status)) ? (rejected => 1) : (),
       duration_ms => $duration_ms,
     });
 
@@ -2452,6 +2464,7 @@ sub _refuse_unsendable_request {
   $c->skeid->call_function('request.finish', {
     id => $node_id,
     ok => 0,
+    rejected => 1,
     duration_ms => $duration_ms,
   });
   _record_usage_event($c, {

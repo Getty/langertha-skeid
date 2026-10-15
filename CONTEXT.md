@@ -380,6 +380,9 @@ _Avoid_: hot reload, restart, refresh.
   is busy, not broken — and an error-driven health flag would have nothing to flip it back.
 - A **Usage event** is written once per forwarded request, after `request.finish`, whatever the
   outcome — errors are billable events too, with `ok = 0`.
+- `request.finish` has four outcomes: ok, error, **aborted** (the client left) and **rejected**
+  (400, 404, 413, 422: the client's to fix; 401/403/429 stay errors). Aborted and rejected are
+  counted apart and never reach `errors_in_window` or `last_failure_at` (ADR 0024).
 - **Node metrics** and **Usage events** count the same requests and are never reconciled: one
   is volatile operations data, the other is durable billing data. Don't derive one from the
   other.
