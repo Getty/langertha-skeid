@@ -2,6 +2,10 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - /v1/messages: an empty top-level `system: ""` is dropped like an empty
+      system block array, instead of going upstream as an empty system
+      message that a strict chat template may refuse (k101).
+
     - request.finish has a fourth outcome, `rejected`, for a request the
       client got wrong (upstream 400, 404, 413, 422, or a request refused
       after admission as unsendable). It no longer counts as a node error:

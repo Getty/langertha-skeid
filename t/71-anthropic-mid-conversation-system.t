@@ -295,4 +295,14 @@ is_deeply forwarded('no system message in messages', system => 'S', messages => 
     { role => 'user', content => [{ type => 'text', text => 'and this' }, $image_part] },
   ], 'a conversation without a system message in it is translated as before';
 
+# An empty top-level system string is dropped like an empty block array (k101).
+for my $empty ('', []) {
+  my $name = ref $empty ? 'an empty system block array' : 'an empty system string';
+  is_deeply forwarded($name, system => $empty, messages => [{ role => 'user', content => 'hi' }]),
+    [{ role => 'user', content => 'hi' }], "$name: no system message is forwarded";
+}
+is_deeply forwarded('a non-empty system string', system => 'S', messages => [{ role => 'user', content => 'hi' }]),
+  [{ role => 'system', content => 'S' }, { role => 'user', content => 'hi' }],
+  'a non-empty system string is forwarded as before';
+
 done_testing;
