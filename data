@@ -1,0 +1,52 @@
+---
+claimed_at: 2026-10-15T05:18:25Z
+claimed_by: plan-ocr-realtime
+class: standard
+completed: 2026-10-15T05:18:25Z
+created: 2026-10-03T03:30:59Z
+id: 94
+priority: low
+started: 2026-10-15T01:38:57Z
+status: done
+tags:
+- ocr
+- design
+title: 'OCR through Skeid: docling-serve face or a vision model over the chat route
+  (decision card)'
+updated: 2026-10-15T05:18:25Z
+---
+
+Card only -- nothing is built yet. An OCR service joins the cluster later and should be reachable through Skeid like everything else (client_auth, routing over nodes, usage). Which backend is still open; this card describes both ways and what Skeid would need for each, so the decision can be made with the cost in view.
+
+Way A -- docling-serve behind its own HTTP API
+- the API (verify against the deployed version): POST /v1/convert/source (JSON: sources by URL or base64, options), POST /v1/convert/file (multipart: files, options), the async twins /v1/convert/source/async and /v1/convert/file/async with GET /v1/status/poll/{task_id} and GET /v1/result/{task_id}; key in the X-Api-Key header. The answer carries the document (markdown / JSON / HTML), status, errors, processing_time.
+- what Skeid needs:
+  1. a face of its own. It is not an OpenAI route and has no `model` field, so routing needs a key that is not the body's model: a fixed model name per route (node `model: docling`) or a node kind.
+  2. multipart relay with the upload limit -- built for audio (k91), reusable as is; documents are larger than audio, so the limit has to be per route or raised.
+  3. upstream auth by another header: _inject_node_auth_async sets Authorization: Bearer only; a node needs to name its header (X-Api-Key).
+  4. task affinity for the async calls: status and result must reach the node that took the task. Skeid routes every request on its own today; this is a new concept (task id -> node, in memory, lost on restart, not shared between workers). Without it only the synchronous calls can be offered, and a long conversion holds a slot and a client connection for minutes (the upstream timeout is 300 s by default).
+  5. a usage unit: pages. An optional `pages` field on the usage event, read from the answer if docling reports it, else nothing but duration.
+  6. capacity: docling has no Prometheus running/waiting metrics Skeid knows; inflight admission with a small max_conns.
+- cost: a new face, a header option, a usage field, and the affinity question. Medium; the affinity table is the part that needs an ADR.
+
+Way B -- a vision model over the chat route
+- an OCR-capable VLM (olmOCR, DeepSeek-OCR, PaddleOCR-VL, dots.ocr, a Qwen-VL ...) served by vLLM, called as POST /v1/chat/completions with image_url parts.
+- what Skeid needs: nothing for routing, admission, streaming, client_auth and usage -- it is a chat node, metered in tokens and priced by `pricing`. Images already pass the OpenAI face untouched and are translated on the Anthropic and Ollama faces (k42).
+- what is missing around it:
+  1. request size: a base64 page image sits in the JSON body, under Mojolicious' 16 MiB message limit. A configurable limit for the JSON routes (beside uploads.max_bytes from k91).
+  2. PDFs: a VLM takes images. Somebody has to rasterise -- the client, or a convenience route in Skeid (for instance Mistral's POST /v1/ocr shape: document in, pages[].markdown and usage_info.pages_processed out) that splits a PDF into page images and fans out chat calls. That is a PDF renderer as a dependency and a fan-out of N upstream requests behind one client request: admission, partial failure and one usage event for N calls all need deciding. Large, and nothing Skeid does today.
+- cost: almost nothing if clients send page images; large if Skeid is to take PDFs.
+
+Recommendation: B without the convenience route first -- it works the day the model is deployed, and the only change is the JSON size limit. A when layout, tables and reading order of whole documents matter more than tokens per page; then start with the synchronous calls and decide task affinity in an ADR before the async ones.
+
+Decide before building: backend (A, B, or both); who rasterises PDFs; whether pages become a usage unit beside tokens, audio_seconds and documents.
+
+2026-10-14 03:56 Empfehlung (Koordinator-Notiz, Karte bleibt in backlog): Weg B ohne Convenience-Route zuerst; einzige Änderung ist ein konfigurierbares JSON-Größenlimit für die Chat-Routen neben uploads.max_bytes (k91). Weg A (docling) erst bei Bedarf an Layout/Tabellen ganzer Dokumente, dann zuerst nur die synchronen Calls und Task-Affinität per ADR vor den Async-Calls. PDF-Rasterisierung: Client, nicht Skeid. 'pages' als Usage-Einheit: erst mit Weg A.
+
+2026-10-15 01:32 ENTSCHEIDUNG Getty 2026-10-15: Weg A (docling-serve) jetzt planen (Plan/Spec, noch kein Bau).
+
+2026-10-15 Plan fertig (nur Doku, kein lib/). Branch worktree-plan-ocr-realtime (Basis lokaler main 64c8358), Commit 2d22c8d. Spec docs/superpowers/specs/2026-10-15-ocr-docling-design.md, Plan docs/superpowers/plans/2026-10-15-ocr-docling.md. Kern: docling-eigene Pfade /v1/convert/{file,source} als relayed route (ADR 0021); fester Routing-Modellname documents.model=docling; Node-Option api_key_header (X-Api-Key); eigenes Upload-Limit documents_max_bytes; Einheit documents (Spalte existiert), pages erst wenn Backend es meldet; Async+Task-Affinitaet als Phase 2 per ADR (Empfehlung: zustandsloses node.task-Praefix). Neu: http_sources/callbacks = SSRF ueber den Relay, Empfehlung Default-Refuse. docling-Feldnamen aus Upstream-Doku weichen von der Karte ab (http_sources/file_sources); Plan-Task 0 prueft gegen die deployte Version. Offene Entscheidungen: 7 Punkte am Ende der Spec. Tests: nichts gelaufen, kein Code geaendert. Folge in langertha: keine. Randbefund: JSON-Groessenlimit der Chat-Routen (Weg B) bleibt unabhaengig offen.
+
+2026-10-15 ENTSCHEIDUNG Getty (Runde 2, bindend): Abrechnungseinheit: Seiten sofort aus json_content parsen (nicht documents); Remote-Quellen/Callbacks default 400, opt-in documents.allow_remote_sources; erst synchron, Async nach eigenem ADR (<node>.<task>-ID); Routing ueber Node-Art kind: documents (nicht fester Modellname); uploads.documents_max_bytes 100 MiB, Upstream-Timeout unveraendert; docling-eigene /v1/convert/*; api_key_header je Node. Bau freigegeben.
+
+2026-10-15 Bau fertig (lokal, kein Push): Commit 652348f auf Branch ocr-docling. ADR 0028 (+ Update in ADR 0021), Protocol::Documents, node kind: documents, api_key_header, uploads.documents_max_bytes (100 MiB), documents.allow_remote_sources (Default 400), usage pages (nullable Spalte beide SQL-Schemas + Migration, aus json_content, nur bei JSON-Antwort <= 8 MiB). Tests: t/88 neu (rot gegen altes lib/, 8 Mutationen rot/gruen), prove -lr -j3 t/ PASS 94 Dateien / 6091 Tests. Konservativ geloest: Policy-Schluessel 'documents' in models grantbar (Key mit models-Liste ohne documents -> 403); zusaetzlich target != inbody/zip und Nicht-Inline-sources abgelehnt; Upstream-Fehler laufen durch den ueblichen upstream_error-Pfad. OFFEN: Task 0 (Abgleich mit deployter docling-Version, Feldnamen) nicht moeglich; kein Bench der pages-Parse-Kosten (skeid-perf-tester); Plan-Mutation 'Upload-Asset leaken' nicht gebaut; Async nur als ADR-Hinweis (<node>.<task>); max_conns >= workers fuer docling-Node im Deployment-Doc.
