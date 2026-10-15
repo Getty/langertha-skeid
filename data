@@ -1,0 +1,42 @@
+---
+claimed_at: 2026-10-15T01:43:11Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-10-15T01:43:11Z
+created: 2026-10-04T05:42:05Z
+id: 103
+priority: high
+started: 2026-10-15T01:43:11Z
+status: done
+tags:
+- mcp
+- proxy
+- auth
+title: 'MCP gateway: authenticated relay of assigned MCP servers under /mcp/<name>,
+  listed on /v1/mcp/servers'
+updated: 2026-10-15T02:26:26Z
+---
+
+CitiAI hands every customer one Skeid client key. The operator assigns MCP servers to a customer key ID in the config; the customer wires each assigned server into its client (Hermes Agent, Claude Code, Codex) with that same key. Skeid is a thin authenticating reverse proxy for MCP Streamable HTTP: relayed, not translated (ADR 0021), no tool aggregation, no understanding of the protocol.
+
+Wanted:
+
+- POST|GET|DELETE /mcp/<name> (and sub-paths) relayed to the configured upstream URL, behind client authentication like /v1/*
+- the server has to be assigned to the customer key ID; unknown or unassigned name is 404 (existence is not revealed), no or wrong key is 401
+- the client Authorization never goes upstream; the upstream credential comes from the key broker or an environment variable, never from the config text or a log line
+- body untouched; Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID passed on; status, Mcp-Session-Id and a text/event-stream answer relayed unbuffered, under the upstream timeout of an LLM stream
+- GET /v1/mcp/servers lists only the servers assigned to the presented key, with the public URL and never the upstream URL or its headers; transport: stdio entries are hints for a server on the customer machine and are not proxied
+- config section mcp: (public URL, servers with url, description, key source, keys); without it Skeid behaves exactly as before
+- usage event per relayed request if it fits the store without bending it
+
+Not in scope: tool aggregation, starting stdio processes, per-end-user OAuth, an admin API for assignments, deployment.
+
+Done: spec in docs/superpowers/specs/2026-10-04-mcp-gateway-design.md, ADR, README, CONTEXT, Changes, example config; tests against a fake MCP upstream (JSON and SSE).
+
+2026-10-04 06:07 Implemented on branch mcp-gateway, local commits only (no push): ee28f0c spec, abbb5f3 code + tests + Changes, 18e89b6 docs (README, CONTEXT, ADR 0022, example config, skeid skills). Config form differs from the brief in two names: mcp.public_url (as manifest.public_url) and api_key_ref / api_key_env for the upstream credential instead of a header value in the YAML (ADR 0003). Added beyond the brief: an upstream 401 and an upstream redirect are answered 502, not relayed. Usage events fit the store unchanged (api_format mcp, endpoint /mcp/<name>). t/72-mcp-gateway.t: 525 tests, 14 mutations caught; prove -lr -j1 t/: Files=77, Tests=5126, PASS. Open decisions are section 9 of docs/superpowers/specs/2026-10-04-mcp-gateway-design.md. Not tested against a real MCP client or server, only the fake upstream and a curl smoke run against skeid serve. Card created and moved with --local-only: the board refs are not pushed either.
+
+2026-10-15 01:32 Getty 2026-10-15: Code-Review fahren, bei gruen mergen (inkl. #107).
+
+2026-10-15 01:39 REVIEW Hub 2026-10-15 (unabhaengiger Agent, read-only): keine Blocker; Suite auf dem Branch 77 Dateien/5126 Tests gruen; Auth/Zuweisung/Header-Allowlist/Pfad-Traversal/SSRF/Hot-Reload ohne Befund. Folgearbeit (should-fix): (1) _relay_mcp relayt Upstream-Antwortheader per Negativliste: Set-Cookie/Server/WWW-Authenticate/CORS laufen zum Client -> Allowlist (content-type, mcp-*, cache-control, retry-after, www-authenticate) + Test; (2) pruefen, ob Mojo max_response_size einen stehenden SSE-Stream kappt, Test mit grossem Stream; MCP-eigenes Request-Limit statt globalem; (3) durch request_timeout gekappter SSE-Stream wird als normales ok=1/200 verbucht -> Timeout-Marker im Usage-Event. Nits: (4) Client-Query wird unveraendert an Upstream angehaengt (Doku oder verwerfen); (5) README: trust_key_id_header nur hinter authentifizierendem Front-End; (6) kein OPTIONS/HEAD/CORS. Merge nach main mit #107: siehe naechste Notiz.
+
+2026-10-15 02:26 Review-Folgearbeiten (1),(2),(3),(5) umgesetzt, (4),(6) dokumentiert: Branch bau-a, Commit 6797bab, lokal. (1) Header-Allowlist (WWW-Authenticate bewusst nicht: Upstream-401 wird 502). (2) Befund echt: Mojo-Message-Limit kappte SSE bei ~1 MB -> max_message_size(0); neues mcp.max_request_bytes (Default 10 MiB, 413, kein Usage-Event/kein 'rejected', da kein Node-Request). (3) ok=0 + error_type upstream_timeout. (5) README. (4)/(6) README/POD/ADR 0022-Nachtrag. t/72: 570 Tests; Suite 87 Dateien/5575 PASS.
