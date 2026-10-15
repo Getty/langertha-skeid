@@ -1,0 +1,26 @@
+---
+block_reason: 'Entscheidungskarte: Merge-Semantik der Anthropic-Face (siehe Empfehlung)'
+blocked: true
+claimed_at: 2026-10-15T03:10:29Z
+claimed_by: abbau
+class: standard
+completed: 2026-10-15T03:10:29Z
+created: 2026-10-03T20:39:20Z
+id: 102
+priority: medium
+started: 2026-10-14T03:55:10Z
+status: done
+tags:
+- anthropic
+- translation
+title: 'Anthropic route: translated conversation can hold two user messages in a row'
+updated: 2026-10-15T03:10:29Z
+---
+
+Found while working k100. The OpenAI message list request_to_openai builds can contain consecutive user messages: the tool-images user message followed by the client text of the same Anthropic message (existing), and since k100 a standalone <system-reminder> user message after a run of tool messages. Templates with strict role alternation (Gemma) may refuse that, depending on how they render tool messages. k100 removed the mid-conversation system role, not same-role neighbours. Done: decide whether Skeid merges adjacent user messages (content arrays included) on the Anthropic face, without changing the prompt prefix of earlier turns; test on the forwarded OpenAI messages.
+
+2026-10-14 03:56 Empfehlung (nicht umgesetzt, Design-Entscheidung): nur INNERHALB einer Anthropic-Nachricht mergen (tool-images-User-Message + Client-Text derselben Nachricht zu einer User-Message, content-Arrays konkatenieren). Das ändert den Prompt-Präfix früherer Turns nicht. Die <system-reminder>-User-Message nach einer Tool-Message-Folge zunächst NICHT mit Nachbarn mergen, solange kein Template (Gemma o.ä.) real daran scheitert; dann mit konkretem Template-Beleg nachziehen. Vor Umsetzung klären: Merge über Nachrichtengrenzen ja/nein.
+
+2026-10-15 01:32 ENTSCHEIDUNG Getty 2026-10-15: nur INNERHALB einer Anthropic-Nachricht mergen. Bauen.
+
+Branch bau-a, Commit 69ff325, lokal. Merge nur innerhalb einer Anthropic-Nachricht; system-reminder-User-Message bleibt eigenstaendig; Prefix frueherer Turns byte-identisch (Test). t/53 und t/71: je eine Assertion angepasst, die das alte Zwei-Messages-Verhalten festschrieb. Suite PASS (5350).
