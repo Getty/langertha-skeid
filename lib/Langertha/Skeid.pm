@@ -2544,6 +2544,7 @@ sub _commit_customer_source {
     accepted => $merge->{accepted},
     rejected => $merge->{rejected},
     shadowed => $merge->{shadowed},
+    names    => $merge->{names} || {},
   } : undef);
   if ($merge) {
     # By label and reason only: a rejected value may be a key pasted where its id belongs.
@@ -2741,14 +2742,23 @@ sub customer_source_startup_fetch {
 =method customer_source_release
 
 Lets the fetcher close its database connections; the next fetch opens new ones. C<skeid serve>
-calls it before the prefork manager forks, so each worker opens its own.
+calls it before the prefork manager forks, so each worker opens its own. It also queues a fetch
+for the next turn of the loop: the manager never runs the loop, each worker inherits the queue and
+fetches as it starts -- which opens its connections, the C<listen> one included, at once, not one
+C<refresh_interval_s> after the start.
 
 =cut
 
 sub customer_source_release {
   my ($self) = @_;
   my $ctl = $self->_source_ctl;
-  $ctl->release if $ctl;
+  return unless $ctl;
+  $ctl->release;
+  weaken(my $weak = $self);
+  Mojo::IOLoop->next_tick(sub {
+    my $c = $weak && $weak->_source_ctl;
+    $c->fetch_now if $c;
+  });
   return;
 }
 
@@ -2790,6 +2800,46 @@ sub customer_source_status {
       rejected => scalar(@rejected),
       shadowed => scalar(@shadowed),
     },
+    rejected => [ map { +{ %$_ } } @rejected[0 .. _last(49, @rejected)] ],
+    shadowed => [ @shadowed[0 .. _last(49, @shadowed)] ],
+  };
+}
+
+=method customer_names
+
+  my $names = $skeid->customer_names;   # { 'k_5f0e...' => 'acme', ... }
+
+The display names of the customer source's accepted rows, by customer key id: whom a key id
+belongs to, for C<GET /skeid/config>. Rows without a name are absent. Key ids and the labels
+the owning application chose, never a key. Empty without a customer source.
+
+=cut
+
+sub customer_names {
+  my ($self) = @_;
+  my $report = $self->_source_report or return {};
+  return { %{$report->{names} || {}} };
+}
+
+=method customer_report
+
+  my $report = $skeid->customer_report;   # undef without a customer_source
+  # { accepted => 120, rejected => [ { row => "'acme'", reason => '...' } ], shadowed => [ "'bigcorp'" ] }
+
+What the last merge did with the source's rows: how many it accepted, and which it rejected or
+shadowed by label (first 50 of each) with the reason -- never a value. C<GET /skeid/config>
+carries it as C<customer_report>.
+
+=cut
+
+sub customer_report {
+  my ($self) = @_;
+  $self->_source_cfg or return undef;
+  my $report   = $self->_source_report || { accepted => 0, rejected => [], shadowed => [] };
+  my @rejected = @{$report->{rejected}};
+  my @shadowed = @{$report->{shadowed}};
+  return {
+    accepted => 0 + $report->{accepted},
     rejected => [ map { +{ %$_ } } @rejected[0 .. _last(49, @rejected)] ],
     shadowed => [ @shadowed[0 .. _last(49, @shadowed)] ],
   };

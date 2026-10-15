@@ -312,7 +312,9 @@ C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
   POST /skeid/nodes                body: a node, as a config nodes entry -> {ok, nodes}, or 400
   POST /skeid/nodes/:id/health     body: {"healthy": true|false} -> {ok}
   GET  /skeid/config               {reload}: the config reload status, with its message;
-                                   {customer_source}: the customer source status, with its message
+                                   {customer_source}: the customer source status, with its message;
+                                   {customer_names}: customer key id => name of the source's rows;
+                                   {customer_report}: rows accepted, rejected, shadowed (labels, reasons)
   GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
   GET  /skeid/usage                ?since=&api_key_id=&model=&limit= (default 50) -> the report
   GET  /skeid/openapi.json         OpenAPI 3.1 description of the admin routes
@@ -862,7 +864,14 @@ sub _build_route_table {
       my ($c) = @_;
       my $reload = $c->skeid->call_function('config.status', {});
       my $source = $c->skeid->customer_source_status;
-      $c->render(json => { reload => $reload, ($source ? (customer_source => $source) : ()) });
+      $c->render(json => {
+        reload => $reload,
+        ($source ? (
+          customer_source => $source,
+          customer_names  => $c->skeid->customer_names,
+          customer_report => $c->skeid->customer_report,
+        ) : ()),
+      });
     });
 
   $add->(id => 'admin_metrics_nodes', group => 'admin', paths => ['/skeid/metrics/nodes'],

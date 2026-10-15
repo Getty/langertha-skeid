@@ -337,10 +337,15 @@ sub merge_into {
     }
   }
 
-  my (@allow, @shadowed, %entries);
+  my (@allow, @shadowed, %entries, %display);
   for my $row (@{$checked->{accepted}}) {
     my $id = $row->{key_id};
     push @allow, $id;
+    # The row's display name, as its sanitized label: a report shows who a key id belongs to.
+    if (defined($row->{name}) && length($row->{name})) {
+      (my $shown = $row->{label}) =~ s/\A'(.*)'\z/$1/s;
+      $display{$id} = $shown;
+    }
     if ($file_ids{$id} || $file_ids{substr($id, 0, 14)} || exists $names{$id}) {
       push @shadowed, $row->{label};
       next;
@@ -360,6 +365,7 @@ sub merge_into {
     accepted => scalar(@{$checked->{accepted}}),
     rejected => $checked->{rejected},
     shadowed => \@shadowed,
+    names    => \%display,
   };
 }
 

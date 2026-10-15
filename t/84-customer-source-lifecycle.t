@@ -303,4 +303,21 @@ sub skeid_with {
   $skeid->stop_customer_source;
 }
 
+# --- prefork: a released source fetches again at once, in the worker (found against PostgreSQL)
+# `skeid serve --workers N` releases the fetcher before forking; the workers inherit the poll
+# timer, which is refresh_interval_s away. Without an immediate fetch no worker has a LISTEN
+# connection until then, and a revocation waits the whole poll interval.
+{
+  my $fake = FakeFetcher->new(rows => [ row($A) ]);
+  my ($skeid) = skeid_with(cfg(refresh_interval_s => 3600, listen => 'skeid_customer_keys'), $fake);
+  $skeid->start_customer_source;
+  ok wait_until(sub { $skeid->client_key_allowed($A) }), 'first fetch';
+  my $n = $fake->fetches;
+  $skeid->customer_source_release;
+  is $fake->{released}, 1, 'the fetcher was released';
+  ok wait_until(sub { $fake->fetches == $n + 1 }, 1),
+    'a fetch runs as soon as the loop runs (the worker), not one poll interval later';
+  $skeid->stop_customer_source;
+}
+
 done_testing;

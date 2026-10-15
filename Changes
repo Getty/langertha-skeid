@@ -205,7 +205,10 @@ Revision history for Langertha-Skeid
       reported by name or position only, never by content. When the database
       is unreachable the last good set is kept (max_stale_s bounds how long);
       a failed fetch at startup is degraded and the start fails closed.
-      Status is on /skeid/config and /health (ADR 0026).
+      Status is on /skeid/config and /health (ADR 0026). GET /skeid/config
+      carries customer_names and customer_report. Under --workers N each
+      worker fetches (and opens its LISTEN connection) at start. t/90 checks
+      the source against a real PostgreSQL when SKEID_TEST_PG_* is set.
     - usage_store: { spool_dir: DIR } (sqlite and postgresql; off by default)
       keeps the usage events the database cannot take while it is
       unreachable: they are appended to a JSON Lines file in DIR (fsync'd,
