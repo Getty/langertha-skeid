@@ -1,0 +1,67 @@
+{"action":"handoff","agent":"abbau","detail":"review","task_id":107,"ts":"2026-10-14T03:54:28Z"}
+{"action":"move","agent":"abbau","detail":"in-progress","task_id":97,"ts":"2026-10-14T03:54:34Z"}
+{"action":"handoff","agent":"abbau","detail":"review","task_id":97,"ts":"2026-10-14T03:54:40Z"}
+{"action":"move","agent":"abbau","detail":"in-progress","task_id":102,"ts":"2026-10-14T03:55:10Z"}
+{"action":"move","agent":"abbau","detail":"in-progress","task_id":101,"ts":"2026-10-14T03:55:27Z"}
+{"action":"move","agent":"abbau","detail":"in-progress","task_id":99,"ts":"2026-10-14T03:55:44Z"}
+{"action":"move","agent":"abbau","detail":"in-progress","task_id":105,"ts":"2026-10-14T03:56:01Z"}
+{"action":"edit","agent":"Torsten Raudssus","detail":"backlog","task_id":94,"ts":"2026-10-14T03:56:19Z"}
+{"action":"edit","agent":"Torsten Raudssus","detail":"backlog","task_id":95,"ts":"2026-10-14T03:56:24Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":102,"ts":"2026-10-14T03:56:32Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":102,"ts":"2026-10-14T03:56:50Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":102,"ts":"2026-10-14T03:56:55Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":101,"ts":"2026-10-14T03:57:00Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":99,"ts":"2026-10-14T03:57:05Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":105,"ts":"2026-10-14T03:57:10Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":96,"ts":"2026-10-14T04:07:47Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":97,"ts":"2026-10-14T04:07:53Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":98,"ts":"2026-10-14T04:07:59Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":106,"ts":"2026-10-14T04:08:04Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":99,"ts":"2026-10-15T01:31:51Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":101,"ts":"2026-10-15T01:31:57Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":102,"ts":"2026-10-15T01:32:03Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":105,"ts":"2026-10-15T01:32:10Z"}
+{"action":"edit","agent":"Torsten Raudssus","detail":"backlog","task_id":94,"ts":"2026-10-15T01:32:16Z"}
+{"action":"edit","agent":"Torsten Raudssus","detail":"backlog","task_id":95,"ts":"2026-10-15T01:32:22Z"}
+{"action":"edit","agent":"langertha-skeid","detail":"review","task_id":103,"ts":"2026-10-15T01:32:28Z"}
+{"action":"edit","agent":"coordinator","detail":"review","task_id":108,"ts":"2026-10-15T01:33:55Z"}
+{"action":"move","agent":"Torsten Raudssus","detail":"backlog","task_id":108,"ts":"2026-10-15T01:34:23Z"}
+{"action":"move","agent":"plan-ocr-realtime","detail":"in-progress","task_id":94,"ts":"2026-10-15T01:38:57Z"}
+{"action":"move","agent":"plan-ocr-realtime","detail":"in-progress","task_id":95,"ts":"2026-10-15T01:39:03Z"}
+{"action":"handoff","agent":"plan-ocr-realtime","detail":"review","task_id":94,"ts":"2026-10-15T01:39:13Z"}
+{"action":"handoff","agent":"plan-ocr-realtime","detail":"review","task_id":95,"ts":"2026-10-15T01:39:19Z"}
+{"action":"edit","agent":"langertha-skeid","detail":"review","task_id":103,"ts":"2026-10-15T01:39:30Z"}
+{"action":"move","agent":"langertha-skeid","detail":"done","task_id":103,"ts":"2026-10-15T01:43:11Z"}
+{"action":"move","agent":"langertha-skeid","detail":"done","task_id":107,"ts":"2026-10-15T01:43:17Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":107,"ts":"2026-10-15T01:43:29Z"}
+{"action":"edit","agent":"abbau","detail":"in-progress","task_id":99,"ts":"2026-10-15T01:48:41Z"}
+{"action":"handoff","agent":"abbau","detail":"review","task_id":99,"ts":"2026-10-15T01:50:42Z"}
+{"action":"handoff","agent":"bau-b","detail":"review","task_id":108,"ts":"2026-10-15T02:02:16Z"}
+{"action":"handoff","agent":"bau-b","detail":"review","task_id":109,"ts":"2026-10-15T02:02:18Z"}
+{"action":"handoff","agent":"abbau","detail":"review","task_id":99,"ts":"2026-10-15T02:25:55Z"}
+{"action":"handoff","agent":"abbau","detail":"review","task_id":101,"ts":"2026-10-15T02:26:01Z"}
+{"action":"handoff","agent":"abbau","detail":"review","task_id":102,"ts":"2026-10-15T02:26:07Z"}
+{"action":"handoff","agent":"abbau","detail":"review","task_id":105,"ts":"2026-10-15T02:26:13Z"}
+{"action":"edit","agent":"langertha-skeid","detail":"done","task_id":103,"ts":"2026-10-15T02:26:26Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":99,"ts":"2026-10-15T03:10:16Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":101,"ts":"2026-10-15T03:10:22Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":102,"ts":"2026-10-15T03:10:29Z"}
+{"action":"move","agent":"abbau","detail":"done","task_id":105,"ts":"2026-10-15T03:10:34Z"}
+{"action":"move","agent":"Torsten Raudssus","detail":"done","task_id":108,"ts":"2026-10-15T03:15:44Z"}
+{"action":"move","agent":"Torsten Raudssus","detail":"done","task_id":109,"ts":"2026-10-15T03:15:50Z"}
+{"action":"edit","agent":"Torsten Raudssus","detail":"done","task_id":108,"ts":"2026-10-15T03:15:55Z"}
+{"action":"move","agent":"claude-k110","detail":"done","task_id":110,"ts":"2026-10-15T04:28:48Z"}
+{"action":"edit","agent":"claude-k110","detail":"done","task_id":110,"ts":"2026-10-15T04:29:27Z"}
+{"action":"edit","agent":"Torsten Raudssus","detail":"done","task_id":109,"ts":"2026-10-15T04:37:22Z"}
+{"action":"edit","agent":"plan-ocr-realtime","detail":"review","task_id":94,"ts":"2026-10-15T04:40:52Z"}
+{"action":"edit","agent":"plan-ocr-realtime","detail":"review","task_id":95,"ts":"2026-10-15T04:40:58Z"}
+{"action":"edit","agent":"Torsten Raudssus","detail":"done","task_id":108,"ts":"2026-10-15T04:41:05Z"}
+{"action":"move","agent":"claude","detail":"done","task_id":108,"ts":"2026-10-15T04:44:18Z"}
+{"action":"move","agent":"claude","detail":"done","task_id":109,"ts":"2026-10-15T04:44:24Z"}
+{"action":"edit","agent":"plan-ocr-realtime","detail":"review","task_id":94,"ts":"2026-10-15T05:15:09Z"}
+{"action":"move","agent":"plan-ocr-realtime","detail":"done","task_id":94,"ts":"2026-10-15T05:18:25Z"}
+{"action":"edit","agent":"claude","detail":"done","task_id":108,"ts":"2026-10-15T05:26:14Z"}
+{"action":"edit","agent":"claude","detail":"done","task_id":109,"ts":"2026-10-15T05:26:20Z"}
+{"action":"edit","agent":"plan-ocr-realtime","detail":"review","task_id":95,"ts":"2026-10-15T05:35:15Z"}
+{"action":"move","agent":"plan-ocr-realtime","detail":"done","task_id":95,"ts":"2026-10-15T05:39:52Z"}
+{"action":"edit","agent":"plan-ocr-realtime","detail":"done","task_id":95,"ts":"2026-10-15T05:39:58Z"}
