@@ -41,21 +41,6 @@ Revision history for Langertha-Skeid
       403, 429 and 5xx stay node errors. The registry snapshot carries the
       count in a new node field, rejected_in_window; version stays 1 and the
       existing fields keep their meaning (ADR 0024).
-    - customer_source: customer keys, names and policy selection from a
-      database view another application owns (ADR 0026, k108). Skeid reads
-      SELECT key_id, name, policy, models FROM <relation>, one row per active
-      key id; a bad row grants nothing and never fails a reload, the file
-      wins per key id, with client_auth the rows join the allowlist. A
-      background fetcher polls (optionally woken by LISTEN/NOTIFY), keeps the
-      last good snapshot through an outage and drops it after max_stale_s.
-      The snapshot is part of the config fingerprint, so a changed one is
-      applied like a changed file.
-    - The fetch runs in a Mojo::IOLoop subprocess, because DBD::Pg's connect
-      cannot be made non-blocking and stalled every in-flight stream for up
-      to connect_timeout_s per attempt (k109). A non-blocking TCP pre-check
-      skips the fork and backs off when the port is closed, and a child that
-      overruns its deadline is killed.
-
     - The request goes upstream as the client spelled it. /v1/chat/completions
       and /v1/embeddings forward the client's bytes with only model replaced,
       instead of decoding the body and encoding it again -- which wrote every

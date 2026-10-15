@@ -100,39 +100,6 @@ routing:
 # client_auth:
 #   keys: [shared]          # with names: { shared: k_... } above, or the k_... id directly
 
-# Customer source (ADR 0026). Customers created and revoked by another application that owns a
-# database: Skeid reads one view, `SELECT key_id, name, policy, models FROM <relation>`, one row
-# per ACTIVE key id (a revoked key is a row that is absent), and never writes. key_id is
-# k_ + 40 hex from `skeid keyid`, policy names a profile in policies: above (NULL = default_policy),
-# models is a JSON list that narrows it (NULL = the profile decides). A bad row grants nothing and
-# never fails a reload; the file wins per key id; with client_auth the rows join the allowlist.
-# The password comes from the environment, never from this file. Without this section nothing
-# reads a database.
-#
-# customer_source:
-#   dsn: dbi:Pg:dbname=skeid;host=postgres        # or from_usage_store: true (own connection)
-#   user: skeid_customers_ro                      # a role with SELECT on that one view
-#   password_env: SKEID_CUSTOMERS_PASSWORD
-#   relation: skeid_customer_keys
-#   poll_interval_s: 30       # revocation latency is this, plus the config reload throttle
-#   max_stale_s: 0            # 0 = keep the last good snapshot through an outage
-#   connect_timeout_s: 5
-#   listen: skeid_customers   # optional NOTIFY channel as a wake-up hint; the poll stays the floor
-#
-# By hand against a real PostgreSQL (what the offline tests cannot prove: libpq against a
-# server, and LISTEN/NOTIFY):
-#   1. psql: CREATE VIEW skeid_customer_keys AS SELECT 'k_<40 hex>'::text AS key_id,
-#      'Alice'::text AS name, 'standard'::text AS policy, NULL::jsonb AS models;
-#      GRANT SELECT ON skeid_customer_keys TO skeid_customers_ro;
-#   2. Start `skeid serve --config ...` with the section above and the client_auth section:
-#      the first request with that key answers 200 after the first fetch (log: nothing), and
-#      GET /skeid/config shows customer_source {snapshot: 1, accepted: 1}.
-#   3. Revoke: DELETE the row / change the view. Within poll_interval_s the key answers 401.
-#      With `listen:`, run `NOTIFY skeid_customers;` after the change: the 401 comes at once.
-#   4. Outage: stop PostgreSQL. Requests keep working (last snapshot); /skeid/config shows
-#      customer_source.ok: 0, error_kind: connect. Point the dsn at a blackholed address
-#      (10.255.255.1) and check `curl /health` stays instant while the fetch fails.
-
 # MCP servers (ADR 0022). Assign MCP servers to customer key ids; a customer then reaches
 # /mcp/<name> with its own Skeid key, and GET /v1/mcp/servers tells it what it was assigned.
 # Skeid relays MCP's Streamable HTTP and reads none of it. The client's key never goes upstream:
