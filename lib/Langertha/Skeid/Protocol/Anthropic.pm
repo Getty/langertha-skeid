@@ -96,8 +96,9 @@ tool messages one user message follows with the images of every C<tool_result> i
 Anthropic message, each result's images as C<image_url> parts after a text part
 C<Images from tool result E<lt>tool_use_idE<gt>:>. The user message goes after all the tool
 messages because an OpenAI conversation wants the answers to an assistant's tool calls
-directly after it. The client's own text and images in the same message follow as their own
-user message.
+directly after it. The client's own text and images in the same Anthropic message are parts of that same
+user message, after the images; messages are never merged across Anthropic message
+boundaries, so the prompt of earlier turns does not change.
 
 Only function tools are translated. A provider built-in in C<tools> (C<web_search_20250305>,
 C<bash_20250124>, C<text_editor_*>, C<computer_*>, C<mcp_toolset>, ...) or a definition
@@ -220,8 +221,6 @@ sub request_to_openai {
         }
       }
 
-      _push_message(\@messages, \@pending, { role => 'user', content => \@tool_images }) if @tool_images;
-
       my $text = join('', @text);
       if ($role eq 'assistant') {
         my %msg = (role => 'assistant');
@@ -229,10 +228,17 @@ sub request_to_openai {
         $msg{tool_calls} = \@tool_calls if @tool_calls;
         $msg{content} = '' if !exists($msg{content}) && !exists($msg{tool_calls});
         _push_message(\@messages, \@pending, \%msg);
-      } elsif ($has_image) {
-        _push_message(\@messages, \@pending, { role => $role, content => \@parts });
-      } elsif (length $text) {
-        _push_message(\@messages, \@pending, { role => $role, content => $text });
+      } else {
+        # The tool-result images and the client's own content of this one Anthropic message
+        # are one user message (content arrays concatenated); never merged across messages.
+        my @client = $has_image ? @parts : length($text) ? ({ type => 'text', text => $text }) : ();
+        if (@tool_images) {
+          _push_message(\@messages, \@pending, { role => 'user', content => [ @tool_images, @client ] });
+        } elsif ($has_image) {
+          _push_message(\@messages, \@pending, { role => $role, content => \@parts });
+        } elsif (length $text) {
+          _push_message(\@messages, \@pending, { role => $role, content => $text });
+        }
       }
     }
   }

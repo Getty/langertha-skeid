@@ -289,11 +289,42 @@ is_deeply forwarded('no system message in messages', system => 'S', messages => 
     { role => 'user', content => 'a' },
     $tool_calls,
     { role => 'tool', tool_call_id => 'toolu_1', content => '[{"text":"shot","type":"text"}]' },
-    { role => 'user', content => [{ type => 'text', text => 'Images from tool result toolu_1:' }, $image_part] },
-    { role => 'user', content => 'see?' },
+    { role => 'user', content => [
+      { type => 'text', text => 'Images from tool result toolu_1:' }, $image_part,
+      { type => 'text', text => 'see?' } ] },
     { role => 'assistant', content => 'yes' },
     { role => 'user', content => [{ type => 'text', text => 'and this' }, $image_part] },
-  ], 'a conversation without a system message in it is translated as before';
+  ], 'a conversation without a system message: tool images and text of one message are one user message (k102)';
+
+# k102: merge only inside one Anthropic message. Earlier turns do not change when a turn is
+# added, and a reminder after a run of tool messages stays its own user message.
+{
+  my @turn1 = (
+    { role => 'user', content => 'a' },
+    $tool_use,
+    { role => 'user', content => [
+      { type => 'tool_result', tool_use_id => 'toolu_1', content => [{ type => 'text', text => 'shot' }, $image] },
+      { type => 'text', text => 'see?' } ] },
+  );
+  my $first = forwarded('k102 turn 1', messages => [@turn1]);
+  my $next  = forwarded('k102 turn 2', messages => [
+    @turn1,
+    { role => 'assistant', content => 'yes' },
+    { role => 'user', content => 'more' },
+  ]);
+  is_deeply [ @{$next}[0 .. $#$first] ], $first, 'k102: earlier turns are forwarded unchanged';
+  is scalar(grep { $_->{role} eq 'user' } @$first[ 2 .. $#$first ]), 1,
+    'k102: images and text of the one message are a single user message';
+
+  my $rem = forwarded('k102 reminder after tools', messages => [
+    { role => 'user', content => 'a' },
+    $tool_use,
+    { role => 'user', content => [ { type => 'tool_result', tool_use_id => 'toolu_1', content => 'ok' } ] },
+    { role => 'system', content => 'Plan mode on' },
+  ]);
+  is_deeply $rem->[-1], { role => 'user', content => reminder('Plan mode on') },
+    'k102: the reminder after tool messages is its own user message, not merged';
+}
 
 # An empty top-level system string is dropped like an empty block array (k101).
 for my $empty ('', []) {

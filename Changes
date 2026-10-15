@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - /v1/messages: the tool-result images and the client's own text of one
+      Anthropic message go upstream as one user message instead of two in a
+      row, which a strict-alternation chat template may refuse. Nothing is
+      merged across Anthropic messages; earlier turns are unchanged (k102).
+
     - /v1/messages: an empty top-level `system: ""` is dropped like an empty
       system block array, instead of going upstream as an empty system
       message that a strict chat template may refuse (k101).
