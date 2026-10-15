@@ -283,7 +283,7 @@ routing:
   wait_timeout_ms: 2000        # how long a saturated request waits for a slot (default 2000)
   wait_poll_ms: 25             # how often it re-checks (default 25, minimum 1)
   frontend_count: 1            # separate Skeid hosts sharing these nodes (default 1)
-  trust_key_id_header: false   # believe x-skeid-key-id from the client (default false)
+  trust_key_id_header: false   # believe x-skeid-key-id (default false): only behind a front end that authenticates callers
 ```
 
 See [Capacity, admission and saturation](#capacity-admission-and-saturation) for what these
@@ -370,6 +370,8 @@ keys:
   `x-api-key-id`). Only turn it on when a gateway in front of Skeid authenticates the caller
   and sets that header; otherwise any client can name itself into another customer's policy
   and invoice.
+  A deployment that does not authenticate callers in front of Skeid must leave it off, and a
+  gateway that sets it must strip the header from what clients send.
 
 ### What the node receives
 
@@ -480,6 +482,7 @@ names:
   alice: k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b   # bin/skeid keyid <key> -- never the key
 mcp:
   public_url: https://llm.example.com    # optional: where clients reach Skeid
+  max_request_bytes: 10485760             # optional: request body limit of /mcp/*, default 10 MiB
   servers:
     bookrag:                             # the name in /mcp/bookrag
       url: http://bookrag-mcp.internal:8080/mcp
@@ -521,12 +524,20 @@ mcp:
   key as `Authorization: Bearer`, from `api_key_ref` (key broker) or `api_key_env` like a
   node. A server that names a key source which yields no key is not called (`503`); one that
   names none is called without a credential.
-- The answer is the server's: status, headers and body, an event stream chunk by chunk and
-  unbuffered, opened for the client as soon as the server's headers arrive. Two exceptions,
+- The answer is the server's: status and body, an event stream chunk by chunk and unbuffered,
+  opened for the client as soon as the server's headers arrive. Of its headers `Content-Type`,
+  `Cache-Control`, `Retry-After` and the `Mcp-*` ones reach the client; cookies, `Server`, CORS
+  and the rest do not. A longer stream than any message limit is not cut by one: only the time
+  limit ends it, and a stream the time limit cut is recorded `ok: false` with `error_type:
+  upstream_timeout` (under the status it was opened with). Two answers are not relayed,
   both answered `502` and logged: a server's `401` -- it is about the key Skeid presented, and
   a `401` would send an MCP client looking for a login -- and a redirect, whose `Location` is
   an internal URL. Skeid follows no redirect: configure the URL it leads to (some servers
   redirect `/mcp` to `/mcp/`).
+- A request body over `mcp.max_request_bytes` is `413`, and never reaches the server. It is not
+  counted as the rejected outcome of the node routes: there is no node request to finish.
+- The client's query string goes upstream as it came. `OPTIONS`, `HEAD` and CORS are not
+  answered: an MCP client is not a browser page, and a browser-based one needs its own edge.
 - A `stdio` entry is not proxied. It tells the customer what to run locally; `command`, `args`
   and `env` are shown to the assigned key as written, so keep secrets out of them.
 - The upstream call has the time limit of an LLM stream (`SKEID_UPSTREAM_TIMEOUT`, 300s). A

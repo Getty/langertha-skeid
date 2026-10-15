@@ -450,6 +450,7 @@ absolute path.
     alice: k_5f0e1a2b3c4de5f60718293a4b5c6d7e8f901a2b   # `skeid keyid <key>` -- never the key
   mcp:
     public_url: https://llm.example.com    # optional: where clients reach Skeid
+    max_request_bytes: 10485760            # optional: request body limit of /mcp/*
     servers:
       bookrag:                             # the name in /mcp/bookrag
         url: http://bookrag-mcp.internal:8080/mcp
@@ -498,6 +499,15 @@ C<keys> is the assignment: customer key ids from C<skeid keyid> or C<names:> ent
 one without the list, resolved at config load as in L</client_auth> -- a short (pre-ADR 0016) id
 matches the full id it is the prefix of. A server without C<keys> is assigned to nobody and says
 so once. C<description> is free text for the listing.
+
+C<max_request_bytes> (default 10485760, 10 MiB; a positive integer) is the largest request body
+the MCP routes take, instead of the server's own limit: a larger one is C<413>, and is counted
+as rejected (ADR 0024). It bounds the request only; an event stream coming back has no size
+limit, it ends by the upstream, the client or the time limit.
+
+Two things the gateway does not do, by design (ADR 0022 update): the client's query string goes
+upstream as it came, and C<OPTIONS>, C<HEAD> and CORS are not answered -- an MCP client is not a
+browser page, and a browser-based one belongs behind its own edge.
 
 The load fails on an unknown key in the section or in a server, a key of the other transport, a
 server name that is not letters, digits, C<.>, C<_> and C<-> (starting with a letter or digit, at
@@ -798,6 +808,20 @@ has mcp_servers => (
 has mcp_public_url => (
   is      => 'rw',
   default => sub { undef },
+);
+
+=attr mcp_max_request_bytes
+
+The largest request body, in bytes, the MCP routes accept (default 10485760, 10 MiB; config
+C<mcp.max_request_bytes>). See L</mcp>.
+
+=cut
+
+my $MCP_MAX_REQUEST_BYTES = 10485760;
+
+has mcp_max_request_bytes => (
+  is      => 'rw',
+  default => sub { $MCP_MAX_REQUEST_BYTES },
 );
 
 =attr openapi_swagger_ui
@@ -1715,7 +1739,7 @@ my @CONFIG_STATE = qw(
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
   admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
-  mcp_servers mcp_public_url openapi_swagger_ui openapi_cache_dir
+  mcp_servers mcp_public_url mcp_max_request_bytes openapi_swagger_ui openapi_cache_dir
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
 
@@ -1980,6 +2004,7 @@ sub _apply_config {
   } elsif ($before->{mcp}) {
     $self->mcp_servers(undef);
     $self->mcp_public_url(undef);
+    $self->mcp_max_request_bytes($MCP_MAX_REQUEST_BYTES);
   }
 
   # The OpenAPI document and its optional Swagger UI (skeid k105). Removed from the file, the
@@ -3506,7 +3531,7 @@ sub _key_id_set {
 # value that could be a secret -- a URL, a header value, a keys entry. What the wire allows --
 # the transports, a server name, the headers a server may set -- is Protocol::MCP's to know.
 # Returns the notices to log once the config applied.
-my %MCP_KEYS = map { $_ => 1 } qw( public_url servers );
+my %MCP_KEYS = map { $_ => 1 } qw( public_url servers max_request_bytes );
 my %MCP_SERVER_KEYS = (
   common  => [qw( transport description keys )],
   relayed => [qw( url api_key_ref api_key_env headers )],
@@ -3527,6 +3552,14 @@ sub _load_mcp {
     my $problem = $mcp->url_problem($section->{public_url});
     croak "mcp.public_url $problem: it is where clients reach Skeid" if defined $problem;
     ($public_url = "$section->{public_url}") =~ s{/+\z}{};
+  }
+
+  my $max_request = $MCP_MAX_REQUEST_BYTES;
+  if (exists $section->{max_request_bytes}) {
+    my $max = $section->{max_request_bytes};
+    croak 'mcp.max_request_bytes must be an integer of at least 1 (bytes)'
+      unless defined($max) && !ref($max) && $max =~ /\A[0-9]+\z/ && $max >= 1;
+    $max_request = 0 + $max;
   }
 
   my $servers = $section->{servers} // {};
@@ -3611,6 +3644,7 @@ sub _load_mcp {
 
   $self->mcp_servers(\%resolved);
   $self->mcp_public_url($public_url);
+  $self->mcp_max_request_bytes($max_request);
   return @notices;
 }
 

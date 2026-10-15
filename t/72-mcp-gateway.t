@@ -82,7 +82,7 @@ my $upstream = sub {
     return;
   }
   if ($req->method eq 'DELETE') {
-    $c->res->headers->header('X-Session-Ended' => $req->headers->header('Mcp-Session-Id') // '');
+    $c->res->headers->header('Mcp-Session-Ended' => $req->headers->header('Mcp-Session-Id') // '');
     return $c->rendered(204);
   }
   if ($rpc eq 'stream') {
@@ -95,6 +95,30 @@ my $upstream = sub {
     return;
   }
   return $c->rendered(202) if $rpc eq 'notifications/initialized';
+  if ($rpc eq 'headers') {
+    my $h = $c->res->headers;
+    $h->header('Set-Cookie' => 'upstream=session; Path=/');
+    $h->header('Server' => 'internal-mcp/1.0');
+    $h->header('Access-Control-Allow-Origin' => '*');
+    $h->header('Strict-Transport-Security' => 'max-age=1');
+    $h->header('Retry-After' => '7');
+    $h->header('Cache-Control' => 'no-store');
+    $h->header('Mcp-Session-Id' => 'sess-h');
+    $h->header('Mcp-Future-Reply' => 'kept');
+    return $c->render(json => { jsonrpc => '2.0', id => 1, result => {} });
+  }
+  if ($rpc eq 'big') {
+    # 40 chunks of 64 KiB, an event stream that is longer than any limit a test sets.
+    $c->res->headers->content_type('text/event-stream');
+    $c->write_chunk;
+    my $left = 40;
+    my $send; $send = sub {
+      return $c->finish unless $left--;
+      $c->write_chunk('data: ' . ('x' x 65530) . "\n\n" => sub { Mojo::IOLoop->next_tick($send) });
+    };
+    $send->();
+    return;
+  }
   if ($rpc eq 'unauthorized') {
     $c->res->headers->www_authenticate('Bearer resource_metadata="http://internal.example/.well-known/x"');
     return $c->render(status => 401, json => { error => 'bad upstream token' });
@@ -334,6 +358,12 @@ my $RPC = qq({ "jsonrpc" : "2.0",\n  "id":1, "method": "tools/list" , "params":{
       qr/mcp\.servers\.x\.headers: the value of 'X-A' must be a string/ ],
     [ 'a key where an id belongs', { servers => { x => { url => "$UP/mcp", keys => [ $ALICE_ID, $PASTED ] } } },
       qr/mcp\.servers\.x\.keys entry 2 is neither a names: entry nor a key id/ ],
+    [ 'limit zero',            { max_request_bytes => 0, servers => {} },    qr/mcp\.max_request_bytes must be an integer of at least 1/ ],
+    [ 'limit negative',        { max_request_bytes => -1, servers => {} },   qr/mcp\.max_request_bytes must be an integer/ ],
+    [ 'limit a word',          { max_request_bytes => 'big', servers => {} }, qr/mcp\.max_request_bytes must be an integer/ ],
+    [ 'limit fractional',      { max_request_bytes => '1.5', servers => {} }, qr/mcp\.max_request_bytes must be an integer/ ],
+    [ 'limit a list',          { max_request_bytes => [1], servers => {} },  qr/mcp\.max_request_bytes must be an integer/ ],
+    [ 'limit null',            { max_request_bytes => undef, servers => {} }, qr/mcp\.max_request_bytes must be an integer/ ],
     [ 'description not a string', { servers => { x => { url => "$UP/mcp", description => {} } } }, qr/mcp\.servers\.x\.description must be a string/ ],
   );
   for my $case (@bad) {
@@ -462,7 +492,7 @@ YAML
     'X-Request-Id'         => 'req-client-1',
   } => $RPC)->status_is(200, 'an assigned server answers')
     ->header_is('Mcp-Session-Id' => 'sess-1', 'the upstream\'s session id comes back')
-    ->header_is('X-Upstream' => 'bookrag', 'with the upstream\'s other headers')
+    ->header_is('x-upstream' => undef, 'but not its other headers: the relay lets a list through')
     ->header_is('x-request-id' => 'req-client-1', 'and the request id of this request')
     ->header_like('Content-Type' => qr{\Aapplication/json})
     ->json_is('/result/path' => '/mcp', 'the upstream\'s body');
@@ -539,7 +569,7 @@ YAML
 
   $t->delete_ok('/mcp/bookrag' => { bearer($ALICE_KEY), 'Mcp-Session-Id' => 'sess-1' })
     ->status_is(204, 'DELETE is relayed')
-    ->header_is('X-Session-Ended' => 'sess-1', 'with the session id');
+    ->header_is('Mcp-Session-Ended' => 'sess-1', 'with the session id');
   is $SEEN[-1]{method}, 'DELETE', 'as a DELETE';
   is $SEEN[-1]{body}, '', 'without a body';
 
@@ -592,12 +622,11 @@ YAML
   released_ok($t, 'answers of every kind');
 }
 
-# --- a body over the server's request limit is refused, not relayed cut off ---------------------
+# --- a body over the request limit is refused, not relayed cut off -------------------------------
 {
-  $CFG = mcp_config();
+  $CFG = mcp_config(top => { mcp => { max_request_bytes => 4096, servers => mcp_config()->{mcp}{servers} } });
   my ($t, $skeid) = proxy();
   @SEEN = @USAGE = ();
-  local $ENV{MOJO_MAX_MESSAGE_SIZE} = 4096;
   $t->post_ok('/mcp/bookrag' => { bearer($ALICE_KEY), 'Content-Type' => 'application/json' }
       => '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"pad":"' . ('x' x 8192) . '"}}')
     ->status_is(413, 'a body over the request limit: 413')
@@ -858,6 +887,77 @@ YAML
     ->status_is(200, 'with the trusted header, its key id is what the server is assigned to');
   is $USAGE[-1]{api_key_id}, $ALICE_ID, 'and what the request is metered under';
   ok !exists $SEEN[-1]{headers}{'x-skeid-key-id'}, 'the header itself stays here';
+}
+
+# --- response headers: a list passes, nothing else (review of k103) -----------------------------
+{
+  $CFG = mcp_config();
+  my ($t, $skeid) = proxy();
+  $t->post_ok('/mcp/bookrag' => { bearer($ALICE_KEY) } => '{"jsonrpc":"2.0","id":1,"method":"headers"}')
+    ->status_is(200);
+  my $h = $t->tx->res->headers;
+  is $h->header('Mcp-Session-Id'), 'sess-h', 'Mcp-Session-Id passes';
+  is $h->header('Mcp-Future-Reply'), 'kept', 'so does any Mcp-* header';
+  is $h->header('Cache-Control'), 'no-store', 'Cache-Control passes';
+  is $h->header('Retry-After'), '7', 'Retry-After passes';
+  like $h->content_type, qr{\Aapplication/json}, 'Content-Type passes';
+  for my $name (qw( Set-Cookie Access-Control-Allow-Origin Strict-Transport-Security )) {
+    ok !defined($h->header($name)), "$name of the upstream does not reach the client";
+  }
+  isnt $h->header('Server') // '', 'internal-mcp/1.0', 'nor does its Server header';
+}
+
+# --- a long event stream is not cut by the user agent's response limit --------------------------
+{
+  $CFG = mcp_config();
+  my ($t, $skeid) = proxy();
+  # The default of every message object, 16 MiB, made small. The test client reads without limit.
+  local $ENV{MOJO_MAX_MESSAGE_SIZE} = 1_000_000;
+  $t->ua->max_response_size(0);
+  @USAGE = ();
+  $t->post_ok('/mcp/bookrag' => { bearer($ALICE_KEY) } => '{"jsonrpc":"2.0","id":1,"method":"big"}')
+    ->status_is(200);
+  cmp_ok length($t->tx->res->body), '>', 2_500_000, 'all of an event stream longer than max_response_size arrives';
+  is $USAGE[-1]{ok}, 1, 'and is metered as ok';
+}
+
+# --- the request limit of the mcp section -------------------------------------------------------
+{
+  my $small = '{"jsonrpc":"2.0","id":1,"method":"tools/list","pad":"' . ('a' x 3000) . '"}';
+  $CFG = mcp_config(top => { mcp => { max_request_bytes => 2048, servers => mcp_config()->{mcp}{servers} } });
+  my ($t, $skeid) = proxy();
+  is $skeid->mcp_max_request_bytes, 2048, 'the limit is loaded';
+  @SEEN = @USAGE = ();
+  $t->post_ok('/mcp/bookrag' => { bearer($ALICE_KEY) } => $small)
+    ->status_is(413, 'a body over the limit is 413')
+    ->json_is('/error/type' => 'invalid_request_error');
+  is scalar(@SEEN), 0, 'it never reached the upstream';
+  $t->post_ok('/mcp/bookrag' => { bearer($ALICE_KEY) } => '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+    ->status_is(200, 'one under it is relayed');
+
+  # Larger than the server's own limit, when the operator asks for it.
+  $CFG = mcp_config(top => { mcp => { max_request_bytes => 40_000_000, servers => mcp_config()->{mcp}{servers} } });
+  my $big = '{"jsonrpc":"2.0","id":1,"method":"tools/list","pad":"' . ('a' x 17_000_000) . '"}';
+  $t->post_ok('/mcp/bookrag' => { bearer($ALICE_KEY) } => $big)->status_is(200, 'a raised limit holds above the server\'s 16 MiB');
+  @SEEN = ();
+
+  $CFG = mcp_config();
+  $t->post_ok('/mcp/bookrag' => { bearer($ALICE_KEY) } => $RPC)->status_is(200);
+  is $skeid->mcp_max_request_bytes, 10485760, 'the default is 10 MiB';
+
+}
+
+# --- an event stream cut by the request timeout is not a clean one ------------------------------
+{
+  $CFG = mcp_config();
+  my ($t, $skeid) = proxy();
+  $t->app->ua->request_timeout(0.3);
+  @USAGE = ();
+  $t->get_ok('/mcp/bookrag' => { bearer($ALICE_KEY) })->status_is(200, 'the stream opened');
+  wait_for(sub { scalar @USAGE }, 'an event was written when the time limit cut it');
+  is $USAGE[-1]{ok}, 0, 'a stream the time limit cut is not ok';
+  is $USAGE[-1]{error_type}, 'upstream_timeout', 'it says why';
+  is $USAGE[-1]{status_code}, 200, 'under the status it was opened with';
 }
 
 done_testing;

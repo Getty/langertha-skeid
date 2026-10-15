@@ -48,6 +48,28 @@ my %CONFIG_HEADER_PROBLEM = (
     connection keep-alive te trailer upgrade expect )),
 );
 
+# The upstream's response headers that reach the client, beside every Mcp-* one. Whatever else
+# the server sets -- cookies, Server, CORS, HSTS -- is about the server and its own site, not
+# for a client of this gateway. WWW-Authenticate is not here: it would come only with an
+# upstream 401, which is answered 502 and never relayed.
+my %RESPONSE_HEADER = map { $_ => 1 } qw( content-type cache-control retry-after );
+
+=method response_header_allowed
+
+  my $passes = Langertha::Skeid::Protocol::MCP->response_header_allowed($name);
+
+Whether a response header of the MCP server is relayed to the client: C<Content-Type>,
+C<Cache-Control>, C<Retry-After> and every C<Mcp-*> header. An allowlist, not a filter: a header
+the server adds tomorrow does not reach the client until it is named here.
+
+=cut
+
+sub response_header_allowed {
+  my ($class, $name) = @_;
+  my $lc = lc($name // '');
+  return ($RESPONSE_HEADER{$lc} || $lc =~ /\Amcp-/) ? 1 : 0;
+}
+
 =method transports
 
   my @names = Langertha::Skeid::Protocol::MCP->transports;   # ('stdio', 'streamable-http')

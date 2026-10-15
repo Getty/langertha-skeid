@@ -2,6 +2,15 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - MCP gateway, review follow-up: the server's response headers are an allowlist
+      (Content-Type, Cache-Control, Retry-After, Mcp-*), no longer everything
+      but hop-by-hop ones; an event stream is no longer cut at the user agent's
+      16 MiB message limit; a stream cut by the request timeout is recorded
+      ok 0 with error_type upstream_timeout instead of a clean 200; the
+      request body has its own limit, mcp.max_request_bytes (default 10 MiB,
+      413 over it). The client query going upstream as it came and the absent
+      OPTIONS/HEAD/CORS are documented (k103, ADR 0022).
+
     - GET /openapi.json: an OpenAPI 3.1 description of the client routes the
       configuration enables (manifest and MCP routes only with their section),
       with the client_auth bearer scheme and example model names from the same

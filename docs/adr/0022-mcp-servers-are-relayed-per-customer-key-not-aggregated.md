@@ -159,3 +159,20 @@ mcp:
   the upstream's own `404` and `500`, `401` and a redirect → `502`, the `503` without a key, the `502` for an
   unreachable server, sub-paths and the refused ones, the one `404`, both `401`s, hot reload
   with rollback, and the usage events.
+
+## Update 2026-10-15 (review of k103)
+
+- **Response headers are an allowlist.** Of the server's headers `Content-Type`,
+  `Cache-Control`, `Retry-After` and every `Mcp-*` reach the client; cookies, `Server`, CORS and
+  the rest are about the upstream and stay here. `WWW-Authenticate` is not listed: it would
+  come only with a `401`, which is answered `502`.
+- **An event stream has no size limit.** The user agent's response limit (16 MiB by default)
+  would have cut a stream at its sum; the relay lifts it, and the time limits are what end one.
+  A stream cut by the time limit is recorded `ok: 0`, `error_type: upstream_timeout`, under the
+  status it was opened with -- the usage store's columns are unchanged.
+- **The request has its own limit**, `mcp.max_request_bytes` (default 10 MiB, a positive
+  integer), instead of the server's. Over it is `413`. There is no node request, so the
+  `rejected` outcome of ADR 0024 does not apply and no usage event is written for it.
+- **Not done, by decision.** The client's query string is appended to the upstream URL as it
+  came. `OPTIONS`, `HEAD` and CORS preflights are not answered (`404`/`405` as for any route);
+  an MCP client is not a browser page.

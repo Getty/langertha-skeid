@@ -1205,8 +1205,9 @@ sub _handle_openai_embeddings {
 sub _limit_upload {
   my ($app, $tx) = @_;
   my $req = $tx->req;
-  return unless uc($req->method // '') eq 'POST';
   (my $path = $req->url->path->to_route) =~ s{/\z}{};
+  return _limit_mcp_request($app, $tx) if $path =~ m{\A/mcp/};
+  return unless uc($req->method // '') eq 'POST';
   return unless Langertha::Skeid::Protocol::Audio->upstream_path($path);
 
   my $done = eval {
@@ -1229,6 +1230,21 @@ sub _limit_upload {
     1;
   };
   $app->log->error('Setting the upload limit failed: ' . ($@ || 'unknown error')) unless $done;
+  return;
+}
+
+# The body limit of the MCP routes: mcp.max_request_bytes, not the server's own. Set on the
+# request as its body begins, like the upload limit. A body over it is cut off and _handle_mcp
+# answers 413. A failure here leaves the server's limit in force.
+sub _limit_mcp_request {
+  my ($app, $tx) = @_;
+  my $done = eval {
+    my $skeid = $app->build_controller($tx)->skeid;
+    $skeid->maybe_reload_config;
+    $tx->req->max_message_size($skeid->mcp_max_request_bytes);
+    1;
+  };
+  $app->log->error('Setting the MCP request limit failed: ' . ($@ || 'unknown error')) unless $done;
   return;
 }
 
@@ -2808,6 +2824,9 @@ sub _relay_mcp {
   my $tx = $c->app->ua->build_tx($c->req->method => $url => $headers => (length($body) ? ($body) : ()));
   # As for every relayed stream: the bytes, not Mojolicious' own SSE events (skeid karr #30).
   $tx->res->content(Langertha::Skeid::Proxy::RelayContent->new);
+  # A standing stream has no size: the user agent's response limit (2 GiB by default) would cut
+  # it at its sum, however long it lived. The time limits bound it, not its length.
+  $tx->res->max_message_size(0);
 
   # Taken now: the request may be past its transaction when the answer opens.
   my $request_id = _request_id($c);
@@ -2834,8 +2853,7 @@ sub _relay_mcp {
     $status = $res->code;
     $c->res->code($status);
     for my $name (@{$res->headers->names}) {
-      my $lc = lc($name);
-      next if _skip_response_header($lc);
+      next unless $mcp->response_header_allowed($name);
       $c->res->headers->header($name => $res->headers->header($name));
     }
     $c->res->headers->header('x-request-id' => $request_id);
@@ -2927,10 +2945,14 @@ sub _relay_mcp {
       my $framed = $content->is_chunked || length($content->headers->content_length // '');
       $cut = $broken // (($framed && !$content->is_finished) ? 'Premature connection close' : undef);
     }
+    # An event stream has no framing to check, but a time limit cutting it is told by the user
+    # agent: that one is not a clean end, whatever status it was opened with.
+    my $timeout = ($event_stream && defined($broken) && $broken =~ /timeout/i) ? $broken : undef;
     $record->(
       status_code => $status,
-      ok          => (!defined($cut) && $status < 500) ? 1 : 0,
+      ok          => (!defined($cut) && !defined($timeout) && $status < 500) ? 1 : 0,
       (defined($cut) ? (error_type => 'upstream_error', error_message => $cut) : ()),
+      (defined($timeout) ? (error_type => 'upstream_timeout', error_message => $timeout) : ()),
     );
     $c->finish;
   });
