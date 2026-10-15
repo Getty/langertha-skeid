@@ -66,6 +66,27 @@ is_deeply $diff{untabled}, [], 'every registered route has a route table entry'
 is_deeply $diff{unregistered}, [], 'every route table entry is registered'
   or diag explain $diff{unregistered};
 
+# An entry marked websocket is registered as a WebSocket route, so only an upgrade request
+# reaches it (skeid k95): the realtime route is the one, and nothing else is.
+{
+  my $app = app();
+  my %ws;
+  my $walk;
+  $walk = sub {
+    my ($route, $prefix) = @_;
+    for my $child (@{$route->children}) {
+      my $pattern = $prefix . ($child->pattern->unparsed // '');
+      if (@{$child->children}) { $walk->($child, $pattern); next }
+      $ws{$pattern} = $child->is_websocket ? 1 : 0;
+    }
+  };
+  $walk->($app->routes, '');
+  my @tabled = map { @{$_->{paths}} } grep { $_->{websocket} } Langertha::Skeid::Proxy->route_table;
+  is_deeply [ sort @tabled ], ['/v1/realtime'], 'the realtime route is the one WebSocket entry';
+  ok $ws{'/v1/realtime'}, 'and it is registered as a WebSocket route';
+  is_deeply [ sort grep { $ws{$_} } keys %ws ], ['/v1/realtime'], 'no other route is a WebSocket route';
+}
+
 # The same walk has to see a route that is added beside the table -- otherwise the test above
 # cannot fail, and a route without an entry would go unnoticed.
 {

@@ -25,6 +25,23 @@ Revision history for Langertha-Skeid
       documents counts the request's input documents. Relay hook
       max_parse_bytes leaves a larger answer undecoded (k94, ADR 0028,
       ADR 0021 Update).
+    - GET /v1/realtime: live transcription over the OpenAI realtime protocol, a
+      WebSocket relayed to the node's /realtime in the node's own events, both
+      client dialects (session.update and transcription_session.update) as
+      sent. A relayed route that is a session: routed, admitted and
+      authenticated like a request at the handshake, the node opened before the
+      client is upgraded (a refusing node is a 502, with no slot left), one
+      slot held until the session closes (max_conns of a realtime node means
+      concurrent sessions), one usage event when it closes (length, summed
+      usage, how it ended). model in the query is required. A browser's key may
+      come in the openai-insecure-api-key.<key> subprotocol, behind the same
+      client gate, never echoed, logged or forwarded. Every client frame is
+      decoded: a model other than the session's is refused with an error event
+      and not forwarded; a non-object or binary frame closes 1003. New realtime:
+      section (idle_timeout, max_session_seconds, max_message_bytes,
+      max_queued_bytes; hot-reloaded); a graceful stop closes sessions 1001
+      first. Not checked against a deployed vLLM or speaches node: the test
+      fixtures are hand-written (ADR 0029).
 
     - MCP gateway, review follow-up: the server's response headers are an allowlist
       (Content-Type, Cache-Control, Retry-After, Mcp-*), no longer everything

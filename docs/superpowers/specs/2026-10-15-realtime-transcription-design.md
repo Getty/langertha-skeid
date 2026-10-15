@@ -1,13 +1,14 @@
 # Design — Realtime transcription over WebSocket (OpenAI Realtime protocol)
 
-- Status: proposed design, not implemented — planning only (k95)
+- Status: implemented (k95, ADR 0029); section 4.4 corrected by the Task 0 facts of 2026-10-15,
+  section 2 still open for the deployed backends (see below)
 - Date: 2026-10-15
 - Plan: `docs/superpowers/plans/2026-10-15-realtime-transcription.md`
 - Builds on: ADR 0005 (async-only), ADR 0004 (usage event), ADR 0009/0010 (admission, worker
   share), ADR 0020 (client authentication), ADR 0021 (relayed routes), k91 (file transcription)
 - Vocabulary: `CONTEXT.md` (Relayed route, Admission, Inflight, Worker share, Usage event)
-- Companion ADR: not written here (number from the coordinator). Needed: **session admission and
-  session metering** — the first request that is not one request/one answer (decision 4).
+- Companion ADR: `docs/adr/0029-a-realtime-session-is-one-slot-and-one-usage-event.md` — **session
+  admission and session metering**, the first request that is not one request/one answer.
 
 ## 1. Problem
 
@@ -29,6 +30,10 @@ Checked against OpenAI's current guide on 2026-10-15 — **and it has drifted fr
 | server text | `conversation.item.input_audio_transcription.delta` (`item_id`, `content_index`, `delta`) | same; `.completed` carries `transcript` |
 | session announce | `session.created` | not in the guide page read (see reference) |
 | usage in `.completed` | "a usage block" | not documented on the guide page |
+
+**Not verified against a deployed backend (open, k95):** the plan's Task 0 asked for recordings
+of vLLM and speaches; with no live node they could not be made. `t/data/realtime/*.jsonl` is
+written by hand after the guide and says so.
 
 So there are at least **two client dialects** (the beta `transcription_session.update` and the
 GA `session.update`) and **backends that speak whichever version they implement**. Skeid must
@@ -127,25 +132,44 @@ this is the only way both parsers see the same document. The cost is measured in
 
 ### 4.4 Backpressure, sizes, timeouts
 
-- **Queue per direction, bounded.** `$tx->send($frame, $cb)` completes when the frame is
-  written; Skeid counts queued-but-unwritten bytes per direction and, past
-  `realtime.max_queued_bytes` (default 4 MiB), closes the session `1013` ("try again later")
-  rather than letting a fast sender grow the worker. Reading is paused where the transport
-  allows (`$tx->stop`/`start`... to verify in Task 0; if not available, the close is the
-  mechanism).
-- **Message size**: Mojolicious limits a WebSocket message to 256 KiB (`max_websocket_size`,
-  `MOJO_MAX_WEBSOCKET_SIZE`). Set per session on both sides from
-  `realtime.max_message_bytes` (default 1 MiB); a larger frame closes `1009`.
-- **Idle**: Mojolicious closes a silent socket after 30 s. A caller pausing between phrases is
-  normal: `realtime.idle_timeout` (default 300 s) via `$c->inactivity_timeout`, mirrored on the
-  upstream connection. Interplay with `$app->ua->request_timeout` (300 s default, set in
-  `build_app`) is **to verify**: it must not cut a session after 300 s.
-- **Session lifetime**: `realtime.max_session_seconds` (default 3600) → close `1000` with a
+Facts checked on this box (Mojolicious 9.49, throwaway script, 2026-10-15) and what the
+implementation does with them:
+
+- **Queue per direction, bounded.** `$tx->send($frame, $cb)` runs `$cb` on the transaction's
+  next `drain`, i.e. when the stream has taken everything queued before it; a peer that does not
+  read keeps its frames in the transaction's buffer. Skeid counts sent-and-not-drained bytes per
+  direction and, past `realtime.max_queued_bytes` (default 4 MiB), closes the session `1013`
+  rather than letting a fast sender grow the worker. **Read-side flow control exists**:
+  `Mojo::IOLoop->stream($tx->connection)->stop` / `->start` pauses and resumes delivery of a
+  connection's frames (verified: nothing delivered while stopped, all of it after `start`). It
+  is not used; the close is the one mechanism (decision recorded in ADR 0029).
+- **Message size** (a): `max_websocket_size` is an attribute of each `Mojo::Transaction::
+  WebSocket`, set per transaction on either end (default `MOJO_MAX_WEBSOCKET_SIZE` or 256 KiB); a
+  larger message makes the transaction close `1009` itself. Set per session on both sides from
+  `realtime.max_message_bytes` (default 1 MiB).
+- **Idle** (b), (c): `$c->inactivity_timeout($s)` works on an upgraded connection (the socket
+  closes after `$s` seconds, without a close frame, `1006`). On the **upstream** socket,
+  `$ua->inactivity_timeout` (300 in `build_app`) **does** cut an established WebSocket (checked
+  with 1 s: closed after 1.0 s), while `$ua->request_timeout` does **not**; setting
+  `Mojo::IOLoop->stream($tx->connection)->timeout($n)` after the upgrade overrides it. So the
+  session sets both streams' timeout to `idle_timeout + 5` as a backstop and closes with a reason
+  at `realtime.idle_timeout` (default 300 s) from its own timer, re-armed from the last frame
+  in either direction.
+- **Session lifetime**: `realtime.max_session_seconds` (default 3600) → close `1000` with the
   reason `session time limit`. Without it a leaked client holds a slot forever.
-- **Graceful stop** (SIGQUIT, ADR/`bin/skeid`): Mojolicious' prefork manager waits for open
-  connections up to `graceful_timeout`. Sessions are long, so Skeid, on shutdown, closes its
-  sessions `1001` (going away) itself, so `request.finish` and the usage event run before the
-  worker exits. To verify: `Mojo::IOLoop` stop hook vs. the existing flush in `bin/skeid`.
+- **Subprotocol** (e): `$tx->with_protocols('realtime')` selects `realtime` when it is among the
+  offered ones and sets the answer's header; when none matches, no header is sent and the
+  handshake still succeeds (a browser fails such a handshake, so a browser client has to offer
+  `realtime` beside its key entry, as OpenAI's own convention does). The key entry is never
+  selected.
+- **Graceful stop** (f): the prefork manager sends `QUIT` to its workers on its own `QUIT`; a
+  worker runs `$loop->stop_gracefully`, which emits `finish` on `Mojo::IOLoop->singleton` and
+  then waits for open connections. Without a listener, a worker holding a WebSocket is killed at
+  `graceful_timeout` (checked: client `1006`, manager out after the timeout), so `request.finish`
+  and the usage event are lost. With a `finish` listener that closes the sessions `1001`, the
+  client gets `1001` and the manager is out in about the time it takes to close. Skeid
+  registers that listener, per process, with its first session (`Proxy::Realtime`). `bin/skeid`
+  needs no change.
 
 ### 4.5 Close handling
 

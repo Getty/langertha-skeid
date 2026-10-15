@@ -96,9 +96,19 @@ sub all_ops {
   for my $want ('GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/embeddings',
     'POST /v1/audio/transcriptions', 'POST /v1/audio/translations', 'POST /v1/rerank',
     'POST /rerank', 'POST /v1/messages', 'POST /api/chat', 'POST /api/generate', 'GET /api/tags',
-    'GET /api/ps', 'GET /health', 'GET /openapi.json') {
+    'GET /api/ps', 'GET /health', 'GET /openapi.json', 'GET /v1/realtime') {
     ok $ops->{$want}, "$want is documented";
   }
+
+  # The realtime route (skeid k95) is an upgrade, not a request with a body: its input is the
+  # query, its success is 101, and it sits behind the same client gate as every client route.
+  my $rt = $ops->{'GET /v1/realtime'};
+  my ($model) = grep { $_->{name} eq 'model' } @{ $rt->{parameters} || [] };
+  ok $model && $model->{in} eq 'query' && $model->{required}, 'realtime: the model is a required query parameter';
+  ok $rt->{responses}{101}, 'realtime: the success is 101 Switching Protocols';
+  ok !$rt->{responses}{200}, 'realtime: there is no 200';
+  ok !$rt->{requestBody}, 'realtime: no request body';
+  is_deeply $rt->{security}, [ {}, { client_auth => [] } ], 'realtime: the client key like the other routes';
   ok !grep({ m{^\w+ /skeid} } keys %$ops), 'no admin route is in the client document';
   ok !grep({ m{/\.well-known|/mcp} } keys %$ops),
     'the manifest and the MCP routes are not there while their sections are off';

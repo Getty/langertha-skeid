@@ -139,6 +139,25 @@ routing:
 #       description: Files on your own machine
 #       keys: [alice]
 
+# Realtime transcription (ADR 0029). GET /v1/realtime is a WebSocket relayed to a node's
+# /realtime; one session holds one slot of its node until it closes, so give such a node an
+# entry of its own, with max_conns = concurrent sessions (at least the worker count: each
+# worker admits max_conns / workers, floor 1, and keeps the sessions it accepted).
+#
+# nodes:
+#   - id: whisper-live
+#     url: http://speaches:8000/v1
+#     model: whisper-live
+#     engine: openaibase
+#     max_conns: 8
+#
+# The limits, all optional, read when a session opens:
+# realtime:
+#   idle_timeout: 300          # seconds of silence
+#   max_session_seconds: 3600  # longest session
+#   max_message_bytes: 1048576 # one WebSocket message
+#   max_queued_bytes: 4194304  # held for a peer that does not read, per direction
+
 # Customer keys from a database view (ADR 0026). When another application -- a self-service
 # console -- issues and revokes customer keys, Skeid reads them from a relation that application
 # provides: one row per key id (key_id, name, policy, models), a row present = the key is active.

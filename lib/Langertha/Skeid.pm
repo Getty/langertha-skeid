@@ -283,6 +283,8 @@ L</ENVIRONMENT>, else built in.
 
 =item * C<documents>: removed from the file, remote sources are refused again.
 
+=item * C<realtime>: removed from the file, the realtime limits are the built-in defaults again.
+
 =item * C<mcp>: removed from the file, the MCP gateway is off again and its routes are unknown
 paths.
 
@@ -559,6 +561,27 @@ There is no model name here: the nodes are chosen by their kind, and the route i
 the routing key C<documents> (a policy's C<models>). The load fails on a section that is not a
 hash, an unknown key, and an C<allow_remote_sources> that is no boolean. Removed from the file,
 remote sources are refused again.
+
+=head2 realtime
+
+  realtime:
+    idle_timeout: 300          # seconds a session may be silent, default 300
+    max_session_seconds: 3600  # longest a session may last, default 3600
+    max_message_bytes: 1048576 # largest single WebSocket message, default 1 MiB
+    max_queued_bytes: 4194304  # most bytes held for a slow peer, per direction, default 4 MiB
+
+The limits of the realtime route, C<GET /v1/realtime> (a WebSocket relayed to a node's realtime
+endpoint, ADR 0029; see L<Langertha::Skeid::Proxy/Realtime route>). Every value is an integer of
+at least 1 and every key is optional. A session ends C<1000> at C<max_session_seconds>, C<1009>
+on a message above C<max_message_bytes>, C<1013> when a peer that does not read lets more than
+C<max_queued_bytes> pile up, and a socket silent for C<idle_timeout> seconds is closed. The
+values are read when a session opens, so a reload holds for the next session and leaves the open
+ones alone. The load fails on a section that is not a hash, an unknown key and a value that is no
+integer of at least 1.
+
+A realtime node holds its slot for the whole session, so C<max_conns> of such a node means
+concurrent sessions; give it a node of its own and see L<Langertha::Skeid::Proxy/Realtime route>
+for what that means under prefork workers (ADR 0010).
 
 =head2 openapi
 
@@ -1065,6 +1088,41 @@ has documents_allow_remote_sources => (
   is      => 'rw',
   default => sub { 0 },
 );
+
+=attr realtime_idle_timeout
+
+Seconds a realtime session may be silent before it is closed (default 300; config
+C<realtime.idle_timeout>). See L</realtime>.
+
+=attr realtime_max_session_seconds
+
+The longest a realtime session may last, in seconds (default 3600; config
+C<realtime.max_session_seconds>). See L</realtime>.
+
+=attr realtime_max_message_bytes
+
+The largest single WebSocket message a realtime session takes, in either direction (default
+1048576; config C<realtime.max_message_bytes>). See L</realtime>.
+
+=attr realtime_max_queued_bytes
+
+The most bytes of a realtime session that may wait for a peer that is not reading, per
+direction (default 4194304; config C<realtime.max_queued_bytes>). See L</realtime>.
+
+=cut
+
+# realtime: (skeid k95, ADR 0029). Read when a session opens, so a reload holds for the next one.
+my %REALTIME_DEFAULT = (
+  idle_timeout        => 300,
+  max_session_seconds => 3600,
+  max_message_bytes   => 1048576,
+  max_queued_bytes    => 4194304,
+);
+
+has realtime_idle_timeout        => (is => 'rw', default => sub { $REALTIME_DEFAULT{idle_timeout} });
+has realtime_max_session_seconds => (is => 'rw', default => sub { $REALTIME_DEFAULT{max_session_seconds} });
+has realtime_max_message_bytes   => (is => 'rw', default => sub { $REALTIME_DEFAULT{max_message_bytes} });
+has realtime_max_queued_bytes    => (is => 'rw', default => sub { $REALTIME_DEFAULT{max_queued_bytes} });
 
 =attr trust_key_id_header
 
@@ -1963,6 +2021,8 @@ my @CONFIG_STATE = qw(
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
   documents_max_bytes documents_allow_remote_sources
   mcp_servers mcp_public_url mcp_max_request_bytes openapi_swagger_ui openapi_cache_dir
+  realtime_idle_timeout realtime_max_session_seconds realtime_max_message_bytes
+  realtime_max_queued_bytes
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
 
@@ -2290,6 +2350,14 @@ sub _apply_config {
     $self->_load_documents($cfg->{documents});
   } elsif ($before->{documents}) {
     $self->documents_allow_remote_sources(0);
+  }
+
+  # The limits of a realtime session (skeid k95). Removed from the file, the defaults again.
+  if (exists $cfg->{realtime}) {
+    $declared{realtime} = 1;
+    $self->_load_realtime($cfg->{realtime});
+  } elsif ($before->{realtime}) {
+    $self->_load_realtime({});
   }
 
   if (exists $cfg->{aliases}) {
@@ -4322,6 +4390,32 @@ sub _load_documents {
     else { croak 'documents.allow_remote_sources must be true or false' }
   }
   $self->documents_allow_remote_sources($allow);
+  return;
+}
+
+# The realtime section (skeid k95, ADR 0029). Strict like uploads: a misspelled key or a value
+# that is not an integer of at least 1 fails the load. A key left out is its default, also on a
+# reload that drops it.
+sub _load_realtime {
+  my ($self, $section) = @_;
+  croak 'realtime must be a hash, as in realtime: { idle_timeout: 300, max_session_seconds: 3600 }'
+    unless ref($section) eq 'HASH';
+  my @known = sort keys %REALTIME_DEFAULT;
+  for my $key (sort keys %$section) {
+    croak "realtime: unknown key '$key' (known: " . join(', ', @known) . ')'
+      unless exists $REALTIME_DEFAULT{$key};
+  }
+  my %value;
+  for my $key (@known) {
+    my $v = exists $section->{$key} ? $section->{$key} : $REALTIME_DEFAULT{$key};
+    croak "realtime.$key must be an integer of at least 1"
+      unless defined($v) && !ref($v) && $v =~ /\A[0-9]+\z/ && $v >= 1;
+    $value{$key} = 0 + $v;
+  }
+  $self->realtime_idle_timeout($value{idle_timeout});
+  $self->realtime_max_session_seconds($value{max_session_seconds});
+  $self->realtime_max_message_bytes($value{max_message_bytes});
+  $self->realtime_max_queued_bytes($value{max_queued_bytes});
   return;
 }
 

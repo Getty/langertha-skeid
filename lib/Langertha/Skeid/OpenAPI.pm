@@ -245,9 +245,14 @@ sub document {
         $op->{description} = $e->{description} if defined $e->{description};
         $tags{$e->{tag}} = 1;
 
-        $op->{parameters} = [
-          map { +{ name => $_, in => 'path', required => 1, schema => { type => 'string' } } } @params
-        ] if @params;
+        my @parameters = map { +{ name => $_, in => 'path', required => 1, schema => { type => 'string' } } } @params;
+        # A route that takes its input in the query (the realtime WebSocket, skeid k95).
+        push @parameters, map {
+          +{ name => $_->{name}, in => 'query', required => ($_->{required} ? \1 : \0),
+             (defined $_->{description} ? (description => $_->{description}) : ()),
+             schema => { type => 'string' } }
+        } @{ $e->{query} || [] };
+        $op->{parameters} = \@parameters if @parameters;
 
         if (defined $e->{request}) {
           croak "unknown request schema '$e->{request}'" unless $SCHEMA{$e->{request}};
@@ -273,8 +278,11 @@ sub document {
         else {
           $ok{content} = { 'application/json' => { schema => { '$ref' => '#/components/schemas/' . $ok_schema } } };
         }
+        # An upgrade is not a document: the success is 101, and there is no body to describe.
+        %ok = ( description => 'Switching protocols: the connection is a WebSocket from here on.' )
+          if $e->{websocket};
         $op->{responses} = {
-          '200'   => \%ok,
+          ($e->{websocket} ? ('101' => \%ok) : ('200' => \%ok)),
           default => {
             description => 'An error: 4xx for a request the caller got wrong, 5xx for the proxy or its node.',
             content     => { 'application/json' => { schema => { '$ref' => '#/components/schemas/Error' } } },

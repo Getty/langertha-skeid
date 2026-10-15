@@ -102,7 +102,14 @@ if ($workers > 1) {
   );
   # Daemon->run handles INT and TERM only; SIGQUIT (the image's STOPSIGNAL) would otherwise
   # kill the process with its default action, before END could flush a write-behind queue.
-  $SIG{QUIT} = sub { $daemon->ioloop->stop };
+  # The loop's own `finish` event goes first, as it does in a prefork worker on SIGQUIT: open
+  # realtime sessions end (1001) and write their usage events (ADR 0029). Their close frames get
+  # a moment to go out before the loop stops.
+  $SIG{QUIT} = sub {
+    my $loop = $daemon->ioloop;
+    $loop->emit('finish');
+    $loop->timer(0.2 => sub { $loop->stop });
+  };
   $daemon->run;
 }
 
@@ -383,6 +390,14 @@ A usage store with C<flush_interval_ms> holds events in memory until they are wr
 the server writes them. Stop a prefork server with C<SIGQUIT> (graceful): on C<SIGINT> or
 C<SIGTERM> Mojolicious's prefork manager kills its workers with C<SIGKILL>, and what they still
 held is lost. A single process (C<--workers 1>) flushes on C<SIGINT>, C<SIGTERM> and C<SIGQUIT>.
+
+Open realtime sessions (C<GET /v1/realtime>, ADR 0029) are long: a session is one usage event,
+written when it closes. On C<SIGQUIT> -- a prefork worker's graceful stop, and the single process
+the same way -- every open session is closed C<1001> (going away) first, so its C<request.finish>
+and its usage event are written before the process exits. A kill without it (C<SIGKILL>, a
+prefork C<SIGINT>/C<SIGTERM>, an OOM kill) loses the events of the sessions then open, and a
+single process stopped with C<SIGINT> or C<SIGTERM> does not close them first. Stop with
+C<SIGQUIT>; the Docker image's C<STOPSIGNAL> already does.
 
 =head2 usage
 

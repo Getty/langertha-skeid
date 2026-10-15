@@ -186,6 +186,25 @@ Bearer` — `X-Api-Key` for docling-serve. The key source and the dropping of th
 credentials are unchanged.
 _Avoid_: auth scheme, key name (that is `api_key_ref`).
 
+**Realtime route** (`GET /v1/realtime`):
+The **Relayed route** that is a WebSocket: live transcription over OpenAI's realtime protocol,
+upgraded from a handshake that is routed, admitted and authenticated like a request and then
+relayed frame for frame to the node's `/realtime` in the node's own events (ADR 0029). The node
+is opened first, so a node that refuses is an HTTP `502` and not a socket that closed. Skeid
+reads the `model` of the query (required) and of every client frame, to hold the **Session** to
+the model the key's **Policy** granted; it translates nothing, in either dialect.
+_Avoid_: realtime API (too wide: conversation, audio out and tools are not served), streaming
+transcription (that is the SSE of the audio routes), socket route.
+
+**Session**:
+One open realtime WebSocket from handshake to close. It holds one slot of its **Node** for its
+whole life — `request.start` at the handshake, `request.finish` exactly once when it ends, from
+either side or a limit — so `max_conns` of a realtime node counts concurrent sessions, and it is
+metered as one **Usage event** written at close: its length and the summed usage of its
+transcriptions. The one thing in Skeid that is not one request and one answer.
+_Avoid_: connection (that is the TCP stream; a session is more than one frame exchange and has
+a model, a slot and a bill), stream, call.
+
 **Rerank format** (`rerank_format`):
 A **Node** option naming the dialect its rerank endpoint speaks when that is not the one clients
 speak. Absent for a node that is relayed (vLLM, infinity, Jina, Cohere); `tei` for Hugging Face
@@ -270,7 +289,7 @@ _Avoid_: catalog, registry (that word means the snapshot), discovery document.
 ### Metering
 
 **Usage event**:
-One record per forwarded request: identity, node, model, status, duration, tokens, cost, and
+One record per forwarded request — or per **Session**, written when it closes (ADR 0029): identity, node, model, status, duration, tokens, cost, and
 where a route counts something else, its own usage unit (**Audio seconds**, **Documents**,
 **Pages**). The
 billing unit
@@ -515,10 +534,11 @@ _Avoid_: hot reload, restart, refresh.
   the name a node serves. Where both can appear — usage events, reports, log lines — they are
   **requested model** and **served model**. Bare "model" is only safe where no alias layer is
   involved.
-- **"relay"** now covers three things: the **SSE relay** of a chat stream (bytes passed on,
+- **"relay"** now covers four things: the **SSE relay** of a chat stream (bytes passed on,
   read along for usage), a **Relayed route** (a non-chat route of the OpenAI face: routed by
-  `model`, not translated) and the **MCP relay** (nothing read, nothing routed). The first two
-  serve a **Node**; the third never does. MCP is not a **face** either: its events carry
+  `model`, not translated), the **Realtime route**'s frames (a **Relayed route** that is a
+  **Session**: both ways, the client's decoded to hold it to its model) and the **MCP relay**
+  (nothing read, nothing routed). The first three serve a **Node**; the last never does. MCP is not a **face** either: its events carry
   `api_format: mcp` because that is what the client spoke, but there is no **Translation** and
   no manifest endpoint for it.
 - **"registry"** names two things: the Skeid-to-Skeid **Registry snapshot** (`registry:` config,

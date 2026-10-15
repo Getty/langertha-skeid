@@ -16,6 +16,7 @@ use Langertha::Skeid::OpenAPI;
 use Langertha::Skeid::Registry;
 use Langertha::Skeid::SwaggerUI;
 use Langertha::Skeid::Secret;
+use Langertha::Skeid::Proxy::Realtime;
 use Langertha::Skeid::Proxy::RelayContent;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
@@ -26,6 +27,7 @@ use Langertha::Skeid::Protocol::MCP;
 use Langertha::Skeid::Protocol::Ollama;
 use Langertha::Skeid::Protocol::Ollama::Stream;
 use Langertha::Skeid::Protocol::RawBody;
+use Langertha::Skeid::Protocol::Realtime;
 use Langertha::Skeid::Protocol::Rerank;
 use Langertha::ToolCall;
 
@@ -68,6 +70,7 @@ The MCP routes exist only with an C<mcp> section and always need a key; see L</M
   POST /v1/audio/transcriptions    OpenAI audio: multipart upload, relayed as the node answers
   POST /v1/audio/translations      the same, to the node's translations endpoint
   POST /v1/rerank                  rerank: relayed as the node answers, translated for a TEI node
+  GET  /v1/realtime                realtime transcription: a WebSocket relayed as a session
   POST /rerank                     the same route under its other name
   POST /v1/messages                Anthropic Messages, streamed or not
   POST /api/chat                   Ollama chat; streams unless "stream": false
@@ -131,6 +134,58 @@ duration> block, else the top-level C<duration> of a C<verbose_json> answer; a s
 also has C<content_bytes>, the UTF-8 bytes of the text relayed. A node that reports neither
 count leaves an event with a status and a duration and no C<audio_seconds> key: not measured,
 which is not zero. See L<Langertha::Skeid/Pluggable Usage Storage>.
+
+=head2 Realtime route
+
+C<GET /v1/realtime?model=E<lt>nameE<gt>> upgraded to a WebSocket is live transcription over
+OpenAI's realtime protocol: the client sends C<input_audio_buffer.append> frames and gets
+C<conversation.item.input_audio_transcription.delta> and C<.completed> events. Skeid relays the
+frames to C<{node url}/realtime> and back in the node's own events (ADR 0029, ADR 0021): nothing is
+translated, so the beta C<transcription_session.update> and the GA C<session.update> both go
+through as the client speaks them. What Skeid knows of that wire is in
+L<Langertha::Skeid::Protocol::Realtime>; the session itself is
+L<Langertha::Skeid::Proxy::Realtime>.
+
+B<The handshake is a request.> Everything that can refuse a session answers as plain HTTP before
+a socket exists: C<401> from C<client_auth>, C<400> without exactly one C<model> in the query
+(C<intent=transcription> alone names none), C<403> from the key's policy, C<503> for a model no
+node serves, C<429> after the route wait. Then Skeid resolves the node's key and opens the node's
+WebSocket B<first>; the client is upgraded only when the node accepted, so a node that refuses is
+a C<502> (and its slot is given back), never a socket that was accepted and closed. A client
+that leaves meanwhile gives its slot back as well. The node is called with its own key and with
+none of the client's C<Sec-WebSocket-*> headers, C<Origin> or cookies.
+
+B<A key from a browser.> A page cannot set C<Authorization> on a WebSocket. On this route, and
+only when neither C<Authorization> nor C<x-api-key> is present, the key is read from the
+C<Sec-WebSocket-Protocol> entry C<openai-insecure-api-key.E<lt>keyE<gt>> and goes through the same
+client gate, so a key that is not allowed is a C<401> before the upgrade. It is never answered:
+the subprotocol Skeid selects is C<realtime> (or none), and it is neither logged nor forwarded.
+
+B<The model of a session is the handshake's.> Every client text frame is JSON-decoded -- never
+tested by substring, since the node decodes it again and JSON spells one text many ways. Each
+string C<model> in it is compared with the session's: the same one is rewritten to the served
+model (an alias tier), any other is B<not forwarded> -- the client gets an C<error> event and the
+session goes on, on the model it started with. What goes to the node is the decoded document,
+encoded again. A frame that is not a JSON object, and any binary frame, closes the session
+C<1003>.
+
+B<A session is one slot and one usage event.> The slot is taken at the handshake and given back
+exactly once when the session ends -- from either side, from a limit or from a graceful stop --
+so C<max_conns> of a realtime node counts concurrent sessions; give it a node of its own, with
+C<max_conns> at least the worker count, since every prefork worker admits its share and keeps the
+sessions it accepted (ADR 0010). One usage event is written when the session closes: C<endpoint>
+C</v1/realtime>, C<duration_ms> the session's length, the C<usage> blocks of its completed
+transcriptions summed and priced, C<audio_seconds> where a block is a duration, C<content_bytes>
+the text relayed, and a status: C<200> for a close from either side (any code), C<499> for a
+client that vanished without a close frame, C<502> for a node that closed with an error or died,
+C<413> for a message above C<realtime.max_message_bytes>, C<400> for a frame a session cannot
+carry. A count the node never reported is absent, not zero.
+
+B<Bounds.> The C<realtime> section of the config (L<Langertha::Skeid/realtime>): a message above
+C<max_message_bytes> closes C<1009>, bytes a peer does not read past C<max_queued_bytes> close
+C<1013>, silence for C<idle_timeout> seconds and C<max_session_seconds> of age close C<1000> with
+a reason. On a graceful stop (C<SIGQUIT>, the event loop's C<finish>) every open session is closed
+C<1001> and its event written before the process exits.
 
 =head2 Rerank route
 
@@ -542,6 +597,9 @@ sub build_app {
       : 100
   );
   $app->helper(skeid => sub { $skeid });
+  # The open realtime sessions of this app (skeid k95, ADR 0029): what a graceful stop closes.
+  my $realtime = Langertha::Skeid::Proxy::Realtime->new(skeid => $skeid, log => $app->log);
+  $app->helper(realtime => sub { $realtime });
 
   # A config reload replaces the whole inventory, so probes have to follow it or they keep
   # polling for nodes that are gone and never start for new ones. They follow the probe key,
@@ -637,7 +695,10 @@ sub build_app {
     my $make = $make_bridge{$entry->{group}}
       or croak "route table: unknown group '$entry->{group}' of $entry->{id}";
     my $parent = $bridge{$entry->{group}} //= $make->();
-    $parent->any($entry->{methods} => $_ => $entry->{handler}) for @{$entry->{paths}};
+    # A WebSocket route matches only an upgrade request (ADR 0029); everything else is as for
+    # any route: behind its group's bridge, so the client gate answers before an upgrade.
+    if ($entry->{websocket}) { $parent->websocket($_ => $entry->{handler}) for @{$entry->{paths}} }
+    else { $parent->any($entry->{methods} => $_ => $entry->{handler}) for @{$entry->{paths}} }
   }
 
   return $app;
@@ -660,6 +721,10 @@ route no document lists (the UI)
 
 =item * C<requires>: C<manifest>, C<mcp> or C<registry> -- the config section that has to be on
 for the route to be listed
+
+=item * C<websocket>: the route is registered as a WebSocket route (only an upgrade request
+reaches it) and documented with a C<101>; C<query> lists the query parameters the document names
+(C<name>, C<required>, C<description>)
 
 =item * C<tag>, C<summary>, C<description>, C<request>, C<request_type>, C<response>,
 C<stream>, C<public>: what the document says about it
@@ -765,6 +830,21 @@ sub _build_route_table {
         . '(JSON, or a zip) is the node\'s. Authorised under the model name documents.',
       handler => sub { _handle_documents($_[0], $endpoint) });
   }
+
+  # Realtime transcription (skeid k95, ADR 0029): a WebSocket, relayed as a session. Not a
+  # request/answer route, so it has its own handler and not a $relay of the proxy functions.
+  $add->(id => 'realtime', group => 'openai', paths => [Langertha::Skeid::Protocol::Realtime->route],
+    tag => 'OpenAI', websocket => 1,
+    query => [
+      { name => 'model', required => 1, description => 'The model of the session; the key\'s policy applies to it.' },
+      { name => 'intent', description => 'Passed to the node, as sent (transcription).' },
+    ],
+    summary => 'Realtime transcription (WebSocket)',
+    description => 'Upgrades to a WebSocket relayed to the node\'s realtime endpoint; the events of '
+      . 'both directions are the node\'s own, nothing is translated. A key can also be sent in the '
+      . '"openai-insecure-api-key.<key>" subprotocol, beside "realtime". One session holds one slot '
+      . 'of its node until it closes, and is recorded as one usage event.',
+    handler => sub { _handle_openai_realtime($_[0]) });
 
   # The description of the client routes themselves. Behind the client gate like /v1/models:
   # the examples carry model names, and those are per key.
@@ -1529,6 +1609,175 @@ sub _handle_documents {
   }, kind => 'documents');
 }
 
+# GET /v1/realtime (skeid k95, ADR 0029): live transcription over the OpenAI realtime protocol.
+# The handshake is an ordinary request that has a slot and a node to get -- the client gate has
+# run already (a bridge, so a refused key is a plain 401 and no socket), the model comes from the
+# query, the key's policy, tiers and admission apply, and route_wait happens before the upgrade.
+# The node is opened FIRST: only a node that took the WebSocket handshake gets a client that is
+# upgraded, so a node that refuses is an HTTP 502 and not an accepted-then-closed socket. From the
+# upgrade on the session is Langertha::Skeid::Proxy::Realtime's; this function ends with handing
+# it both transactions, and its finish callback is the only place request.finish and the usage
+# event happen for a session that got that far (once, on whichever path the session ends).
+sub _handle_openai_realtime {
+  my ($c) = @_;
+  my $protocol = 'Langertha::Skeid::Protocol::Realtime';
+  _extend_client_timeout($c);
+  $c->render_later;
+
+  my ($model, $problem) = $protocol->query_model($c->req->url->query);
+  if (defined $problem) {
+    _render_error($c, 400, $problem, 'invalid_request_error');
+    return;
+  }
+
+  my $api_key_id = _request_api_key_id($c);
+  _begin_route_async($c, $model, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
+    return unless $route;
+
+    my $served_model = _served_model($tier, $model);
+    my $meta = {
+      api_format      => 'openai',
+      endpoint        => $protocol->route,
+      api_key_id      => $api_key_id,
+      provider        => 'skeid',
+      engine          => ($route->{engine} // 'openaibase'),
+      model           => $served_model,
+      requested_model => $model,
+      route_url       => ($route->{url} // ''),
+    };
+    my $url = $protocol->upstream_url(
+      _endpoint_url_for_node($route->{url}, $protocol->upstream_path), $served_model,
+      $c->req->url->query);
+
+    # What the client sent for the handshake of its own connection is not the node's: its
+    # Sec-WebSocket-* headers (the subprotocol list may carry the browser's key -- never passed
+    # on, ADR 0003), its Origin and its cookies stay here. The user agent makes the node's own.
+    my %fwd_headers = _forward_headers($c);
+    delete @fwd_headers{ grep { /\A(?:sec-websocket-|origin\z|cookie\z)/i } keys %fwd_headers };
+
+    _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
+      my ($no_key) = @_;
+
+      # The client left while the node's key was being resolved: nothing went upstream, the
+      # slot goes back and nothing is metered, as for a request that was not forwarded.
+      if (_client_gone($c)) {
+        $c->skeid->call_function('request.finish', {
+          id => $node_id, ok => 0, aborted => 1, duration_ms => _duration_ms($started),
+        });
+        return;
+      }
+      if (defined $no_key) {
+        _refuse_unkeyed_node($c, $node_id, $started, $meta, $no_key);
+        return;
+      }
+
+      my $client   = $c->tx;
+      my $up_tx    = $c->app->ua->build_websocket_tx($url => \%fwd_headers);
+      my $settled  = 0;   # set by whichever comes first: the node's answer or the client leaving
+      my $handshake = $client->can('handshake') ? $client->handshake : $client;
+
+      # The client hangs up while the node is being opened. Its upgrade request is the
+      # transaction that closes (the WebSocket one does not exist yet), and the node's is
+      # cancelled -- a node that sees the handshake finish would otherwise hold a session
+      # for nobody. The slot is given back and the request recorded, as for a plain request.
+      $handshake->once(finish => sub {
+        return if $settled;
+        $settled = 1;
+        my $duration_ms = _duration_ms($started);
+        $c->skeid->call_function('request.finish', {
+          id => $node_id, ok => 0, aborted => 1, duration_ms => $duration_ms,
+        });
+        _record_usage_event($c, {
+          %$meta, _client_abort_event(), node_id => $node_id, duration_ms => $duration_ms,
+          metrics => {},
+        });
+        _cancel_upstream($up_tx);
+      });
+
+      $c->app->ua->start($up_tx => sub {
+        my ($ua, $tx) = @_;
+        return if $settled;
+        $settled = 1;
+        my $duration_ms = _duration_ms($started);
+        _observe_capacity($c, $node_id, $tx->res);
+
+        # The node did not take the handshake: HTTP 502 in the client's shape, no socket. A
+        # 4xx of the node (its key, its capacity) is Skeid's problem to the client, not theirs.
+        unless ($tx->is_websocket) {
+          my $err = $tx->error || {};
+          $c->skeid->call_function('request.finish', {
+            id => $node_id, ok => 0, duration_ms => $duration_ms,
+          });
+          _record_usage_event($c, {
+            %$meta,
+            node_id       => $node_id,
+            status_code   => 502,
+            ok            => 0,
+            duration_ms   => $duration_ms,
+            error_type    => 'upstream_error',
+            error_message => 'The node refused the realtime handshake: '
+              . ($err->{code} ? $err->{code} . ' ' : '') . ($err->{message} // 'no WebSocket'),
+            metrics       => {},
+          });
+          _render_error($c, 502, 'The node did not accept the realtime connection', 'upstream_error');
+          return;
+        }
+
+        # Upgrade the client now, choosing the one subprotocol Skeid ever answers with -- never
+        # the entry that carries a key. From here the session owns both ends.
+        $client->with_protocols($protocol->subprotocol);
+        $c->res->headers->header('x-skeid-node' => $node_id);
+        $c->rendered(101);
+
+        my $skeid = $c->skeid;
+        $c->app->realtime->start_session(
+          client          => $client,
+          upstream        => $tx,
+          requested_model => $model,
+          served_model    => $served_model,
+          started         => $started,
+          limits          => {
+            idle_timeout        => $skeid->realtime_idle_timeout,
+            max_session_seconds => $skeid->realtime_max_session_seconds,
+            max_message_bytes   => $skeid->realtime_max_message_bytes,
+            max_queued_bytes    => $skeid->realtime_max_queued_bytes,
+          },
+          finish          => sub {
+            my ($result) = @_;
+            $skeid->call_function('request.finish', {
+              id          => $node_id,
+              ok          => $result->{ok},
+              ($result->{aborted}  ? (aborted  => 1) : ()),
+              ($result->{rejected} ? (rejected => 1) : ()),
+              duration_ms => $result->{duration_ms},
+            });
+            # One event for the whole session (ADR 0029): the usage blocks of its completed
+            # transcriptions summed, priced like any other answer's, and the duration.
+            my $metrics = ref($result->{usage}) eq 'HASH'
+              ? _stream_metrics($c, $meta, { model => $served_model }, $result->{duration_ms},
+                  $result->{usage})
+              : {};
+            _record_usage_event($c, {
+              %$meta,
+              node_id       => $node_id,
+              status_code   => $result->{status_code},
+              ok            => $result->{ok},
+              duration_ms   => $result->{duration_ms},
+              error_type    => $result->{error_type},
+              error_message => $result->{error_message},
+              metrics       => $metrics,
+              (defined $result->{audio_seconds} ? (audio_seconds => $result->{audio_seconds}) : ()),
+              (defined $result->{content_bytes} ? (content_bytes => $result->{content_bytes}) : ()),
+            });
+          },
+        );
+      });
+    });
+  });
+  return;
+}
+
 # POST /v1/rerank and POST /rerank (skeid k92). A JSON body in the shape Cohere, vLLM, Jina and
 # infinity share, routed by its `model` like a chat request. To a node that speaks that shape
 # the body is relayed with only `model` replaced, and the answer comes back byte for byte (ADR
@@ -1909,8 +2158,12 @@ sub _begin_route_async {
   # admission is undecided, which tells this finish from the one every answered request emits
   # as well. Nothing is rendered, there is nobody to read it. A stand-in controller has no
   # transaction.
+  # On a WebSocket route that has not been upgraded the transaction that closes when the client
+  # leaves is the handshake's, not the WebSocket one the controller holds (skeid k95).
   if ($c->can('tx') && $c->tx) {
-    $c->tx->on(finish => sub {
+    my $tx = $c->tx;
+    $tx = $tx->handshake if $tx->is_websocket && !$tx->established && $tx->can('handshake');
+    $tx->on(finish => sub {
       return unless $tick;
       Mojo::IOLoop->remove($wait_timer) if defined $wait_timer;
       undef $tick;
@@ -2618,6 +2871,12 @@ sub _upstream_tx {
 # set; a controller without one (a unit test's stand-in) is an OpenAI face.
 sub _render_error {
   my ($c, $status, $message, $openai_type, $openai_code) = @_;
+  # A refused WebSocket handshake is a plain HTTP answer: the upgrade headers the server
+  # prepared for a 101 do not belong on it (skeid k95).
+  my $handshake = $c->can('tx') ? $c->tx : undef;
+  if ($handshake && $handshake->is_websocket && !$handshake->established) {
+    $c->res->headers->remove($_) for qw( Upgrade Connection Sec-WebSocket-Accept );
+  }
   my $format = $c->can('stash') ? ($c->stash('skeid.error_format') // '') : '';
   if ($format eq 'anthropic') {
     $c->render(json => Langertha::Skeid::Protocol::Anthropic->error_body($status, $message),
@@ -3191,6 +3450,14 @@ sub _extract_request_api_key {
   my $auth = $c->req->headers->authorization;
   my $x_api_key = $c->req->headers->header('x-api-key');
   my $raw = defined($auth) ? $auth : (defined($x_api_key) ? $x_api_key : '');
+  # A browser cannot set a header on a WebSocket: the realtime route takes its key from the
+  # subprotocol list as a last resort (skeid k95), only ever for the one route, and never
+  # before a header. It is read here and answered nowhere.
+  if (!length($raw) && $c->req->url->path->to_route =~ m{\A/v1/realtime/?\z}) {
+    my $key = Langertha::Skeid::Protocol::Realtime->subprotocol_key(
+      $c->req->headers->sec_websocket_protocol);
+    return ($key, $key) if defined $key;
+  }
   my $api_key = $raw // '';
   $api_key =~ s/^Bearer\s+//i;
   return ($raw, $api_key);
@@ -3466,6 +3733,9 @@ translated faces
 =item * L<Langertha::Skeid::Protocol::Audio> -- the wire of the relayed audio routes
 
 =item * L<Langertha::Skeid::Protocol::Rerank> -- the wire of the rerank route, and its TEI dialect
+
+=item * L<Langertha::Skeid::Protocol::Realtime>, L<Langertha::Skeid::Proxy::Realtime> -- the wire
+and the session of the realtime route
 
 =item * L<Langertha::Skeid::Protocol::MCP> -- the wire of the MCP gateway
 

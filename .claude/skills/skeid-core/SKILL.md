@@ -22,6 +22,8 @@ Langertha::Skeid          nodes, routing, admission, config, pricing, usage, reg
   ::Protocol::Rerank      /v1/rerank relayed; a rerank_format: tei node translated upstream (ADR 0021)
   ::Protocol::MCP         MCP gateway wire: relayed headers, upstream URL, listing entry (ADR 0022)
   ::Protocol::Documents   /v1/convert/{file,source} relayed: remote-source fields, pages, node kind (ADR 0028)
+  ::Protocol::Realtime    /v1/realtime wire: query model, frames' model places, usage blocks (ADR 0029)
+  ::Proxy::Realtime       one realtime session: two WebSockets joined, bounded, ended once (ADR 0029)
   ::UsageStore            config normalization + backend factory
   ::UsageStore::JsonLog   append-only JSON events (recommended default)
   ::UsageStore::DBI       sqlite + postgresql
@@ -137,6 +139,7 @@ manifest:   { enabled, public_url, … }   # provider manifest, per-key grants i
 registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
 uploads:    { max_bytes: 26214400, documents_max_bytes: 104857600 }   # body limits: /v1/audio/* (ADR 0021), /v1/convert/* (ADR 0028)
 documents:  { allow_remote_sources: false }   # may /v1/convert/* name an address for the node to fetch (default: 400)
+realtime:   { idle_timeout: 300, max_session_seconds: 3600, max_message_bytes: 1048576, max_queued_bytes: 4194304 }  # /v1/realtime sessions; ADR 0029
 client_auth: { keys: [name-or-key-id] }   # only these callers may use the client routes; 401 otherwise (ADR 0020)
 mcp:        { public_url, servers: { … } }   # MCP gateway (ADR 0022; skill skeid-relay-routes)
 customer_source: { dsn | from_usage_store, relation, … }   # customer key ids from a DB view (ADR 0026; skill skeid-routing)
@@ -162,7 +165,8 @@ ENV defaults: `SKEID_ROUTE_WAIT_TIMEOUT_MS`, `SKEID_ROUTE_WAIT_POLL_MS`, `SKEID_
 
 ## Usage
 
-One usage event per forwarded request, written after `request.finish`, failures included
+One usage event per forwarded request **or per realtime session** (ADR 0029: the session's
+length, its transcriptions' usage summed), written after `request.finish`, failures included
 (`ok = 0`). `record_usage` normalizes metrics, prices them from `model_pricing` at record time,
 hands the event to the store.
 

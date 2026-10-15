@@ -12,8 +12,8 @@ billing. Upstream keys are resolved at request time and live only in memory.
   per-key routing policy.
 - **Three client formats**: OpenAI, Anthropic (`/v1/messages`) and Ollama (`/api/chat`,
   `/api/generate`), all with streaming and tool calls.
-- **Metering**: one usage event per forwarded request, priced at record time, including prompt
-  cache reads and writes; stored as JSON files, SQLite or PostgreSQL, or handed to your own
+- **Metering**: one usage event per forwarded request (or per realtime session), priced at
+  record time, including prompt cache reads and writes; stored as JSON files, SQLite or PostgreSQL, or handed to your own
   code.
 - **Capacity**: optional probes (rate-limit headers, Prometheus metrics, a downstream Skeid's
   registry) so admission follows what the node reports, not only what this process sent.
@@ -418,7 +418,7 @@ client_auth:
 ```
 
 - Every client route -- `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`,
-  `/v1/audio/*`, `/v1/rerank` and `/rerank`, `/v1/messages`, every `/api/*` route, `/.well-known/langertha.json`
+  `/v1/audio/*`, `/v1/rerank` and `/rerank`, `/v1/realtime`, `/v1/messages`, every `/api/*` route, `/.well-known/langertha.json`
   and, with an `mcp:` section, `/v1/mcp/servers` and `/mcp/*` --
   answers `401` with
   `WWW-Authenticate: Bearer realm="skeid"` to a request without a key (`Missing API key`) or
@@ -512,6 +512,58 @@ memory — send large files to `/v1/convert/file`, which is spooled to disk and 
 The time a conversion may take is the upstream timeout, unchanged (`SKEID_UPSTREAM_TIMEOUT`).
 
 Behind a reverse proxy, its own body limit applies first (nginx: `client_max_body_size`).
+
+### Realtime sessions
+
+```yaml
+nodes:
+  - id: whisper-live
+    url: http://speaches:8000/v1     # Skeid opens ws://speaches:8000/v1/realtime
+    model: whisper-live
+    engine: openaibase
+    max_conns: 8                      # concurrent sessions
+realtime:
+  idle_timeout: 300                   # seconds of silence, default 300
+  max_session_seconds: 3600           # longest session, default 3600
+  max_message_bytes: 1048576          # one WebSocket message, default 1 MiB
+  max_queued_bytes: 4194304           # held for a peer that does not read, per direction, default 4 MiB
+```
+
+`GET /v1/realtime?model=<name>&intent=transcription`, upgraded to a WebSocket, is live
+transcription over OpenAI's realtime protocol: the client sends `input_audio_buffer.append`
+frames and gets `conversation.item.input_audio_transcription.delta` / `.completed` events. Skeid
+relays the frames to the node's `/realtime` and back, in the node's own events; nothing is
+translated, so the beta (`transcription_session.update`) and the GA (`session.update`) client
+dialects both go through as sent.
+
+- **`model` in the query is required**; `intent=transcription` alone is a `400`. Everything
+  that can refuse a session is a plain HTTP answer before the upgrade: `401` from
+  [client authentication](#client-authentication), `403` from the key's policy, `503`, `429`
+  after the route wait, `502` when the node refuses its WebSocket (Skeid opens the node's first).
+- **A key from a browser**: a page cannot set `Authorization` on a WebSocket, so
+  `Sec-WebSocket-Protocol: realtime, openai-insecure-api-key.<key>` is read, behind the same
+  client gate. It is never echoed (the answer selects `realtime`), logged, or passed to the node.
+- **The model of a session is the handshake's.** Every client frame is decoded as JSON; a
+  `session.update` naming the session's own model is rewritten to the served model (alias
+  tiers), one naming another model is **not forwarded**: the client gets an `error` event and
+  the session goes on. A frame that is not a JSON object, and a binary frame, closes the
+  session `1003`.
+- **One session is one slot of its node until it closes**, so `max_conns` of a realtime node
+  means concurrent sessions: give it a node of its own. With `serve --workers N` each worker
+  admits `max_conns / N` (floor 1) and keeps the sessions it accepted, so set `max_conns` at
+  least to the worker count and above what you mean to allow.
+- **One usage event per session**, written when it closes: its length, the usage of the
+  transcriptions summed (tokens, or `audio_seconds` where the node reports a duration), the text
+  relayed as `content_bytes`, and how it ended (`499` for a client that vanished, `502` for a
+  node that failed). A count the node did not report is absent, not zero.
+- **Limits**: a message above `max_message_bytes` closes `1009`, bytes a peer does not read past
+  `max_queued_bytes` close `1013`, silence and age close `1000`. A `SIGQUIT` (what the image's
+  `STOPSIGNAL` sends) closes open sessions `1001` and writes their events first. Behind a
+  reverse proxy, forward `Upgrade`/`Connection` and set read timeouts above `idle_timeout`.
+  The section is hot-reloaded and read when a session opens.
+
+Not verified against a deployed vLLM or speaches node: which dialect and which `usage` block a
+real node speaks (see `t/data/realtime/README.md`).
 
 ### API description and Swagger UI
 
@@ -718,6 +770,7 @@ balancer in front of Skeid needs a read timeout at least as long.
 | `POST /v1/audio/translations` | OpenAI | the same, to the node's translations endpoint |
 | `POST /v1/rerank`, `POST /rerank` | OpenAI | one route under two names; relayed to the node's own endpoint, translated for a `rerank_format: tei` node |
 | `POST /v1/convert/file`, `POST /v1/convert/source` | docling-serve | document conversion under docling's own paths, relayed to a `kind: documents` node; JSON or zip answer as the node gave it |
+| `GET /v1/realtime?model=…` | OpenAI | WebSocket upgrade for live transcription, relayed to the node's realtime endpoint in its own events; one session is one slot and one usage event; see [Realtime sessions](#realtime-sessions) |
 | `GET /v1/models` | OpenAI | node models and alias names, per key policy |
 | `POST /v1/messages` | Anthropic | translated to and from OpenAI |
 | `POST /api/chat` | Ollama | translated; streams unless `"stream": false` |
@@ -874,7 +927,9 @@ manifest without `public_url` fails the load.
 ## Usage and billing
 
 Every forwarded request writes one usage event after it finishes, failures included
-(`ok = 0`) ([ADR 0004](docs/adr/0004-usage-events-are-the-billing-unit.md)). An event carries:
+(`ok = 0`) ([ADR 0004](docs/adr/0004-usage-events-are-the-billing-unit.md)); a realtime
+session writes one when it closes ([ADR 0029](docs/adr/0029-a-realtime-session-is-one-slot-and-one-usage-event.md)).
+An event carries:
 
 - identity and route: `created_at`, `request_id` (from `x-request-id` or generated),
   `api_format`, `endpoint`, `api_key_id`, `provider`, `engine`, `model` (served),

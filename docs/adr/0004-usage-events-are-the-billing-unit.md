@@ -99,3 +99,9 @@ A rerank event carries `documents`, the number of documents the request held —
 nullable like `audio_seconds`, summed in the report, not priced. Skeid counts it off the
 request, so it is on the event of every request the node answered and absent from a failed
 one. A reranker's tokens are recorded as input tokens (ADR 0021, Update k92).
+
+## Update (skeid k95, ADR 0029): per request, or per session
+
+"Once per forwarded request" is widened to once per forwarded request **or once per session**: a
+realtime WebSocket session is one slot and one event, written when it closes, with the
+session's length and the summed usage of its transcriptions. Nothing else here changes.

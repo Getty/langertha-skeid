@@ -6,7 +6,7 @@ allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 
 Everything about the wire. Terms (**API format**, **Engine ID**, **Translation**, **Upstream**,
-**SSE relay**) are defined in `CONTEXT.md`. The relayed routes (audio, rerank) and the MCP
+**SSE relay**) are defined in `CONTEXT.md`. The relayed routes (audio, rerank, realtime) and the MCP
 gateway: skill `skeid-relay-routes`.
 
 ## The one-hub rule
@@ -27,6 +27,8 @@ and out. Not negotiable:
   not a second proxy function. Documents (`/v1/convert/*`, docling) follow the same rule with no
   `model`: planned over nodes of `kind: documents` under the routing key `documents` (skill
   `skeid-relay-routes`).
+  The realtime route (`GET /v1/realtime`, ADR 0029) is the one that is a *session*: a WebSocket
+  relayed in the node's own events, one slot and one usage event for its whole length.
 
 ## Client edge
 
@@ -35,6 +37,7 @@ and out. Not negotiable:
 | OpenAI | `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models` | yes, SSE relay |
 | OpenAI, relayed (ADR 0021) | `POST /v1/audio/transcriptions`, `POST /v1/audio/translations` | yes, SSE relay in the node's own event dialect |
 | OpenAI, relayed (ADR 0021) | `POST /v1/rerank`, `POST /rerank` (one route) | no |
+| OpenAI, relayed session (ADR 0029) | `GET /v1/realtime` (WebSocket upgrade; `model` in the query) | yes — frames both ways, the node's own events |
 | Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
 | Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
 | API description, not a face (ADR 0025) | `GET /openapi.json` (client routes the config enables, behind the client gate), `GET /skeid/openapi.json` (admin key), `GET /docs` + `/docs/*` (Swagger UI, `openapi.swagger_ui`, fetched on first use and cached, else 404) | no |
@@ -140,6 +143,10 @@ A node with `api_key_header` (docling's `X-Api-Key`) gets the raw key in that he
   set (callers authenticated before Skeid). Never the default, never a second way in: the ADR 0008
   routing policy hangs off this id, so a client-settable id turns permissions into a suggestion.
   `t/26-key-policies.t` fails if that check goes away.
+- **A key can also arrive in the subprotocol** (`Sec-WebSocket-Protocol:
+  openai-insecure-api-key.<key>`, a browser's WebSocket cannot set a header): only on
+  `/v1/realtime`, only when neither `Authorization` nor `x-api-key` is present, never answered,
+  logged or forwarded (`_extract_request_api_key`; skill `skeid-relay-routes`).
 - **Client authentication** (`client_auth:`, ADR 0020) is the only place a key is refused for
   *who* it is: every client route's `under` bridge (`_authorize_client`) reloads the config, then
   answers `401` + `WWW-Authenticate` in the face's dialect to an id not on the list — before body

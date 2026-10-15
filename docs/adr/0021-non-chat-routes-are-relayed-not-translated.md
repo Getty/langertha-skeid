@@ -228,3 +228,14 @@ The upload limit became a route table: `uploads.max_bytes` for audio, `uploads.d
 (100 MiB) for the documents routes. Not a pattern yet: one form of `$relay` (`max_parse_bytes`)
 was added, no new upstream dialect. A route with upstream dialects of its own still needs its own
 ADR, as the rerank Update says.
+
+## Update (skeid k95, ADR 0029): a relayed route may be a session
+
+`GET /v1/realtime` is a relayed route that is not one request and one answer: a WebSocket the
+client keeps open, relayed to the node's realtime endpoint in the node's own events. It brings
+no `$relay` — the proxy functions are one-request helpers — but the rest of this ADR holds:
+nothing is translated, the served model is the only thing Skeid writes (into `session.update`
+frames), routing, policy and admission are the other routes', and the usage unit is optional and
+absent when the node did not report it. What differs is the pairing: `request.start` /
+`request.finish` bracket the session, and the usage event is written once, when it closes. The
+two-parsers rule applies to it with full force, which is why every client frame is decoded.
