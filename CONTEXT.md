@@ -192,6 +192,25 @@ _Avoid_: latency (unqualified), response time.
 
 ### MCP gateway
 
+**Route table**:
+The list in `Langertha::Skeid::Proxy->route_table` that both registers every route of the app
+and feeds the **API description**: one entry per route, with the bridge it sits behind and what
+the document says about it (ADR 0025). A route without an entry is a defect the test suite
+catches.
+_Avoid_: router config, route list, endpoint registry.
+
+**API description**:
+The OpenAPI 3.1 document `GET /openapi.json`: the client routes this configuration enables, the
+`client_auth` bearer scheme, model names in examples taken from `/v1/models`. The admin routes are
+a second document, `GET /skeid/openapi.json`, behind the admin key.
+_Avoid_: swagger file, API docs (the **Swagger UI** is its viewer, not the description).
+
+**Swagger UI**:
+The optional browser viewer of the **API description** at `/docs`, off unless
+`openapi.swagger_ui`. Not shipped: fetched once from the pinned swagger-ui-dist release on the
+first request, verified by digest and cached in `openapi.cache_dir` (ADR 0025).
+_Avoid_: docs page, vendored UI.
+
 **MCP server**:
 An upstream that speaks MCP, declared under a name in the config's `mcp.servers` (ADR 0022).
 Not a **Node**: it serves no **Model**, is never routed to, admitted, probed or priced, and has

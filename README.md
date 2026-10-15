@@ -434,6 +434,38 @@ fails the load. Every other route keeps the server's own request limit (16 MiB,
 
 Behind a reverse proxy, its own body limit applies first (nginx: `client_max_body_size`).
 
+### API description and Swagger UI
+
+```yaml
+openapi:
+  swagger_ui: false             # default false; true serves the Swagger UI at /docs
+  cache_dir: /var/cache/skeid   # optional: where the UI assets are kept (absolute path)
+```
+
+`GET /openapi.json` is always there: an OpenAPI 3.1 description of the client routes this
+configuration enables. The manifest route appears only with `manifest.enabled`, the MCP routes
+only with an `mcp:` section; the document names `client_auth` as its bearer scheme, and the
+model names in its examples are the ones `GET /v1/models` lists for the key asking. It sits
+behind [client authentication](#client-authentication) like `/v1/models` does, so a client key
+is needed to read it when that is on. The admin routes are a second document,
+`GET /skeid/openapi.json`, behind the admin key. No key, key reference, node URL or variable
+name is in either. A route table in the proxy registers the routes and builds the documents,
+so they cannot disagree ([ADR 0025](docs/adr/0025-the-route-table-registers-the-routes-and-describes-them.md)).
+
+`swagger_ui: true` adds the Swagger UI at `/docs`. Skeid does not ship it: the first request
+for the UI downloads `swagger-ui.css` and `swagger-ui-bundle.js` of `swagger-ui-dist@5.17.14`
+from `https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/`, checks them against digests
+compiled into Skeid, and caches them in `cache_dir` (default
+`$XDG_CACHE_HOME/skeid/swagger-ui-5.17.14`, else `~/.cache/skeid/swagger-ui-5.17.14`, else a
+per-uid directory under the temp dir); later requests are served from there. The download does
+not block other requests. If it fails the UI answers `502`, and `503` with `Retry-After` for a
+minute while the failure is remembered -- there is no retry storm. With `swagger_ui` off
+(the default) nothing is fetched and `/docs` is `404`. In an air-gapped deployment put the two
+files in `cache_dir` yourself. The UI asks for a key in the browser when `client_auth` is on and
+keeps it in `sessionStorage` only. Behind a path-prefixing reverse proxy, map `/docs`,
+`/docs/*` and `/openapi.json` at the root. The section is hot-reloaded; removed, the UI is off
+again. An unknown key, a non-boolean `swagger_ui` or a relative `cache_dir` fails the load.
+
 ### MCP servers
 
 Skeid can put MCP servers behind the same key a customer already uses for models
@@ -603,6 +635,8 @@ balancer in front of Skeid needs a read timeout at least as long.
 | `POST /api/generate` | Ollama | translated; streams unless `"stream": false` |
 | `GET /api/tags` | Ollama | the same names as `/v1/models` (size, digest etc. left empty) |
 | `GET /api/ps` | Ollama | always an empty list |
+| `GET /openapi.json` | - | OpenAPI 3.1 description of the routes above this configuration enables; see [API description](#api-description-and-swagger-ui) |
+| `GET /docs` | - | Swagger UI, only with `openapi.swagger_ui: true` |
 | `GET /v1/mcp/servers` | — | the [MCP servers](#mcp-servers) assigned to the calling key |
 | `POST`, `GET`, `DELETE /mcp/<name>` | MCP | relayed to an assigned MCP server; nothing is read or translated |
 | `GET /health` | — | `{status, proxy, config_reload}`; no auth |
@@ -1111,6 +1145,7 @@ configured they answer `404`, with a wrong one `401`.
 | `GET /skeid/metrics/nodes` | per-node `inflight`, `started`, `ok`, `error`, `duration_ms_total` and any current capacity reading; volatile, not billing data |
 | `GET /skeid/usage` | usage report: `since`, `api_key_id`, `model`, `limit` |
 | `GET /skeid/config` | last reload result: error, `failed_at`, consecutive failures |
+| `GET /skeid/openapi.json` | OpenAPI 3.1 description of the admin routes (and the registry snapshot when enabled) |
 | `GET /skeid/registry/snapshot` | the signed registry snapshot; also takes the registry read key |
 
 Changes made here live in memory: they are lost on restart and on the next change to (or

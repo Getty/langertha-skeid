@@ -274,6 +274,9 @@ L</ENVIRONMENT>, else built in.
 =item * C<mcp>: removed from the file, the MCP gateway is off again and its routes are unknown
 paths.
 
+=item * C<openapi>: removed from the file, the Swagger UI is off again and C</docs> is an
+unknown path; C</openapi.json> is served either way.
+
 =back
 
 Two exceptions. A section no applied config has declared belongs to whoever set it: nodes added
@@ -421,6 +424,25 @@ see L<Langertha::Skeid::Proxy/Uploads>. Every other route keeps the server's own
 (Mojolicious' C<MOJO_MAX_MESSAGE_SIZE>, 16 MiB), whatever this says. The load fails on a section
 that is not a hash, an unknown key in it, and a C<max_bytes> that is not an integer of at least
 1 -- there is no "unlimited". A changed value holds from the next request.
+
+=head2 openapi
+
+  openapi:
+    swagger_ui: false              # default false; true serves the Swagger UI under /docs
+    cache_dir: /var/cache/skeid    # optional: where the UI assets are kept once fetched
+
+C<GET /openapi.json> is always served: an OpenAPI 3.1 description of the client routes this
+configuration enables (the manifest and the MCP routes appear only when their section is on),
+behind C<client_auth> like every client route. The admin routes are a separate document,
+C<GET /skeid/openapi.json>, behind the admin key. C<swagger_ui> adds the UI at C</docs>.
+Skeid ships no UI assets: the first request for the UI fetches the pinned swagger-ui-dist
+release (5.17.14, from cdn.jsdelivr.net, checked against SHA-256 digests compiled into
+Skeid) and caches it in C<cache_dir> -- default C<$XDG_CACHE_HOME/skeid/swagger-ui-5.17.14>,
+else C<~/.cache/skeid/...>, else a per-uid directory under the temp directory -- and serves it
+from there from then on. With C<swagger_ui> off Skeid makes no network request for it and
+C</docs> is an unknown path. See L<Langertha::Skeid::SwaggerUI> and ADR 0025. The load fails
+on an unknown key, a C<swagger_ui> that is not a boolean and a C<cache_dir> that is not an
+absolute path.
 
 =head2 mcp
 
@@ -774,6 +796,28 @@ has mcp_servers => (
 );
 
 has mcp_public_url => (
+  is      => 'rw',
+  default => sub { undef },
+);
+
+=attr openapi_swagger_ui
+
+Whether the config switches on the Swagger UI under C</docs> (config C<openapi.swagger_ui>,
+default 0). Off, only C</openapi.json> is served and the UI paths are unknown. See L</openapi>.
+
+=attr openapi_cache_dir
+
+Where the Swagger UI assets are cached once fetched (config C<openapi.cache_dir>, default
+undef: the proxy picks a per-user cache directory).
+
+=cut
+
+has openapi_swagger_ui => (
+  is      => 'rw',
+  default => sub { 0 },
+);
+
+has openapi_cache_dir => (
   is      => 'rw',
   default => sub { undef },
 );
@@ -1671,7 +1715,7 @@ my @CONFIG_STATE = qw(
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
   admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
-  mcp_servers mcp_public_url
+  mcp_servers mcp_public_url openapi_swagger_ui openapi_cache_dir
   registry_enabled registry_secret registry_read_key registry_ttl_s registry_instance_id registry_error_window_s
 );
 
@@ -1936,6 +1980,16 @@ sub _apply_config {
   } elsif ($before->{mcp}) {
     $self->mcp_servers(undef);
     $self->mcp_public_url(undef);
+  }
+
+  # The OpenAPI document and its optional Swagger UI (skeid k105). Removed from the file, the
+  # UI is off again and its cache directory forgotten.
+  if (exists $cfg->{openapi}) {
+    $declared{openapi} = 1;
+    $self->_load_openapi($cfg->{openapi});
+  } elsif ($before->{openapi}) {
+    $self->openapi_swagger_ui(0);
+    $self->openapi_cache_dir(undef);
   }
 
   # The upload limit of the multipart routes (skeid k91). Removed from the file, it is the
@@ -3575,6 +3629,37 @@ sub _load_uploads {
   croak 'uploads.max_bytes must be an integer of at least 1 (bytes)'
     unless defined($max) && !ref($max) && $max =~ /\A[0-9]+\z/ && $max >= 1;
   $self->upload_max_bytes(0 + $max);
+  return;
+}
+
+# The openapi section (skeid k105). Strict like uploads: an unknown key, a switch that is no
+# boolean or a cache_dir that is not an absolute path fails the load -- a relative path would
+# mean "wherever the process was started".
+sub _load_openapi {
+  my ($self, $section) = @_;
+  croak 'openapi must be a hash, as in openapi: { swagger_ui: true, cache_dir: /var/cache/skeid }'
+    unless ref($section) eq 'HASH';
+  for my $key (sort keys %$section) {
+    croak "openapi: unknown key '$key' (known: swagger_ui, cache_dir)"
+      unless $key eq 'swagger_ui' || $key eq 'cache_dir';
+  }
+
+  my $ui = 0;
+  if (defined $section->{swagger_ui}) {
+    my $v = $section->{swagger_ui};
+    croak 'openapi.swagger_ui must be true or false' if ref($v) && !blessed($v);
+    my $s = lc "$v";
+    if    ($s =~ /\A(?:1|true|yes|on)\z/)    { $ui = 1 }
+    elsif ($s =~ /\A(?:0|false|no|off|)\z/)  { $ui = 0 }
+    else { croak 'openapi.swagger_ui must be true or false' }
+  }
+
+  my $dir = $section->{cache_dir};
+  croak 'openapi.cache_dir must be an absolute path'
+    if defined($dir) && (ref($dir) || $dir !~ m{\A/} || $dir =~ /[\0\n]/);
+
+  $self->openapi_swagger_ui($ui);
+  $self->openapi_cache_dir($dir);
   return;
 }
 

@@ -35,6 +35,7 @@ and out. Not negotiable:
 | OpenAI, relayed (ADR 0021) | `POST /v1/rerank`, `POST /rerank` (one route) | no |
 | Anthropic | `POST /v1/messages` | yes — OpenAI SSE re-chunked into Anthropic events (`Protocol::Anthropic::Stream`) |
 | Ollama | `POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `GET /api/ps` | yes — NDJSON (`Protocol::Ollama::Stream`, `shape => 'generate'` for `/api/generate`) |
+| API description, not a face (ADR 0025) | `GET /openapi.json` (client routes the config enables, behind the client gate), `GET /skeid/openapi.json` (admin key), `GET /docs` + `/docs/*` (Swagger UI, `openapi.swagger_ui`, fetched on first use and cached, else 404) | no |
 | MCP gateway, not a face (ADR 0022) | `POST|GET|DELETE /mcp/<name>[/<path>]`, `GET /v1/mcp/servers` | yes — whatever the MCP server sends, unbuffered |
 
 - Embeddings take the chat path (`_begin_route_async`): nodes of one model share load with health,

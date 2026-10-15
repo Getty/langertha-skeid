@@ -2,6 +2,20 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - GET /openapi.json: an OpenAPI 3.1 description of the client routes the
+      configuration enables (manifest and MCP routes only with their section),
+      with the client_auth bearer scheme and example model names from the same
+      list as /v1/models; behind client_auth like the other client routes. The
+      admin routes are a separate document, GET /skeid/openapi.json, behind
+      the admin key. Routes are now registered from one route table
+      (Langertha::Skeid::Proxy->route_table) that also builds the documents,
+      and a test fails for a route without an entry (k105, ADR 0025).
+    - Optional Swagger UI at /docs, off by default (openapi.swagger_ui,
+      openapi.cache_dir). Not shipped: the first request fetches the pinned
+      swagger-ui-dist 5.17.14 non-blocking, verifies it against compiled-in
+      SHA-256 digests, caches it and serves it locally; a failed fetch is a
+      502, then 503 for a minute, never a retry storm (k105, ADR 0025).
+
     - /v1/messages: the tool-result images and the client's own text of one
       Anthropic message go upstream as one user message instead of two in a
       row, which a strict-alternation chat template may refuse. Nothing is

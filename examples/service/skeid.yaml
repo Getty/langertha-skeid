@@ -143,3 +143,11 @@ routing:
 # Cloud nodes need no configuration: rate-limit headers are read off responses Skeid already
 # receives, so a provider that says "0 remaining" stops being admitted until it says otherwise.
 # A probe can only ever narrow max_conns, never raise it.
+
+# API description (ADR 0025). GET /openapi.json is always served; the Swagger UI at /docs is
+# off unless switched on. Skeid does not ship the UI: the first request for it downloads the
+# pinned swagger-ui-dist and caches it in cache_dir (writable for the skeid user).
+#
+# openapi:
+#   swagger_ui: true
+#   cache_dir: /var/lib/skeid/swagger-ui

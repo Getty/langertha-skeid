@@ -3,6 +3,7 @@ our $VERSION = '0.004';
 # ABSTRACT: Multi-format LLM proxy (OpenAI, Anthropic, Ollama) powered by Langertha::Skeid routing
 use strict;
 use warnings;
+use Carp qw(croak);
 use Mojolicious;
 use Mojo::IOLoop;
 use Time::HiRes qw(time);
@@ -11,7 +12,9 @@ use Scalar::Util qw(blessed weaken);
 use Mojo::Util qw(decode encode);
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
+use Langertha::Skeid::OpenAPI;
 use Langertha::Skeid::Registry;
+use Langertha::Skeid::SwaggerUI;
 use Langertha::Skeid::Secret;
 use Langertha::Skeid::Proxy::RelayContent;
 use Langertha::Skeid::Protocol;
@@ -69,6 +72,8 @@ The MCP routes exist only with an C<mcp> section and always need a key; see L</M
   POST /api/generate               Ollama generate; streams unless "stream": false
   GET  /api/tags                   Ollama: the same names as /v1/models
   GET  /api/ps                     Ollama: always an empty list
+  GET  /openapi.json               OpenAPI 3.1 description of the routes this config enables
+  GET  /docs                       Swagger UI; only with openapi.swagger_ui, else 404
   GET  /v1/mcp/servers             the MCP servers assigned to the presented key
   ANY  /mcp/:name                  POST, GET, DELETE: relayed to that MCP server
   ANY  /mcp/:name/*path            the same, to a sub-path of it
@@ -274,6 +279,7 @@ C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
   GET  /skeid/config               {reload}: the config reload status, with its message
   GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
   GET  /skeid/usage                ?since=&api_key_id=&model=&limit= (default 50) -> the report
+  GET  /skeid/openapi.json         OpenAPI 3.1 description of the admin routes
 
 Changes made here live in this process only: a changed C<nodes> section in the config replaces
 them, and under C<--workers> each write reaches one worker (ADR 0010).
@@ -379,6 +385,10 @@ C<SKEID_ADMIN_API_KEY>.
 
 =item * C<worker_count> -- how many prefork workers share the nodes (L<Langertha::Skeid/worker_count>),
 set before any admission or probe timer reads it.
+
+=item * C<swagger_ui> -- a L<Langertha::Skeid::SwaggerUI> object to serve C</docs> from; a
+test passes one with an injected fetcher so nothing reaches the network. Default: one that
+fetches the pinned release.
 
 =back
 
@@ -525,238 +535,411 @@ sub build_app {
     $tx->req->content->once(body => sub { _limit_upload($app, $tx) if $tx });
   });
 
+  # Swagger UI assets: fetched on the first request for the UI, only when the config switches
+  # it on (skeid k105, ADR 0025). Nothing is fetched at build. The object is injectable (the
+  # swagger_ui option of build_app) so a test never reaches the network.
+  my $swagger_ui = $opts{swagger_ui} || Langertha::Skeid::SwaggerUI->new;
+  $app->helper(swagger_ui => sub { $swagger_ui });
+
+  # Every route is registered from route_table, and the OpenAPI documents are built from the
+  # same entries: a route without an entry cannot exist, which t/78-route-table.t proves by
+  # walking the router. A group names the bridge the entry sits behind. Bridges are made when
+  # the first entry of their group comes, so the order of the table is the order of matching.
+  #
+  # Client routes sit behind _authorize_client (skeid k90): a bridge, so only these routes are
+  # gated and an unknown path stays a 404. Each face's bridge sets what its 401 needs before the
+  # gate can render it -- the error dialect, the manifest's cache headers.
   my $r = $app->routes;
+  my %make_bridge = (
+    root     => sub { $r },
+    manifest => sub {
+      $r->under(sub {
+        my ($c) = @_;
+        _manifest_cache_headers($c);
+        return _authorize_client($c);
+      });
+    },
+    openai => sub {
+      $r->under(sub { _authorize_client($_[0]) });
+    },
+    # Every error this request produces, wherever it is rendered -- the gate's 401 included --
+    # has to be Anthropic-shaped (core karr #224). _render_error reads this.
+    anthropic => sub {
+      $r->under(sub {
+        my ($c) = @_;
+        $c->stash('skeid.error_format' => 'anthropic');
+        return _authorize_client($c);
+      });
+    },
+    # Every error on these routes has to be Ollama-shaped, {"error": "<string>"}: an Ollama
+    # client decodes the error as a string and fails on the OpenAI object (skeid #47).
+    ollama => sub {
+      $r->under(sub {
+        my ($c) = @_;
+        $c->stash('skeid.error_format' => 'ollama');
+        return _authorize_client($c);
+      });
+    },
+    # The MCP bridge answers as an unknown path while the config has no mcp: section, before
+    # the client gate can turn that 404 into a 401.
+    mcp => sub {
+      $r->under(sub { _authorize_mcp_client($_[0]) });
+    },
+    admin => sub {
+      $r->under(sub { _authorize_admin($_[0]) });
+    },
+  );
+  my %bridge;
+  for my $entry ($class->route_table) {
+    my $make = $make_bridge{$entry->{group}}
+      or croak "route table: unknown group '$entry->{group}' of $entry->{id}";
+    my $parent = $bridge{$entry->{group}} //= $make->();
+    $parent->any($entry->{methods} => $_ => $entry->{handler}) for @{$entry->{paths}};
+  }
+
+  return $app;
+}
+
+=method route_table
+
+  my @entries = Langertha::Skeid::Proxy->route_table;
+
+Every route the app registers, as one entry each -- the single source of the router and of the
+OpenAPI documents (ADR 0025). An entry is a hashref:
+
+=over 4
+
+=item * C<id>, C<group> (the bridge it sits behind), C<methods>, C<paths> (Mojolicious
+patterns), C<handler> (a coderef taking the controller)
+
+=item * C<document>: C<client> or C<admin> for the OpenAPI document that lists it, absent for a
+route no document lists (the UI)
+
+=item * C<requires>: C<manifest>, C<mcp> or C<registry> -- the config section that has to be on
+for the route to be listed
+
+=item * C<tag>, C<summary>, C<description>, C<request>, C<request_type>, C<response>,
+C<stream>, C<public>: what the document says about it
+
+=back
+
+A route added to the app any other way has no entry; the test suite fails on it.
+
+=cut
+
+my @ROUTE_TABLE;
+
+sub route_table {
+  my ($class) = @_;
+  @ROUTE_TABLE = $class->_build_route_table unless @ROUTE_TABLE;
+  return @ROUTE_TABLE;
+}
+
+sub _build_route_table {
+  my ($class) = @_;
+  my @t;
+  my $add = sub { push @t, { methods => ['GET'], document => 'client', @_ } };
 
   # Still 'ok' while a config reload is failing: the proxy serves under the config it kept, so
   # it is not unhealthy, and a probe that restarted it would lose that config. The reload
   # state is shown without its message, which can name customers; that is on /skeid/config.
-  $r->get('/health' => sub {
-    my ($c) = @_;
-    my $reload = $c->skeid->reload_status;
-    delete $reload->{error};
-    $c->render(json => { status => 'ok', proxy => 'skeid', config_reload => $reload });
-  });
-
-  # Client routes sit behind _authorize_client (skeid k90): a bridge, so only these routes are
-  # gated and an unknown path stays a 404. Each face's bridge sets what its 401 needs before the
-  # gate can render it -- the error dialect, the manifest's cache headers.
+  $add->(id => 'health', group => 'root', paths => ['/health'], tag => 'Service', public => 1,
+    summary => 'Liveness and config reload state',
+    handler => sub {
+      my ($c) = @_;
+      my $reload = $c->skeid->reload_status;
+      delete $reload->{error};
+      $c->render(json => { status => 'ok', proxy => 'skeid', config_reload => $reload });
+    });
 
   # Provider manifest (skeid #29, ADR 0015): per customer key, never the whole catalog.
-  my $manifest = $r->under(sub {
-    my ($c) = @_;
-    _manifest_cache_headers($c);
-    return _authorize_client($c);
-  });
-
-  $manifest->get('/.well-known/langertha.json' => sub {
-    my ($c) = @_;
-    _handle_manifest($c);
-  });
+  $add->(id => 'manifest', group => 'manifest', paths => ['/.well-known/langertha.json'],
+    tag => 'Manifest', requires => 'manifest',
+    summary => 'Provider manifest for the presented key',
+    handler => sub { _handle_manifest($_[0]) });
 
   # OpenAI format
-  my $openai = $r->under(sub {
-    my ($c) = @_;
-    return _authorize_client($c);
-  });
+  $add->(id => 'models', group => 'openai', paths => ['/v1/models'], tag => 'OpenAI',
+    summary => 'List the models this key may use', response => 'ModelList',
+    handler => sub {
+      my ($c) = @_;
+      my @data = map {
+        +{
+          id       => $_->{model},
+          object   => 'model',
+          created  => int(time),
+          owned_by => 'skeid',
+        }
+      } @{$c->skeid->list_models(api_key_id => _request_api_key_id($c))};
+      $c->render(json => { object => 'list', data => \@data });
+    });
 
-  $openai->get('/v1/models' => sub {
-    my ($c) = @_;
-    my @data = map {
-      +{
-        id       => $_->{model},
-        object   => 'model',
-        created  => int(time),
-        owned_by => 'skeid',
-      }
-    } @{$c->skeid->list_models(api_key_id => _request_api_key_id($c))};
-    $c->render(json => { object => 'list', data => \@data });
-  });
+  $add->(id => 'chat_completions', group => 'openai', methods => ['POST'],
+    paths => ['/v1/chat/completions'], tag => 'OpenAI', request => 'ChatCompletionRequest',
+    stream => 1, summary => 'Chat completion',
+    handler => sub { _handle_openai_chat($_[0]) });
 
-  $openai->post('/v1/chat/completions' => sub {
-    my ($c) = @_;
-    _handle_openai_chat($c);
-  });
-
-  $openai->post('/v1/embeddings' => sub {
-    my ($c) = @_;
-    _handle_openai_embeddings($c);
-  });
+  $add->(id => 'embeddings', group => 'openai', methods => ['POST'], paths => ['/v1/embeddings'],
+    tag => 'OpenAI', request => 'EmbeddingsRequest', summary => 'Embeddings',
+    handler => sub { _handle_openai_embeddings($_[0]) });
 
   # Audio (skeid k91): relayed in the upstream's own shape, not translated (ADR 0021).
   for my $endpoint (Langertha::Skeid::Protocol::Audio->routes) {
-    $openai->post($endpoint => sub {
-      my ($c) = @_;
-      _handle_openai_audio($c, $endpoint);
-    });
+    (my $id = $endpoint) =~ s{[^A-Za-z0-9]+}{_}g;
+    $add->(id => 'audio' . $id, group => 'openai', methods => ['POST'], paths => [$endpoint],
+      tag => 'OpenAI', request => 'AudioRequest', request_type => 'multipart', stream => 1,
+      summary => 'Audio ' . ($endpoint =~ /translations/ ? 'translation' : 'transcription'),
+      description => 'Relayed to the node as the multipart form was sent; the answer is the node\'s own.',
+      handler => sub { _handle_openai_audio($_[0], $endpoint) });
   }
 
   # Rerank (skeid k92): /v1/rerank and its alias /rerank, one route. Relayed like audio, except
   # to a node whose rerank_format names another upstream dialect.
   for my $endpoint (Langertha::Skeid::Protocol::Rerank->routes) {
-    $openai->post($endpoint => sub {
-      my ($c) = @_;
-      _handle_openai_rerank($c);
-    });
+    (my $id = $endpoint) =~ s{[^A-Za-z0-9]+}{_}g;
+    $add->(id => 'rerank' . $id, group => 'openai', methods => ['POST'], paths => [$endpoint],
+      tag => 'OpenAI', request => 'RerankRequest', summary => 'Rerank documents',
+      handler => sub { _handle_openai_rerank($_[0]) });
   }
 
-  # Anthropic format. Every error this request produces, wherever it is rendered -- the gate's
-  # 401 included -- has to be Anthropic-shaped (core karr #224). _render_error reads this.
-  my $anthropic = $r->under(sub {
-    my ($c) = @_;
-    $c->stash('skeid.error_format' => 'anthropic');
-    return _authorize_client($c);
-  });
+  # The description of the client routes themselves. Behind the client gate like /v1/models:
+  # the examples carry model names, and those are per key.
+  $add->(id => 'openapi', group => 'openai', paths => ['/openapi.json'], tag => 'Service',
+    summary => 'This OpenAPI 3.1 document',
+    handler => sub { _handle_openapi($_[0], 'client') });
 
-  $anthropic->post('/v1/messages' => sub {
-    my ($c) = @_;
-    _handle_anthropic_messages($c);
-  });
+  # Anthropic format.
+  $add->(id => 'messages', group => 'anthropic', methods => ['POST'], paths => ['/v1/messages'],
+    tag => 'Anthropic', request => 'AnthropicMessagesRequest', stream => 1,
+    summary => 'Anthropic Messages',
+    handler => sub { _handle_anthropic_messages($_[0]) });
 
-  # Ollama format. Every error on these routes has to be Ollama-shaped, {"error": "<string>"}:
-  # an Ollama client decodes the error as a string and fails on the OpenAI object (skeid #47).
-  # _render_error reads this.
-  my $ollama = $r->under('/api' => sub {
-    my ($c) = @_;
-    $c->stash('skeid.error_format' => 'ollama');
-    return _authorize_client($c);
-  });
+  # Ollama format.
+  $add->(id => 'ollama_chat', group => 'ollama', methods => ['POST'], paths => ['/api/chat'],
+    tag => 'Ollama', request => 'OllamaChatRequest', stream => 1, summary => 'Ollama chat',
+    handler => sub { _handle_ollama($_[0], 'chat') });
 
-  $ollama->post('/chat' => sub {
-    my ($c) = @_;
-    _handle_ollama($c, 'chat');
-  });
+  $add->(id => 'ollama_generate', group => 'ollama', methods => ['POST'], paths => ['/api/generate'],
+    tag => 'Ollama', request => 'OllamaGenerateRequest', stream => 1, summary => 'Ollama generate',
+    handler => sub { _handle_ollama($_[0], 'generate') });
 
-  $ollama->post('/generate' => sub {
-    my ($c) = @_;
-    _handle_ollama($c, 'generate');
-  });
+  $add->(id => 'ollama_tags', group => 'ollama', paths => ['/api/tags'], tag => 'Ollama',
+    summary => 'The models this key may use, Ollama shaped',
+    handler => sub {
+      my ($c) = @_;
+      $c->render(json => Langertha::Skeid::Protocol::Ollama->tags_from_models(
+        $c->skeid->list_models(api_key_id => _request_api_key_id($c))));
+    });
 
-  $ollama->get('/tags' => sub {
-    my ($c) = @_;
-    $c->render(json => Langertha::Skeid::Protocol::Ollama->tags_from_models(
-      $c->skeid->list_models(api_key_id => _request_api_key_id($c))));
-  });
-
-  $ollama->get('/ps' => sub {
-    my ($c) = @_;
-    $c->render(json => { models => [] });
-  });
+  $add->(id => 'ollama_ps', group => 'ollama', paths => ['/api/ps'], tag => 'Ollama',
+    summary => 'Always an empty list',
+    handler => sub { $_[0]->render(json => { models => [] }) });
 
   # MCP gateway (skeid k103, ADR 0022): the MCP servers assigned to the presented key, listed
-  # and relayed. Its bridge answers as an unknown path while the config has no mcp: section,
-  # before the client gate can turn that 404 into a 401. The relaxed placeholder takes a name
-  # with a dot in it; what follows the name is the sub-path, for an upstream with more than one
-  # endpoint.
-  my $mcp = $r->under(sub {
-    my ($c) = @_;
-    return _authorize_mcp_client($c);
-  });
+  # and relayed. The relaxed placeholder takes a name with a dot in it; what follows the name
+  # is the sub-path, for an upstream with more than one endpoint.
+  $add->(id => 'mcp_servers', group => 'mcp', paths => [Langertha::Skeid::Protocol::MCP->listing_path],
+    tag => 'MCP', requires => 'mcp', summary => 'The MCP servers assigned to this key',
+    handler => sub { _handle_mcp_servers($_[0]) });
 
-  $mcp->get(Langertha::Skeid::Protocol::MCP->listing_path => sub {
-    my ($c) = @_;
-    _handle_mcp_servers($c);
-  });
+  $add->(id => 'mcp_relay', group => 'mcp', methods => [qw( GET POST DELETE )],
+    paths => ['/mcp/#mcp_server', '/mcp/#mcp_server/*mcp_path'], tag => 'MCP', requires => 'mcp',
+    summary => 'Relay MCP Streamable HTTP to an assigned MCP server', stream => 1,
+    handler => sub { _handle_mcp($_[0]) });
 
-  for my $pattern ('/mcp/#mcp_server', '/mcp/#mcp_server/*mcp_path') {
-    $mcp->any([qw( GET POST DELETE )] => $pattern => sub {
-      my ($c) = @_;
-      _handle_mcp($c);
-    });
-  }
-
-  # Skeid-to-Skeid registry (skeid #18, ADR 0017): a fronting tier's CapacityProbe::Registry
-  # pulls this. 404 unless registry.enabled, and never unsigned. No store may keep it: a cached
-  # snapshot is a stale one. It is registered before the /skeid admin block so it is not behind
-  # _authorize_admin: it also takes the registry read key (skeid #49), which that block must
-  # never accept -- the read key opens this one route and nothing else.
-  $r->get('/skeid/registry/snapshot' => sub {
-    my ($c) = @_;
-    return unless _authorize_registry_read($c);
-    my $skeid = $c->skeid;
-    $c->res->headers->header('Cache-Control' => 'no-store');
-    unless ($skeid->registry_enabled) {
-      $c->render(status => 404,
-        json => { error => { message => 'No registry snapshot is published here', type => 'not_found' } });
-      return;
-    }
-    my ($body, $signature) = eval { Langertha::Skeid::Registry->signed_snapshot($skeid) };
-    unless (defined $body) {
-      my $err = $@ || 'unknown error';
-      unless (length($skeid->registry_secret // '')) {
-        $c->render(status => 503,
-          json => { error => { message => 'Registry secret is not set', type => 'unavailable' } });
-        return;
-      }
-      # Anything else is a bug in building the snapshot. The operator gets the cause in the
-      # log; the caller gets nothing that could describe this process's internals.
-      $err =~ s/\s+\z//;
-      $c->app->log->error("registry snapshot failed: $err");
-      $c->render(status => 500,
-        json => { error => { message => 'Registry snapshot could not be built', type => 'server_error' } });
-      return;
-    }
-    $c->res->headers->header(Langertha::Skeid::Registry->SIGNATURE_HEADER => $signature);
-    $c->render(data => $body, format => 'json');
-  });
+  # Skeid-to-Skeid registry (skeid #18, ADR 0017). Registered before the /skeid admin block so
+  # it is not behind _authorize_admin: it also takes the registry read key (skeid #49), which
+  # that block must never accept.
+  $add->(id => 'registry_snapshot', group => 'root', paths => ['/skeid/registry/snapshot'],
+    document => 'admin', requires => 'registry', tag => 'Registry',
+    summary => 'Signed capacity snapshot, for a fronting Skeid',
+    description => 'Takes the admin key or the registry read key. The body is signed in '
+      . 'X-Skeid-Registry-Signature.',
+    handler => sub { _handle_registry_snapshot($_[0]) });
 
   # Lightweight admin API for live control-plane updates.
-  my $admin = $r->under('/skeid' => sub {
-    my ($c) = @_;
-    return _authorize_admin($c);
-  });
+  $add->(id => 'admin_nodes', group => 'admin', paths => ['/skeid/nodes'], document => 'admin',
+    tag => 'Admin', summary => 'List nodes', response => 'NodeList',
+    handler => sub {
+      my ($c) = @_;
+      $c->render(json => { nodes => $c->skeid->list_nodes });
+    });
 
-  $admin->get('/nodes' => sub {
-    my ($c) = @_;
-    $c->render(json => { nodes => $c->skeid->list_nodes });
-  });
+  $add->(id => 'admin_nodes_add', group => 'admin', methods => ['POST'], paths => ['/skeid/nodes'],
+    document => 'admin', tag => 'Admin', summary => 'Add or replace a node',
+    handler => sub {
+      my ($c) = @_;
+      my $body = $c->req->json || {};
+      my $ok = eval { $c->skeid->call_function('nodes.add', $body)->{ok} };
+      if (!$ok || $@) {
+        my $msg = $@ ? "$@" : 'invalid node payload';
+        $msg =~ s/\s+$//;
+        $c->render(json => { error => { message => $msg, type => 'invalid_request_error' } }, status => 400);
+        return;
+      }
+      $c->render(json => { ok => 1, nodes => $c->skeid->list_nodes });
+    });
 
-  $admin->post('/nodes' => sub {
-    my ($c) = @_;
-    my $body = $c->req->json || {};
-    my $ok = eval { $c->skeid->call_function('nodes.add', $body)->{ok} };
-    if (!$ok || $@) {
-      my $msg = $@ ? "$@" : 'invalid node payload';
-      $msg =~ s/\s+$//;
-      $c->render(json => { error => { message => $msg, type => 'invalid_request_error' } }, status => 400);
+  $add->(id => 'admin_node_health', group => 'admin', methods => ['POST'],
+    paths => ['/skeid/nodes/:id/health'], document => 'admin', tag => 'Admin',
+    summary => 'Set a node healthy or unhealthy',
+    handler => sub {
+      my ($c) = @_;
+      my $body = $c->req->json || {};
+      my $id = $c->param('id');
+      my $ok = $c->skeid->call_function('nodes.set_health', {
+        id      => $id,
+        healthy => ($body->{healthy} ? 1 : 0),
+      })->{ok};
+      $c->render(json => { ok => $ok ? 1 : 0 });
+    });
+
+  $add->(id => 'admin_config', group => 'admin', paths => ['/skeid/config'], document => 'admin',
+    tag => 'Admin', summary => 'Config reload status',
+    handler => sub {
+      my ($c) = @_;
+      $c->render(json => { reload => $c->skeid->call_function('config.status', {}) });
+    });
+
+  $add->(id => 'admin_metrics_nodes', group => 'admin', paths => ['/skeid/metrics/nodes'],
+    document => 'admin', tag => 'Admin', summary => 'Per-node counters',
+    handler => sub {
+      my ($c) = @_;
+      $c->render(json => { metrics => $c->skeid->node_metrics });
+    });
+
+  $add->(id => 'admin_usage', group => 'admin', paths => ['/skeid/usage'], document => 'admin',
+    tag => 'Admin', summary => 'Usage report',
+    handler => sub {
+      my ($c) = @_;
+      my $report = $c->skeid->call_function('usage.report', {
+        (defined($c->param('since')) && length($c->param('since')) ? (since => $c->param('since')) : ()),
+        (defined($c->param('api_key_id')) && length($c->param('api_key_id')) ? (api_key_id => $c->param('api_key_id')) : ()),
+        (defined($c->param('model')) && length($c->param('model')) ? (model => $c->param('model')) : ()),
+        limit => ($c->param('limit') // 50),
+      });
+      my $status = ($report->{ok} ? 200 : 400);
+      $c->render(status => $status, json => $report);
+    });
+
+  $add->(id => 'admin_openapi', group => 'admin', paths => ['/skeid/openapi.json'],
+    document => 'admin', tag => 'Admin', summary => 'The OpenAPI 3.1 document of the admin routes',
+    handler => sub { _handle_openapi($_[0], 'admin') });
+
+  # The Swagger UI (skeid k105): off unless openapi.swagger_ui, an unknown path then. No
+  # document lists it; it carries no data, so it is outside the client gate -- the browser
+  # that loads it has no key yet. The description it shows is behind the gate.
+  $add->(id => 'docs', group => 'root', paths => ['/docs'], document => undef,
+    handler => sub { _handle_docs($_[0]) });
+  $add->(id => 'docs_file', group => 'root', paths => ['/docs/#file'], document => undef,
+    handler => sub { _handle_docs($_[0]) });
+
+  return @t;
+}
+
+# Whether the config has the section an entry's route needs.
+sub _route_enabled {
+  my ($skeid, $entry) = @_;
+  my $need = $entry->{requires};
+  return 1 unless defined $need;
+  return $skeid->manifest_enabled && $skeid->manifest_available ? 1 : 0 if $need eq 'manifest';
+  return $skeid->mcp_enabled ? 1 : 0 if $need eq 'mcp';
+  return $skeid->registry_enabled ? 1 : 0 if $need eq 'registry';
+  return 0;
+}
+
+# GET /openapi.json and GET /skeid/openapi.json: the document of the routes the config enables
+# (ADR 0025). The model names in the examples are the ones /v1/models lists for this caller.
+sub _handle_openapi {
+  my ($c, $kind) = @_;
+  my $skeid = $c->skeid;
+  my @entries = grep { ($_->{document} // '') eq $kind && _route_enabled($skeid, $_) }
+    Langertha::Skeid::Proxy->route_table;
+  my @models = $kind eq 'client'
+    ? map { $_->{model} } @{$skeid->list_models(api_key_id => _request_api_key_id($c))}
+    : ();
+  _manifest_cache_headers($c) if $kind eq 'client';
+  $c->res->headers->header('Cache-Control' => 'no-store') if $kind eq 'admin';
+  $c->render(json => Langertha::Skeid::OpenAPI->document(
+    kind        => $kind,
+    entries     => \@entries,
+    models      => \@models,
+    client_auth => $skeid->client_auth_enabled,
+    version     => $Langertha::Skeid::Proxy::VERSION,
+  ));
+}
+
+# /docs and /docs/<file>: the Swagger UI, from the cache directory (skeid k105). Unknown path
+# unless the config switches it on; the assets are fetched on the first request that needs them,
+# without blocking the loop. A fetch that fails answers 502, and 503 while the failure is
+# remembered -- the client is told, never left waiting, and no request starts a second download
+# within the window.
+sub _handle_docs {
+  my ($c) = @_;
+  my $skeid = $c->skeid;
+  $skeid->maybe_reload_config;
+  return $c->render(status => 404, text => 'Not Found') unless $skeid->openapi_swagger_ui;
+
+  my $ui   = $c->app->swagger_ui;
+  my $file = $c->stash('file');
+  if (defined $file && $file eq 'init.js') {
+    $c->res->headers->content_type('application/javascript; charset=utf-8');
+    return $c->render(data => $ui->init_js);
+  }
+  return $c->render(status => 404, text => 'Not Found') if defined($file) && !$ui->is_asset($file);
+
+  my $dir = $skeid->openapi_cache_dir // $ui->default_cache_dir;
+  $c->render_later;
+  $ui->ensure($dir, sub {
+    my ($ok, $kind, $message) = @_;
+    unless ($ok) {
+      # The message names the pinned URL and the check that failed, nothing of a response.
+      $c->app->log->error('swagger ui: ' . $message) if $kind eq 'fetch';
+      $c->res->headers->header('Retry-After' => $ui->retry_after) if $kind eq 'backoff';
+      return _render_error($c, ($kind eq 'backoff' ? 503 : 502),
+        'The Swagger UI assets could not be fetched', 'upstream_error', 'swagger_ui_unavailable');
+    }
+    unless (defined $file) {
+      $c->res->headers->content_type('text/html; charset=utf-8');
+      return $c->render(data => $ui->index_html);
+    }
+    $c->res->headers->cache_control('public, max-age=3600');
+    $c->reply->file($ui->asset_path($dir, $file));
+  });
+  return;
+}
+
+# GET /skeid/registry/snapshot (skeid #18, ADR 0017): a fronting tier's CapacityProbe::Registry
+# pulls this. 404 unless registry.enabled, and never unsigned. No store may keep it: a cached
+# snapshot is a stale one.
+sub _handle_registry_snapshot {
+  my ($c) = @_;
+  return unless _authorize_registry_read($c);
+  my $skeid = $c->skeid;
+  $c->res->headers->header('Cache-Control' => 'no-store');
+  unless ($skeid->registry_enabled) {
+    $c->render(status => 404,
+      json => { error => { message => 'No registry snapshot is published here', type => 'not_found' } });
+    return;
+  }
+  my ($body, $signature) = eval { Langertha::Skeid::Registry->signed_snapshot($skeid) };
+  unless (defined $body) {
+    my $err = $@ || 'unknown error';
+    unless (length($skeid->registry_secret // '')) {
+      $c->render(status => 503,
+        json => { error => { message => 'Registry secret is not set', type => 'unavailable' } });
       return;
     }
-    $c->render(json => { ok => 1, nodes => $c->skeid->list_nodes });
-  });
-
-  $admin->post('/nodes/:id/health' => sub {
-    my ($c) = @_;
-    my $body = $c->req->json || {};
-    my $id = $c->param('id');
-    my $ok = $c->skeid->call_function('nodes.set_health', {
-      id      => $id,
-      healthy => ($body->{healthy} ? 1 : 0),
-    })->{ok};
-    $c->render(json => { ok => $ok ? 1 : 0 });
-  });
-
-  $admin->get('/config' => sub {
-    my ($c) = @_;
-    $c->render(json => { reload => $c->skeid->call_function('config.status', {}) });
-  });
-
-  $admin->get('/metrics/nodes' => sub {
-    my ($c) = @_;
-    $c->render(json => { metrics => $c->skeid->node_metrics });
-  });
-
-  $admin->get('/usage' => sub {
-    my ($c) = @_;
-    my $report = $c->skeid->call_function('usage.report', {
-      (defined($c->param('since')) && length($c->param('since')) ? (since => $c->param('since')) : ()),
-      (defined($c->param('api_key_id')) && length($c->param('api_key_id')) ? (api_key_id => $c->param('api_key_id')) : ()),
-      (defined($c->param('model')) && length($c->param('model')) ? (model => $c->param('model')) : ()),
-      limit => ($c->param('limit') // 50),
-    });
-    my $status = ($report->{ok} ? 200 : 400);
-    $c->render(status => $status, json => $report);
-  });
-
-  return $app;
+    # Anything else is a bug in building the snapshot. The operator gets the cause in the
+    # log; the caller gets nothing that could describe this process's internals.
+    $err =~ s/\s+\z//;
+    $c->app->log->error("registry snapshot failed: $err");
+    $c->render(status => 500,
+      json => { error => { message => 'Registry snapshot could not be built', type => 'server_error' } });
+    return;
+  }
+  $c->res->headers->header(Langertha::Skeid::Registry->SIGNATURE_HEADER => $signature);
+  $c->render(data => $body, format => 'json');
 }
 
 sub _authorize_admin {
