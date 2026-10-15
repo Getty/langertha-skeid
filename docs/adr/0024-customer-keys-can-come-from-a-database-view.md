@@ -139,7 +139,7 @@ tests. `DBD::Pg` stays an optional dependency, needed only when a `dbi:Pg:` DSN 
   file holding `policies:`, or both; the file is the override layer.
 - Revocation latency is `poll_interval_s` (or the NOTIFY round trip) plus the config reload
   throttle. It is documented, not hidden; a customer that must be cut *now* is deleted from
-  the file or the key's id is removed from the view and the operator hits `/skeid/reload`.
+  the file (a file edit applies on the next request, ADR 0020).
 - A broken row costs one customer, never the service; a broken *relation* (missing column,
   wrong type) fails the fetch, which keeps the last good snapshot.
 - One child process per fetch exists for a few milliseconds; an unreachable database costs
