@@ -1,0 +1,7 @@
+title: A streamed chat is relayed event by event, with the Anthropic and Ollama faces translated on the way
+skip: the scenario helper has no streaming read yet, and Virtual cuts a whole reply into events instead of streaming natively (being added in langertha)
+setup:
+  nodes:
+    - { id: gpu, model: m, upstream: { fallback: { answer: ok } } }
+steps:
+  - chat: { protocol: openai, model: m, prompt: x }

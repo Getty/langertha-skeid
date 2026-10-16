@@ -1,0 +1,9 @@
+title: Usage and cost are metered from the upstream's usage block, streamed or not
+skip: Virtual answers carry no usage block yet (langertha is adding it), so tokens and cost stay 0 -- the scenario cannot fail meaningfully
+setup:
+  nodes:
+    - { id: gpu, model: m, upstream: { fallback: { answer: ok } } }
+steps:
+  - chat: { protocol: openai, model: m, prompt: x }
+    usage:
+      - { input_tokens: 3, output_tokens: 4, total_tokens: 7 }

@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Tests: a scenario suite for the core features against Langertha::Virtual::Server
+      nodes (t/200-core-scenarios.t, t/scenarios/*.yml, t/lib/Test/Skeid/Virtual.pm):
+      chat in the three faces, routing, weighted round-robin, aliases and tiers, key
+      policy, a 429 node backed off, error pass-through, client_auth, the admin API,
+      draining a node, the registry snapshot. It skips as a whole when the installed
+      Langertha has no Engine::Virtual with its HTTP endpoint.
+
     - Document conversion through docling-serve: POST /v1/convert/file and
       POST /v1/convert/source under docling's own paths, relayed (multipart
       part for part from the spooled upload, a source body decoded once and
