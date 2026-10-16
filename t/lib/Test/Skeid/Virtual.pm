@@ -51,7 +51,8 @@ my $json = JSON::MaybeXS->new( utf8 => 1, canonical => 1 );
       admin_key => $key,
     );
 
-Node entries are passed to the Skeid config as they are, minus C<upstream>, with
+Node entries are passed to the Skeid config as they are, minus C<upstream>,
+C<stream_chunk_size> and C<default_usage> (both go to the node's Virtual engine), with
 C<url> and C<engine: openai> filled in. In C<config>, a key of C<keys> written
 C<@name> is replaced by the customer key id of C<clients>' C<name>.
 
@@ -65,10 +66,11 @@ sub skeid_virtual {
   for my $n ( @{ $opt{nodes} // [] } ) {
     my %node = %$n;
     my $spec = delete $node{upstream} // { fallback => { answer => 'ok' } };
+    my %engine_opt = map { exists $node{$_} ? ( $_ => delete $node{$_} ) : () } qw( stream_chunk_size default_usage );
     my $file = Path::Tiny->tempfile( SUFFIX => '.yml' );
     $file->spew_utf8( YAML::PP->new->dump_string($spec) );
     push @keep, $file;
-    my $engine = Langertha::Engine::Virtual->new( rules_file => "$file", langfuse_enabled => 0 );
+    my $engine = Langertha::Engine::Virtual->new( rules_file => "$file", langfuse_enabled => 0, %engine_opt );
     my ( $pid, $url ) = Langertha::Virtual::Server->spawn( engine => $engine, debug => 1 );
     $pid{ $node{id} } = $pid;
     $url{ $node{id} } = $url;
@@ -144,21 +146,61 @@ sub http {
 my %PROTOCOL = (
   openai => {
     path => '/v1/chat/completions',
-    body => sub { +{ model => $_[0]{model}, messages => [ { role => 'user', content => $_[0]{prompt} } ] } },
+    body => sub { +{ model => $_[0]{model}, messages => [ { role => 'user', content => $_[0]{prompt} } ],
+      ( $_[0]{stream} ? ( stream => JSON::MaybeXS::true(),
+        ( $_[0]{include_usage} ? ( stream_options => { include_usage => JSON::MaybeXS::true() } ) : () ) ) : () ) } },
     read => sub { my $b = shift; +{ text => $b->{choices}[0]{message}{content}, model => $b->{model},
       finish_reason => $b->{choices}[0]{finish_reason} } },
+    stream => sub {
+      my $r = {};
+      for my $c (@_) {
+        $r->{model} //= $c->{model};
+        $r->{usage} = $c->{usage} if $c->{usage};
+        my $ch = $c->{choices}[0] or next;
+        if ( defined $ch->{delta}{content} && length $ch->{delta}{content} ) { $r->{text} .= $ch->{delta}{content}; $r->{events}++ }
+        $r->{finish_reason} = $ch->{finish_reason} if $ch->{finish_reason};
+      }
+      return $r;
+    },
   },
   anthropic => {
     path => '/v1/messages',
-    body => sub { +{ model => $_[0]{model}, max_tokens => 64, messages => [ { role => 'user', content => $_[0]{prompt} } ] } },
+    body => sub { +{ model => $_[0]{model}, max_tokens => 64, messages => [ { role => 'user', content => $_[0]{prompt} } ],
+      ( $_[0]{stream} ? ( stream => JSON::MaybeXS::true() ) : () ) } },
     read => sub { my $b = shift; +{ text => join( '', map { $_->{text} } grep { $_->{type} eq 'text' } @{ $b->{content} // [] } ),
       model => $b->{model}, finish_reason => $b->{stop_reason} } },
+    stream => sub {
+      my $r = {};
+      for my $c (@_) {
+        next unless ref $c;
+        if ( $c->{type} eq 'message_start' ) { $r->{model} = $c->{message}{model}; $r->{usage}{$_} = $c->{message}{usage}{$_} for keys %{ $c->{message}{usage} // {} } }
+        elsif ( $c->{type} eq 'content_block_delta' && length( $c->{delta}{text} // '' ) ) { $r->{text} .= $c->{delta}{text}; $r->{events}++ }
+        elsif ( $c->{type} eq 'message_delta' ) {
+          $r->{finish_reason} = $c->{delta}{stop_reason};
+          $r->{usage}{$_} = $c->{usage}{$_} for keys %{ $c->{usage} // {} };
+        }
+        elsif ( $c->{type} eq 'message_stop' ) { $r->{stopped} = 1 }
+      }
+      return $r;
+    },
   },
   ollama => {
     path => '/api/chat',
-    body => sub { +{ model => $_[0]{model}, stream => JSON::MaybeXS::false(),
+    body => sub { +{ model => $_[0]{model}, stream => ( $_[0]{stream} ? JSON::MaybeXS::true() : JSON::MaybeXS::false() ),
       messages => [ { role => 'user', content => $_[0]{prompt} } ] } },
     read => sub { my $b = shift; +{ text => $b->{message}{content}, model => $b->{model}, finish_reason => $b->{done_reason} } },
+    stream => sub {
+      my $r = {};
+      for my $c (@_) {
+        $r->{model} //= $c->{model};
+        if ( length( $c->{message}{content} // '' ) ) { $r->{text} .= $c->{message}{content}; $r->{events}++ }
+        next unless $c->{done};
+        $r->{stopped} = 1;
+        $r->{finish_reason} = $c->{done_reason};
+        $r->{usage} = { map { $_ => $c->{$_} } grep { defined $c->{$_} } qw( prompt_eval_count eval_count ) };
+      }
+      return $r;
+    },
   },
 );
 
@@ -168,6 +210,13 @@ my %PROTOCOL = (
 
 C<http> extended with C<text>, C<model>, C<finish_reason> read from a 200 answer.
 
+With C<< stream => 1 >> the request asks for a stream (OpenAI's also C<< include_usage => 1 >>
+for C<stream_options.include_usage>) and the answer is read event by event: the same keys,
+plus C<body>, replaced by C<< { events => the content events, usage => what the stream
+reported (OpenAI's usage chunk, Anthropic's message_start/message_delta usage, Ollama's
+prompt_eval_count/eval_count), stopped => 1 when the stream ended properly } >> so the
+runner's C<json:> paths reach it.
+
 =cut
 
 sub chat {
@@ -175,7 +224,21 @@ sub chat {
   my $p = $PROTOCOL{$proto} or Carp::croak("unknown protocol '$proto'");
   my $res = $self->http( POST => $p->{path}, ( map { $_ => $o{$_} } grep { defined $o{$_} } qw( bearer headers ) ),
     body => $p->{body}->( \%o ) );
-  %$res = ( %$res, %{ $p->{read}->( $res->{body} ) } ) if $res->{status} == 200 && ref $res->{body};
+  if ( $o{stream} && $res->{status} == 200 ) {
+    my ( @chunks, $done );
+    for my $line ( split /\r?\n/, $res->{raw} ) {
+      $line =~ s/\Adata:\s?// or $line =~ /\A\s*\{/ or next;
+      if ( $line eq '[DONE]' ) { $done = 1; next }
+      my $c = eval { $json->decode($line) };
+      push @chunks, $c if ref $c;
+    }
+    my $r = $p->{stream}->(@chunks);
+    $r->{stopped} = 1 if $done;
+    $res->{body} = { map { $_ => $r->{$_} } grep { defined $r->{$_} } qw( events usage stopped ) };
+    $res->{body}{events} //= 0;
+    $res->{$_} = $r->{$_} for qw( text model finish_reason );
+  }
+  elsif ( $res->{status} == 200 && ref $res->{body} ) { %$res = ( %$res, %{ $p->{read}->( $res->{body} ) } ) }
   return $res;
 }
 
