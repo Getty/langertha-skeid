@@ -248,9 +248,11 @@ docling's own synchronous calls, `POST /v1/convert/file` and `POST /v1/convert/s
 nothing else — chat requests never get it, and it never gets one. It has no `model`, and docling
 takes its key in `X-Api-Key`, so the node names that header:
 
-> **Status:** the document-conversion relay is tested against a fake docling node, not yet against a
-> deployed docling-serve (ADR 0028); the page count assumes the `document.json_content.pages` form of one
-> docling version.
+> **Status:** the document-conversion relay is tested against a fake docling node and, in
+> `t/950-live-docling.t`, against a real docling-serve 1.37.0 (CPU, `X-Api-Key`): a two page PDF through
+> `/v1/convert/file` came back with `document.json_content.pages` keyed `"1"`, `"2"` and was counted as two
+> pages (ADR 0028). The live test is skipped without `SKEID_LIVE_DOCLING_URL`; `xt/live/skeid-live` starts the
+> Python service.
 
 ```yaml
 nodes:
@@ -539,6 +541,11 @@ frames and gets `conversation.item.input_audio_transcription.delta` / `.complete
 relays the frames to the node's `/realtime` and back, in the node's own events; nothing is
 translated, so the beta (`transcription_session.update`) and the GA (`session.update`) client
 dialects both go through as sent.
+
+> **Status:** recorded against a real speaches node (`t/data/realtime/speaches.jsonl`, live test
+> `t/951-live-speaches.t`): speaches takes the flat `session.update` of the conversation API, ends a turn by
+> server VAD only after more than 3 s of audio, sends no `…delta` events and reports `usage` as
+> `{type: duration, seconds}`, which the relay turns into `audio_seconds`. vLLM is not recorded yet.
 
 - **`model` in the query is required**; `intent=transcription` alone is a `400`. Everything
   that can refuse a session is a plain HTTP answer before the upgrade: `401` from

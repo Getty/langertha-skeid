@@ -22,7 +22,7 @@ my %SERVICE = (
   speaches => {
     pat => q{speaches.main:create_app},
     port => 8000, health => '/health', mem => '10G',
-    env  => "HF_HOME=$ROOT/cache/hf API_KEY=$KEY",
+    env  => "HF_HOME=$ROOT/cache/hf API_KEY=$KEY LOOPBACK_HOST_URL=http://127.0.0.1:8000 WHISPER__COMPUTE_TYPE=int8 WHISPER__INFERENCE_DEVICE=cpu",   # the in-process ASGI transport of speaches breaks on commit
     cmd  => "$ROOT/speaches/bin/uvicorn --factory speaches.main:create_app --host 0.0.0.0 --port 8000",
     cwd  => "$ROOT/speaches-src",
   },

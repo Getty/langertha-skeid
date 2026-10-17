@@ -3,14 +3,15 @@ Revision history for Langertha-Skeid
 {{$NEXT}}
 
   [Status]
-    - Not yet verified against live backends: the document-conversion relay
-      (docling-serve, ADR 0028) and the realtime relay (vLLM, speaches, ADR 0029)
-      are tested against fakes written after the documentation, not against recorded
-      traffic of a deployed node. Open: the page count reads
-      document.json_content.pages of one docling version; which realtime dialect and
-      subprotocol the deployed servers accept and whether their completed events carry
-      usage; the cost of decoding realtime frames and parsing pages (not measured).
-      See the "Not verified" notes in both ADRs.
+    - Live backends: t/950-live-docling.t runs the document-conversion relay against a real
+      docling-serve 1.37.0 (document.json_content.pages keyed "1", "2" is counted as pages) and
+      t/951-live-speaches.t runs a realtime session against a real speaches node, with the
+      recorded frames in t/data/realtime/speaches.jsonl (flat session.update, usage as a
+      duration, no delta events). Both skip without SKEID_LIVE_*_URL; xt/live/skeid-live
+      starts and watches the Python services (Perl for the management, Python for the AI
+      work) and xt/live/record-realtime records a session. Still open: vLLM's realtime
+      dialect and usage block, GPU nodes, the cost of decoding realtime frames and parsing
+      pages (not measured).
 
     - Tests: a scenario suite for the core features against Langertha::Virtual::Server
       nodes (t/200-core-scenarios.t, t/scenarios/*.yml, t/lib/Test/Skeid/Virtual.pm):

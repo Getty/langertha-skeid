@@ -106,11 +106,16 @@ usage event, written when it closes.**
   `max_queued_bytes` rather than slowed. Mojolicious can pause a connection's reads
   (`Mojo::IOLoop::Stream->stop`/`start`, checked), which would turn that into backpressure; it
   was left out because it is a second mechanism for the same safety net.
-- **Not verified against a live backend.** The frames in `t/` are written by hand after
-  OpenAI's documentation, not recorded; which of the two client dialects vLLM and speaches
-  accept, whether their `…completed` events carry a `usage` block and of which `type`, and
-  whether they take the `realtime` subprotocol are open until a deployed node can be recorded.
-  The dialect being data in one module, a finding changes `Protocol::Realtime`, not the relay.
+- **Verified against speaches, not against vLLM.** `t/data/realtime/speaches.jsonl` was recorded from a
+  real speaches node (`xt/live/record-realtime`), and `t/951-live-speaches.t` runs a session through Skeid
+  against it. Findings: the node's `session.created` is the flat session of the conversation API
+  (`input_audio_format`, `input_audio_transcription`), and it applies a flat `session.update`
+  (`input_audio_transcription.model`/`language`) but ignores the GA `type: transcription` form; it ends
+  a turn by server VAD only once the buffer is longer than 3 s (a shorter utterance needs trailing
+  silence), and a manual `input_audio_buffer.commit` crashed its session in the version tried (an
+  `AssertionError` in `commit_and_transcribe`, speaches 993994f); its `…completed` carries
+  `usage: {type: duration, seconds}` and there are no `…delta` events; it accepted the connection without
+  the `realtime` subprotocol. vLLM's dialect and usage block are still open.
 
 ## Tests
 
