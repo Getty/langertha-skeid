@@ -2,6 +2,16 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+  [Status]
+    - Not yet verified against live backends: the document-conversion relay
+      (docling-serve, ADR 0028) and the realtime relay (vLLM, speaches, ADR 0029)
+      are tested against fakes written after the documentation, not against recorded
+      traffic of a deployed node. Open: the page count reads
+      document.json_content.pages of one docling version; which realtime dialect and
+      subprotocol the deployed servers accept and whether their completed events carry
+      usage; the cost of decoding realtime frames and parsing pages (not measured).
+      See the "Not verified" notes in both ADRs.
+
     - Tests: a scenario suite for the core features against Langertha::Virtual::Server
       nodes (t/200-core-scenarios.t, t/scenarios/*.yml, t/lib/Test/Skeid/Virtual.pm):
       chat in the three faces, routing, weighted round-robin, aliases and tiers, key

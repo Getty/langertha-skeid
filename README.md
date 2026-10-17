@@ -248,6 +248,10 @@ docling's own synchronous calls, `POST /v1/convert/file` and `POST /v1/convert/s
 nothing else — chat requests never get it, and it never gets one. It has no `model`, and docling
 takes its key in `X-Api-Key`, so the node names that header:
 
+> **Status:** the document-conversion relay is tested against a fake docling node, not yet against a
+> deployed docling-serve (ADR 0028); the page count assumes the `document.json_content.pages` form of one
+> docling version.
+
 ```yaml
 nodes:
   - id: docling-1
