@@ -8,7 +8,7 @@ use Langertha::Skeid::Proxy;
 
 # Live test against a real docling-serve (skeid ADR 0028). Skipped unless SKEID_LIVE_DOCLING_URL is
 # set, e.g. http://10.230.30.250:5001 -- the node is a Python service, started and watched by
-# bin/skeid-live (Perl for the management, Python for the AI work). SKEID_LIVE_DOCLING_KEY is the
+# xt/live/skeid-live (Perl for the management, Python for the AI work). SKEID_LIVE_DOCLING_KEY is the
 # node's X-Api-Key.
 
 my $URL = $ENV{SKEID_LIVE_DOCLING_URL}
