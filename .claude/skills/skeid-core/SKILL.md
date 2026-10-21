@@ -1,37 +1,30 @@
 ---
 name: skeid-core
-description: Load when working on the Langertha::Skeid control plane — node inventory, weighted routing, admission control, config reload, usage accounting, the admin API.
+description: Load when working on the Langertha::Skeid control plane — node inventory, weighted routing, admission control, config reload, the function dispatch surface, the admin API.
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 
 `Langertha::Skeid` is the control plane; `Langertha::Skeid::Proxy` is the Mojolicious app on
 top of it. Moo, no singletons. Terms are defined in `CONTEXT.md` — use them exactly. Aliases,
-tiers, per-key policy, prefork workers and capacity probes: skill `skeid-routing`.
+tiers, per-key policy, prefork workers and capacity probes: skill `skeid-routing`. Usage
+accounting, pricing and the usage stores: skill `skeid-usage`.
 
 ## Shape
 
-```
-Langertha::Skeid          nodes, routing, admission, config, pricing, usage, registry snapshot
-  ::Proxy                 Mojolicious app: routes, auth, handlers, upstream I/O
-  ::Proxy::RelayContent   upstream body always relayed as raw bytes (skeid #30)
-  ::Protocol              shared translation helpers, OpenAI manifest face
-  ::Protocol::Anthropic   /v1/messages <-> OpenAI (+ ::Stream)
-  ::Protocol::Ollama      /api/chat, /api/generate <-> OpenAI (+ ::Stream)
-  ::Protocol::Audio       /v1/audio/* relayed, not translated: form fields, usage units (ADR 0021)
-  ::Protocol::Rerank      /v1/rerank relayed; a rerank_format: tei node translated upstream (ADR 0021)
-  ::Protocol::MCP         MCP gateway wire: relayed headers, upstream URL, listing entry (ADR 0022)
-  ::Protocol::Documents   /v1/convert/{file,source} relayed: remote-source fields, pages, node kind (ADR 0028)
-  ::Protocol::Realtime    /v1/realtime wire: query model, frames' model places, usage blocks (ADR 0029)
-  ::Proxy::Realtime       one realtime session: two WebSockets joined, bounded, ended once (ADR 0029)
-  ::UsageStore            config normalization + backend factory
-  ::UsageStore::JsonLog   append-only JSON events (recommended default)
-  ::UsageStore::DBI       sqlite + postgresql
-  ::CapacityProbe         timer-driven probes; ::Prometheus, ::Registry, ::Custom
-  ::Registry              signed Skeid-to-Skeid snapshot: encode, sign, verify (ADR 0017)
-  ::Secret                constant-time compare for keys, tokens, signatures
-  ::KeyBroker             resolve($ref) contract; ::OpenBao implements it
-```
+- **`Langertha::Skeid`** — nodes, routing, admission, config, pricing, usage, registry snapshot
+- **`Langertha::Skeid::Proxy`** — Mojolicious app: routes, auth, handlers, upstream I/O
+- **`Langertha::Skeid::UsageStore`** — config normalization + backend factory
+  (`::JsonLog` = append-only JSON events, `::DBI` = sqlite + postgresql)
+- **`Langertha::Skeid::CapacityProbe`** — timer-driven probes
+  (`::Prometheus`, `::Registry`, `::Custom`)
+- **`Langertha::Skeid::Registry`** — signed Skeid-to-Skeid snapshot: encode, sign, verify (ADR 0017)
+- **`Langertha::Skeid::Secret`** — constant-time compare for keys, tokens, signatures
+- **`Langertha::Skeid::KeyBroker`** — resolve($ref) contract; `::OpenBao` implements it
+
+The wire lives in `Langertha::Skeid::Protocol*`, `::Proxy::RelayContent` (an upstream body
+relayed as raw bytes, skeid #30) and `::Proxy::Realtime` (one realtime session, ADR 0029): the
+translated faces are skill `skeid-protocols`, the relayed routes skill `skeid-relay-routes`.
 
 ## Node
 
@@ -48,21 +41,20 @@ healthy: 1             # operator flag, never set by error handling
 tags: [local, gb10]    # grouping for selection; also accepts "local, gb10"
 api_key_ref: secret/…  # key reference resolved through the KeyBroker per request
 api_key_env: VAR       # fallback: key from this environment variable
-capacity: { probe: … } # optional capacity probe (skeid-routing)
-rerank_format: tei     # optional: the node's rerank endpoint speaks TEI's dialect, not the client's
-kind: documents        # optional: a docling-serve node; default chat (ADR 0028, skill skeid-routing)
-api_key_header: X-Api-Key  # optional: the key goes raw in this header, not Authorization: Bearer
+capacity: { probe: … } # optional capacity probe (skill skeid-routing)
+rerank_format: tei     # optional: the node's rerank endpoint speaks TEI's dialect (skeid-relay-routes)
+kind: documents        # optional: a docling-serve node (skill skeid-routing)
+api_key_header: X-Api-Key  # optional: the key goes raw in this header (skeid-protocols)
 ```
 
-- `kind` and `api_key_header` are validated in `add_node` (`Protocol::Documents->normalize_kind`,
-  `normalize_key_header`) before `remove_node`, so a bad re-add keeps the working node (k98). An
-  unknown kind croaks; a header that is no RFC 7230 token croaks; `Authorization` is the default
-  spelled out and not kept. `kind` is a node option, never an `engine` branch.
-
-- `rerank_format` is validated in `add_node` by `Protocol::Rerank->normalize_format`; an unknown
-  value croaks (failed config load), like an unknown `engine`. Absent = rerank is relayed. A node
-  option, not an engine branch — `engine` still changes no call.
 - Mutators: `add_node`, `remove_node`, `list_nodes`, `set_node_health`.
+- `kind`, `rerank_format` and `api_key_header` are validated in `add_node`
+  (`Protocol::Documents->normalize_kind`, `Protocol::Rerank->normalize_format`,
+  `normalize_key_header`): an unknown value croaks (a failed config load), and so does a header
+  that is no RFC 7230 token. `Authorization` is the default, spelled out and not kept. An absent
+  `rerank_format` means the rerank route is relayed, not translated. Every check runs **before**
+  `remove_node`, so a bad re-add keeps the working node (k98). They are node options, never an
+  `engine` branch.
 - **Tags group nodes; ids never do.** `select_nodes(tags => [...])` = nodes carrying *every* tag
   (AND); no tags = all. Tags are lowercased, trimmed, de-duplicated, order-preserving;
   `normalize_tags` takes a list or a comma/space string. Routing takes the same `tags`
@@ -72,9 +64,9 @@ api_key_header: X-Api-Key  # optional: the key goes raw in this header, not Auth
   reused until `_inventory_generation` changes. Every inventory change must call
   `_bump_inventory` — `add_node` and `set_node_health` do (a no-op health call does not bump), a
   `trigger` on `nodes` catches direct assignment. Miss one and traffic keeps going to a drained or
-  removed node, with nothing logged. Tripwire: `t/24-node-tags.t` (verified to fail without the
-  bump). Cache + cursors are bounded at 256 route keys per generation, FIFO-evicted together
-  (skeid #55), so client-chosen model names cannot grow them.
+  removed node, with nothing logged. Tripwire: `t/24-node-tags.t`. Cache + cursors are bounded at
+  256 route keys per generation, FIFO-evicted together (skeid #55), so client-chosen model names
+  cannot grow them.
 - `pick_node` is protected twice (admission re-reads `healthy` from the live node), so a stale
   cache shows in `route_state`, not there — and `has_eligible` decides `503` (no wait) vs waiting
   for capacity and `429`.
@@ -130,25 +122,19 @@ from dispatch at most once per `config_reload_interval` (default 1s).
 ```yaml
 nodes:      [ … ]                # replaces the whole inventory on reload
 pricing:    { model: {…} }       # replaced wholesale; optional cached_input_per_million / cache_write_per_million
-aliases:    { name: {tiers: […]} }   # replaced wholesale on reload (skeid-routing)
-policies:   { name: {…} }        # with default_policy:, names: and keys: (skeid-routing)
 routing:    { wait_timeout_ms: 2000, wait_poll_ms: 25, trust_key_id_header: false, frontend_count: 1 }
 admin_api_key: "…"               # or admin_api_key_env:, or admin: { api_key | api_key_env }
-usage_store: { backend: …, … }
 manifest:   { enabled, public_url, … }   # provider manifest, per-key grants in keys: (ADR 0015)
 registry:   { enabled, secret_env, read_key_env, … }   # publish a snapshot (ADR 0017)
-uploads:    { max_bytes: 26214400, documents_max_bytes: 104857600 }   # body limits: /v1/audio/* (ADR 0021), /v1/convert/* (ADR 0028)
-documents:  { allow_remote_sources: false }   # may /v1/convert/* name an address for the node to fetch (default: 400)
-realtime:   { idle_timeout: 300, max_session_seconds: 3600, max_message_bytes: 1048576, max_queued_bytes: 4194304 }  # /v1/realtime sessions; ADR 0029
-client_auth: { keys: [name-or-key-id] }   # only these callers may use the client routes; 401 otherwise (ADR 0020)
-mcp:        { public_url, servers: { … } }   # MCP gateway (ADR 0022; skill skeid-relay-routes)
-customer_source: { dsn | from_usage_store, relation, … }   # customer key ids from a DB view (ADR 0026; skill skeid-routing)
 ```
+
+The other sections live with their topic: `aliases`, `policies`, `customer_source` (skill
+`skeid-routing`), `client_auth` (skill `skeid-protocols`), `uploads`, `documents`, `realtime`,
+`mcp` (skill `skeid-relay-routes`), `usage_store` (skill `skeid-usage`).
 
 - **Admin key**, resolved on every applied config: explicit (`serve --admin-api-key`,
   `build_app(admin_api_key)`, `new(admin_api_key)`, `set_admin_api_key`) > config (first of the
-  four spellings present; empty disables) > `SKEID_ADMIN_API_KEY` > off (skeid k64). Off =
-  `/skeid/*` answers 404, not 401 — the feature is absent, not a failed login.
+  four spellings present; empty disables) > `SKEID_ADMIN_API_KEY` > off (skeid k64).
 - **A reload makes the running config equal to the file** (skeid k65): a declared section
   replaces what is loaded; a section the last applied config declared and this one drops returns
   to its default (`_config_declared`); same per `routing` key. A section no applied config ever
@@ -163,48 +149,10 @@ ENV defaults: `SKEID_ROUTE_WAIT_TIMEOUT_MS`, `SKEID_ROUTE_WAIT_POLL_MS`, `SKEID_
 `SKEID_ADMIN_API_KEY`, `SKEID_TRUST_KEY_ID_HEADER`, `SKEID_CAPACITY_MAX_AGE_MS`,
 `SKEID_CONFIG_RELOAD_INTERVAL`, `SKEID_FRONTEND_COUNT`.
 
-## Usage
-
-One usage event per forwarded request **or per realtime session** (ADR 0029: the session's
-length, its transcriptions' usage summed), written after `request.finish`, failures included
-(`ok = 0`). `record_usage` normalizes metrics, prices them from `model_pricing` at record time,
-hands the event to the store.
-
-- Cache rates price the provider-verbatim usage block through `Langertha::Usage`/`Pricing` into
-  `cost_cache_read_usd` / `cost_cache_write_usd` (part of `cost_total_usd`; ADR 0013 update).
-- A stream keeps the upstream usage block verbatim (frames merged key by key, later wins — counts
-  are running totals, never summed) and prices it through the same `metrics.normalize` as a
-  non-streamed answer, on every face (skeid #41).
-- **Requested vs served model**: the event carries `model` (served — what costs money) *and*
-  `requested_model` (what the customer bought). Dropping either breaks cost attribution silently.
-  `UsageStore::DBI` adds a missing column to a pre-existing table on `prepare` — that is the
-  whole migration story; it never drops or rewrites a column.
-- Optional fields say "not measured" by being **absent, never `0`** (ADR 0021): `content_bytes`
-  (streams only), `audio_seconds` (audio, only when the node reports a duration), `documents`
-  (rerank and documents, counted off the request, only when the node answered), `pages`
-  (documents, read off `document.json_content.pages` of a JSON answer up to 8 MiB); the last
-  three recorded, not priced. A new usage unit follows the same path: `record_usage` argument, nullable column via
-  `@ADDED_COLUMNS` in `UsageStore::DBI`, a key `jsonlog` writes as is, and a sum in the report's
-  `totals` / `by_key` / `by_model` that `skeid usage` prints only when non-zero.
-- Backend selection (`UsageStore->normalize_config`) is inference-first: explicit `backend` wins,
-  else `sqlite_path`/`path`/`db_path` → sqlite, `dbi:Pg:` dsn → postgresql, `log_path` →
-  jsonlog. `password_env` keeps the password out of the file. Schema from
-  `share/sql/usage_events.<backend>.sql` when `auto_migrate` (default on).
-- Override points, in order of preference: `usage_store` config → `store_usage_event` /
-  `query_usage_report` callbacks → subclass. `jsonlog` is the recommended default: it never
-  blocks the event loop on a database.
-- `usage_store.flush_interval_ms` (sqlite/postgresql only; ADR 0005 update, skeid k78): `0`
-  (default) = synchronous write per event. `> 0` = write-behind: queued, written by a timer in one
-  transaction; also flushed on config reload (store swap), shutdown (`END` in `bin/skeid`),
-  before a usage report, and by `flush_usage`. Price: a kill without flush (`SIGKILL`, OOM) loses
-  the queue and the billed requests in it. Under prefork `SIGTERM`/`SIGINT` make the manager
-  `SIGKILL` the workers (queue lost); `SIGQUIT` (the Docker image's `STOPSIGNAL`) flushes. A lost
-  event is reported on `on_usage_lost`, never silent. `jsonlog` stays the recommendation.
-- `node_metrics` is different: volatile in-memory ops counters, never billed.
-
 ## Admin API
 
-`/skeid/*` under bearer auth against `admin_api_key` (constant-time, `Skeid::Secret`):
+`/skeid/*` under bearer auth against `admin_api_key` (constant-time, `Skeid::Secret`): with no
+admin key the whole surface answers `404`, not `401` — the feature is absent, not a failed login.
 `GET /skeid/nodes`, `POST /skeid/nodes`, `POST /skeid/nodes/:id/health`,
 `GET /skeid/metrics/nodes`, `GET /skeid/usage`, `GET /skeid/config` (`reload_status`: last reload
 error, `failed_at`, `failures`). `GET /skeid/registry/snapshot` sits outside that block: registry
@@ -213,11 +161,8 @@ read key or admin key, 404 unless `registry.enabled`. Public `GET /health` carri
 
 ## Traps
 
-- A synchronous helper next to an async one. Handlers are async-only; a blocking call stalls
-  every concurrent request.
 - Deriving health from errors. Health is operator state (flagged ambiguity in `CONTEXT.md`);
   write an ADR before changing it.
-- Logging a resolved key. Only key *references* may appear in logs, config and usage events.
 - Treating `429` and `503` as interchangeable: saturation vs no-such-model, different fixes.
   `403` is a third — not a capacity answer at all.
 - Letting anything a client controls decide the customer key id. It selects both the routing

@@ -94,7 +94,11 @@ keys:
 ## Customer source
 
 Customer key ids, names and policies from a database view (ADR 0026,
-`Langertha::Skeid::CustomerSource`, fetcher `::CustomerSource::DBI`). The relation gives
+`Langertha::Skeid::CustomerSource`, fetcher `::CustomerSource::DBI`). The section is
+`customer_source: { backend: postgresql, dsn | host / port / dbname, user, password_env,
+from_usage_store, relation, refresh_interval_s, listen, max_stale_s, connect_timeout_s }` —
+`from_usage_store: true` takes the usage store's PostgreSQL connection instead of a `dsn`, the
+password always comes from `password_env`. The relation gives
 `key_id, name, policy, models` per active key. The rule everything rests on: **the database is
 never on the request path, and its connect never runs in the loop's process.** The fetcher polls
 on `Mojo::IOLoop` every `refresh_interval_s`; each fetch is a `Mojo::IOLoop->subprocess` that

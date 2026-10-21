@@ -31,7 +31,7 @@ upstream parts, where an answer reports usage; its names (`transcript.text.delta
 - The upload is not copied: parts above 256 KiB are file assets, and `upstream_parts` hands the
   same asset to the user agent's `multipart` generator. `$part->asset->slurp` on the file is the
   regression (`t/68` counts it).
-- Upload limit = `uploads.max_bytes`, set per request by `_limit_upload` on the request content's
+- Upload limit = `uploads.max_bytes` (default 26214400, 25 MiB), set per request by `_limit_upload` on the request content's
   `body` event (head parsed, body unread). Declared too large, or refused by `client_auth`: limit
   set to 1, the parser stops, the route (or the gate) answers `413` / `401` without the body. A
   new upload route must be known to `_limit_upload`, or it runs under the server's 16 MiB.
@@ -99,7 +99,7 @@ names, `json_content.pages`, `callbacks`, `http_sources` appear nowhere else. Ha
 - Form: `upstream_parts($content, {})` — nothing to rewrite. Source body: decoded once
   (`$req->json`), written again as `json =>`; CPU on the loop grows with the body, which is why
   big files belong on `/v1/convert/file`.
-- Limit `uploads.documents_max_bytes` (default 100 MiB) through the `%UPLOAD_ROUTE` table that
+- Limit `uploads.documents_max_bytes` (default 104857600, 100 MiB) through the `%UPLOAD_ROUTE` table that
   `_limit_upload` reads; both routes get the early `413` / `401`. A new upload route is an entry
   there.
 - `$relay` keys used: `request` (form only), `units`, `usage` returning nothing (no tokens), and
@@ -151,9 +151,10 @@ wire — `intent`, `openai-insecure-api-key.`, `session.update`, `transcription_
   client_abort`; node close other than 1000/1001, or error event then close = `502`; `1009` from
   the client = `413`; `1003` = `400`. `1005`/`1006`/`1015` never go on the wire (client went →
   node `1000`; node died → client `1011`).
-- **Bounds** (`realtime:`, read when a session opens, hot): `max_message_bytes` is the
-  transaction's own limit per session (`1009`); `max_queued_bytes` counts bytes sent and not yet
-  drained per direction (`1013`); `idle_timeout` and `max_session_seconds` are timers
+- **Bounds** (`realtime:`, read when a session opens, hot): `max_message_bytes` (default 1048576,
+  1 MiB) is the transaction's own limit per session (`1009`); `max_queued_bytes` (default 4194304,
+  4 MiB) counts bytes sent and not yet drained per direction (`1013`); `idle_timeout` (300) and
+  `max_session_seconds` (3600) are timers
   (`Mojo::IOLoop->timer`, ADR 0005). The user agent's `inactivity_timeout` (300) would cut an
   idle upstream socket, so the session sets both streams' timeout itself; `request_timeout` does
   not cut an established WebSocket (checked).

@@ -6,6 +6,7 @@ briefing:
   skills:
     - skeid-protocols
     - skeid-core
+    - skeid-usage
     - perl-ai-langertha
     - getty-perl-core
     - perl-mojo

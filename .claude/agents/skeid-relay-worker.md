@@ -7,6 +7,7 @@ briefing:
     - skeid-relay-routes
     - skeid-protocols
     - skeid-core
+    - skeid-usage
     - getty-perl-core
     - perl-mojo
     - kanban-issues-karr-ticket
