@@ -1,5 +1,5 @@
 package Langertha::Skeid::CustomerSource;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: Customer keys from a database relation - the section, the row contract, the fetch loop
 use Moo;
 use strict;

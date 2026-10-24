@@ -1,5 +1,5 @@
 package Langertha::Skeid::CustomerSource::DBI;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: Customer source fetcher on DBI - connect and query in a child process, LISTEN in another
 use Moo;
 use strict;

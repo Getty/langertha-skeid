@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::Rerank;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: The rerank routes -- relayed as the node speaks, translated for a TEI node
 use strict;
 use warnings;

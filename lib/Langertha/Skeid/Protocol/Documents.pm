@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::Documents;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: The document conversion routes of docling-serve -- relayed, the pages read off the answer
 use strict;
 use warnings;

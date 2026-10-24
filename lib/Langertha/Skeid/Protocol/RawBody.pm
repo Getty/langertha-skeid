@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::RawBody;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: The client's JSON body as it was sent, with one top-level value replaced
 use strict;
 use warnings;

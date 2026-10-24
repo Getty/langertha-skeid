@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::Audio;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: The OpenAI audio routes -- the upload form relayed, the answer's usage read
 use strict;
 use warnings;

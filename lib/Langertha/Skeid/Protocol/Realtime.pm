@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::Realtime;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: The OpenAI realtime route -- what a session's handshake and frames say, relayed untranslated
 use strict;
 use warnings;

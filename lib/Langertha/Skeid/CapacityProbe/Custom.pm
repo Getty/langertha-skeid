@@ -1,5 +1,5 @@
 package Langertha::Skeid::CapacityProbe::Custom;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: Capacity probe backed by a caller-supplied callback
 use Moo;
 use Carp qw(croak);

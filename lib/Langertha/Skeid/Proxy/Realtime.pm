@@ -1,5 +1,5 @@
 package Langertha::Skeid::Proxy::Realtime;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: One realtime session -- two WebSockets joined, bounded, ended once
 use Moo;
 use Scalar::Util qw( weaken );

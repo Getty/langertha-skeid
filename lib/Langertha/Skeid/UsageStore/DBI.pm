@@ -1,5 +1,5 @@
 package Langertha::Skeid::UsageStore::DBI;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: SQLite and PostgreSQL usage store
 use Moo;
 use strict;

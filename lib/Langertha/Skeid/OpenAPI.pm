@@ -1,5 +1,5 @@
 package Langertha::Skeid::OpenAPI;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: OpenAPI 3.1 description built from the proxy's route table
 use strict;
 use warnings;

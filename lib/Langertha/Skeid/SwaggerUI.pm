@@ -1,5 +1,5 @@
 package Langertha::Skeid::SwaggerUI;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: Swagger UI assets, fetched on first use and cached, never shipped
 use Moo;
 use strict;

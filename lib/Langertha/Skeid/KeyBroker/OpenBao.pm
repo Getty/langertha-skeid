@@ -1,5 +1,5 @@
 package Langertha::Skeid::KeyBroker::OpenBao;
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 # ABSTRACT: OpenBao-backed KeyBroker with AppRole auth and token renewal
 use Moo;
 use HTTP::Tiny;
