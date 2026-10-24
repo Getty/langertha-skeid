@@ -1,6 +1,6 @@
 Revision history for Langertha-Skeid
 
-{{$NEXT}}
+0.004     2026-10-24 04:04:43Z
 
   [Status]
     - Live backends: t/950-live-docling.t runs the document-conversion relay against a real
