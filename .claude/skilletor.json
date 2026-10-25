@@ -24,6 +24,9 @@
       "perl-ai-langertha@langertha",
       "perl-mojo@getty",
       "docker@getty"
+    ],
+    "bundles": [
+      "getty-cpan-dist@getty"
     ]
   },
   "targets": [
