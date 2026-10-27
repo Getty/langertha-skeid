@@ -66,8 +66,9 @@ duplicate skill content here — reference it.
 
 `[@Author::GETTY]` with `include_readme = 0` (default): `README.md` is a hand-maintained
 GitHub file, excluded from the tarball, and never generated from POD. `Git::GatherDir` ships
-only git-tracked files — `.claude/`, `bench/` and `docs/` are excluded via
-`gather_exclude_match` in `dist.ini`.
+only git-tracked files — `bench/`, `docs/` and `assets/` are excluded via
+`gather_exclude_match` in `dist.ini`; `.claude/`, `CLAUDE.md` and `CONTEXT.md` ship with the
+dist (the bundle default).
 
 Releasing also pushes Docker images and creates the GitHub release, both through the bundle
 (`docker_image`, `GitHub::CreateRelease`); `dist.ini` has no `run_after_release`. See the

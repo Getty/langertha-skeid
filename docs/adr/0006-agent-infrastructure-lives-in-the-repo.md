@@ -1,6 +1,7 @@
 # ADR 0006 — Agent, skill and rule infrastructure lives in the repo
 
-- Status: accepted — shared-skill distribution amended by ADR 0018 (skilletor)
+- Status: accepted — shared-skill distribution amended by ADR 0018 (skilletor); tarball
+  contents updated below
 - Date: 2026-08-08
 - Tags: tooling, skills, agents, conventions
 
@@ -56,3 +57,7 @@ above.
 The release checker became `skeid-release-manager`, which also owns commits, `Changes` and moving
 cards to done; workers leave a commit-ready tree. A fifth repo skill, `skeid-profiling`
 (Devel::NYTProf), sits beside the four above. How shared skills arrive is ADR 0018.
+
+The instruction infrastructure ships with the distribution: `.claude/`, `CLAUDE.md` and
+`CONTEXT.md` are in the CPAN tarball, gathered by the `[@Author::GETTY]` bundle together with
+its snapshot under `misc/agent-context/`. `dist.ini` keeps `bench/`, `docs/` and `assets/` out.
