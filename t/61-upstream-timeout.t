@@ -255,7 +255,11 @@ subtest 'one setting for both sides' => sub {
   for my $name (qw( chat stream )) {
     is($beyond->{$name}{error}, 'Bad Gateway', $name.': the client gets a response, not a closed connection');
     is($beyond->{$name}{code}, 502, $name.': an upstream beyond the setting is a 502');
-    like($beyond->{$name}{body}, qr/Request timeout/, $name.': which says that the upstream timed out');
+    # Both clocks of the user agent run for the same time here: the request timer starts with
+    # the request, the inactivity timer is renewed by traffic, and when both are due in one
+    # loop turn Mojo reports whichever fires first. Either says the upstream ran out of time.
+    like($beyond->{$name}{body}, qr/Upstream error: (?:Request|Inactivity) timeout/,
+      $name.': which says that the upstream timed out');
   }
   $delay = $UPSTREAM_DELAY;
   is($skeid->node_metrics('slow-1')->{inflight}, 0, 'inflight returns to zero');
