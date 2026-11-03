@@ -1,6 +1,9 @@
 #!/usr/bin/env perl
 # PODNAME: skeid
 # ABSTRACT: Skeid control-plane CLI and proxy launcher
+
+our $VERSION = '0.005';
+
 use strict;
 use warnings;
 use Getopt::Long qw(GetOptions GetOptionsFromArray);
