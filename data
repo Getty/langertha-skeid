@@ -1,0 +1,26 @@
+---
+class: standard
+created: 2026-11-04T07:35:56Z
+id: 112
+priority: high
+status: backlog
+tags:
+- security
+- config
+- nodes
+title: 'Nodes from a second, less trusted file: node_files with an allowlist for api_key_env,
+  no api_key_ref, url hosts'
+updated: 2026-11-04T07:35:56Z
+---
+
+From cai-gpm#21 security review (finding H2), 2026-11-04: a GPU manager writes Skeid's node list into a ConfigMap (nodes.yaml) that Skeid reads by mtime reload. Today Skeid reads exactly one config file, and a node entry may name any api_key_env and any api_key_ref. Whoever can write that list (a compromised manager) could make Skeid send any environment variable or broker secret as a node key to a URL of its choosing.
+Want: the main config names extra node files with constraints, e.g.
+  node_files:
+    - path: /etc/skeid/gpm/nodes.yaml
+      allow_api_key_env: '^SKEID_NODE_GPM_[A-Z0-9_]+_API_KEY$'
+      allow_api_key_ref: false
+      allow_url_hosts: [ '*.cai-gpm.svc' ]
+      allow_kinds: [ documents, chat ]
+A node from such a file that breaks a constraint is rejected (reload status names file, position and rule, never the value); the rest of the file still loads; the file only contributes nodes (no policies, keys, aliases). Reload by mtime per file, all-or-nothing per file. Interplay with the admin API and customer_source/node_source as for file nodes today.
+Alternative to weigh in the ADR: a deployment's own Skeid class (ADR 0030, k111) reading the list itself — but the constraint is generic, every deployment with a second writer needs it.
+Order: after k111 (one writer per repo). Downstream: cai-core#199 (local Skeid in cluster cai) merges the two files in a sidecar with this allowlist until Skeid can.
