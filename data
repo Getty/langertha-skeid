@@ -1,0 +1,46 @@
+---
+claimed_at: 2026-11-04T17:22:28Z
+claimed_by: claude-k111b
+class: standard
+created: 2026-11-04T06:53:30Z
+id: 111
+priority: high
+started: 2026-11-04T06:54:36Z
+status: review
+tags:
+- architecture
+- routing
+- deployment
+title: 'A deployment''s own Skeid class: a dispatch hook, skeid serve --class, and
+  skeid pack to one file'
+updated: 2026-11-04T17:22:28Z
+---
+
+Maintainer idea (2026-11-04): Skeid becomes a frame. A deployment writes its own Skeid class (subclass or role) that carries its dispatch logic — e.g. ask a GPU manager where a model is loaded, wake it, queue or refuse when the card is full — and Skeid offers one simple step to turn that class plus Skeid into a single deployable file.
+Why: every deployment-specific decision so far became a generic config key (route_column, routed_only, node_source, documents) and a capability-pinning dance downstream (CAI::Versions @SKEID_CAN in cai-core). A class keeps generic Skeid generic.
+Today: usage hooks are subclassable (documented); Proxy->new accepts skeid => $obj; route.plan/route.next/pick_node are methods but no contract, and synchronous (cannot wait on an outside answer); bin/skeid hardwires Langertha::Skeid->new; ADR 0019 decision 3 rejected a packed binary (PAR measured: equal request path, +0.2/3.7 s start, unpacks 80 MB, needs PAR_VERBATIM=1 and explicit namespaces, still links glibc/libssl).
+Scope: ADR 0030 (proposed) first, then implementation:
+1. Dispatch hook contract: documented, versioned methods a subclass may override (plan, pick, admit/refuse, on_finish), an async variant for pick (promise) so a class can consult an outside service without blocking the loop (ADR 0005), defaults = today's behaviour byte for byte.
+2. skeid serve --class My::Skeid [-I lib] and config key skeid_class; Proxy uses it.
+3. skeid pack --class My::Skeid [-I lib] -o my-skeid: one file. Reference via PAR::Packer with what ADR 0019 recorded; supersedes ADR 0019 decision 3 for this purpose; packaging stays optional, the image stays the default deployment.
+Tests: subclass example under t/ (hook overrides change routing; default unchanged), CLI --class, pack smoke test as release/author test (needs PAR::Packer).
+
+
+Implemented on branch worktree-k111-skeid-class (worktree .claude/worktrees/k111-skeid-class), not pushed: d706c7e hooks + proxy pick, 5472e53 serve --class / skeid_class / skeid pack, a404337 docs (ADR 0030 measured + corrections, bench report, README, CONTEXT, Changes).
+prove -lr t/: Files=108, Tests=6284, PASS.
+Bench (docs/bench/2026-11-04-async-pick.md): a promise-based default pick cost -2.7..-7.6 % req/s, so the proxy calls pick_node directly unless a class overrides pick_node_p; default now = 5a650b5 within noise; overriding pick_node_p costs 3.6-5.7 % req/s.
+Open: skeid pack not run here (PAR::Packer needs libperl-dev, root) -> size / cold / warm start still owed, xt/author/pack.t measures them. ADR 0030 stays proposed for the maintainer.
+
+
+2026-11-04 Leitstand abgenommen (bis auf pack-Lauf): prove -lr -j8 t/ 108 Dateien 6284 Tests PASS selbst gefahren; fast-forward main a404337 lokal (nicht gepusht). skeid pack: echter Lauf in Wegwerf-Container perl:5.40 laeuft (xt/author/pack.t). ADR 0030 bleibt proposed — Annahme durch den Maintainer.
+
+
+2026-11-04 Leitstand: skeid pack ECHT gelaufen (Wegwerf-Container perl:5.40, PAR::Packer 1.064, xt/author/pack.t AUTHOR_TESTING=1): 8/8 Subtests ok — pack exit 0, Datei ausfuehrbar, lauscht, Chat-Anfrage ueber die gepackte Datei beantwortet, vom konfigurierten Knoten, mit der gepackten Klasse. Gemessen: Datei 14,7 MB, Kaltstart bis lauschend 3,23 s. ABER: der Test endet danach mit Exit 9 (wstat 2304) ohne Warmstart-Zeile — vermutlich Aufraeumen/Warmstart-Messung; muss vor der Annahme behoben werden. Warnungen von Module::ScanDeps (uninitialized $mod, Module::Runtime/Module::Implementation) im Log.
+
+pack.t: exit 9 fixed (END lacked local $?), warm start added, ScanDeps noise filtered in skeid pack. Container 17/17 ok; host prove -lr t/ PASS.
+
+Drift, not in scope: the pack holds Moose and Class::MOP (1141 modules, 12.7 MB), apparently pulled in by a dependency; Class::Load::XS is installed but not packed (the PP fallback is). Worth a look for pack size.
+
+2026-11-04 pack.t fixed, f36628f on local main (not pushed). Cause of exit 9: the END block reaped the SIGKILLed fake upstream with waitpid and no local $?, so $? stayed 9. Warm start was never measured; it is now. Container perl:5.40, PAR::Packer 1.064, AUTHOR_TESTING=1 prove -lv xt/author/pack.t: 17/17 ok, exit 0. 12.7 MB, cold 3.03 s, warm 0.96 s. ScanDeps noise (a parser false positive on 'use' inside string literals, plus runtime-loader notices) is filtered out of skeid pack's stderr, with the reason in a comment. prove -lr t/ 108 files / 6284 tests PASS. ADR 0030 Measured has the real numbers; it stays proposed for the maintainer. Possible follow-up: Moose/Class::MOP get into the pack (1141 modules); Class::Load::XS is not packed.
+
+2026-11-04 Leitstand abgenommen f36628f: Diff gelesen (local $? im END, Warmstart-Teil, open3-Filter genau zweier ScanDeps-Meldungen). Selbst gefahren: Host prove -lr -j8 t/ 108 Dateien 6284 Tests PASS; Wegwerf-Container perl:5.40 + PAR::Packer AUTHOR_TESTING=1 prove -lv xt/author/pack.t 17/17 ok, PROVE=0. Bleibt review bis zur Annahme ADR 0030 durch den Maintainer. Nicht gepusht.
