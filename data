@@ -1,0 +1,17 @@
+---
+claimed_at: 2026-09-25T21:24:38Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T21:24:38Z
+created: 2026-09-25T21:15:43Z
+id: 50
+priority: low
+started: 2026-09-25T21:24:38Z
+status: done
+tags:
+- security
+title: Admin key check is not constant-time
+updated: 2026-09-25T21:24:38Z
+---
+
+_authorize_admin (lib/Langertha/Skeid/Proxy.pm) compares the admin key with plain ne. Use a constant-time compare like the registry read-key check from #49.
