@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-09-29T17:32:57Z
+claimed_by: skeid-worker-examples
+class: standard
+completed: 2026-09-29T17:32:52Z
+created: 2026-09-29T17:06:30Z
+id: 63
+priority: medium
+started: 2026-09-29T17:10:34Z
+status: done
+tags:
+- examples
+- docs
+- usage
+title: 'examples/service: stale usage schema and customer keys nothing reads'
+updated: 2026-09-29T17:32:57Z
+---
+
+Found by the k61 audit. (1) examples/service/usage_schema.sql lacks requested_model, cached_tokens, cache_write_tokens, content_bytes, cost_cache_* that share/sql/usage_events.postgresql.sql has; prepare() heals it with auto_migrate, but the example is stale -- sync it with share/sql or drop it in favour of share/sql. (2) init-skeid.sh writes customer keys to secret/skeid/customer/<name> in OpenBao, but no Skeid code reads them (customer key id = digest of the presented key, ADR 0008/0011/0016); the example implies an auth that does not exist. Make the example show what Skeid actually does (names: section / keyid).
+
+More from the k60 README audit (compose stack): skeid service uses image tag :test while init uses :latest; SKEID_USAGE_DB is set to a PostgreSQL DSN but is a SQLite path variable; SKEID_REMOTE_KEY_REF is read by nothing; init never writes the groq key the sample node refers to; init job and healthcheck use psql and curl which the image may not install (init would wait for psql forever); BAO_DEV_ROOT_TOKEN probably should be BAO_DEV_ROOT_TOKEN_ID (unverified). Also examples/vast-start.sh prints http://0.0.0.0:0.0.0.0:8090/v1. README.md 'Service stack' section documents these caveats -- update it when fixing.
+
+2026-09-29 17:20 Also found (outside card scope, not fixed): (a) CONTEXT.md line ~156 still says SKEID_REMOTE_KEY_REF is 'kept for compatibility' -- no code reads it and the example no longer sets it; CONTEXT.md needs the mention dropped (this board). (b) prove -lr t/ fails in t/20-proxy-mapping.t, t/37-anthropic-builtin-tools.t, t/56-ollama-stream-tools.t: lib/Langertha/Skeid/Protocol/Anthropic.pm:193 calls Langertha::Tool->classify (since 6751909), which the installed Langertha 0.503 lacks -- yet cpanfile pins Langertha 0.503. Pin or code drift for skeid-protocol-worker / release-manager (this board). (c) the maintainer's local, untracked examples/service/.env has an OPENBAO_ROOT_TOKEN starting with 's.'; OpenBao docs say a dev root token id must not start with 's.'. (d) Found while fixing: the old skeid-keys policy granted secret/skeid/* -- with KV v2 every broker read goes to secret/data/skeid/..., so the policy would have denied every key read. Fixed in scope (policy now on secret/data/skeid/* + list on secret/metadata/skeid/*).
+
+2026-09-29 17:20 Done. Stack reworked so it works as written and shows only what Skeid does. usage_schema.sql deleted (Skeid's prepare applies share/sql on start; nothing else mounted it). init-skeid.sh now POSIX sh in the openbao image using the bao CLI: no curl/psql needed, bounded 60s wait, policy on KV v2 paths (old one would have denied reads), keys via stdin (api_key=-), stores SKEID_GROQ_KEY for the sample node, no customer keys, no schema; prints keyid hint. Compose: BAO_DEV_ROOT_TOKEN -> BAO_DEV_ROOT_TOKEN_ID (verified in OpenBao server docs + image entrypoint), dropped the no-op openbao file volume (dev mode is in-memory), skeid image ${SKEID_IMAGE:-...:latest}, dropped SKEID_USAGE_DB (sqlite-only, ignored with usage_store) and SKEID_REMOTE_KEY_REF (read by nothing), unused skeid-usage volume, healthcheck via perl HTTP::Tiny, POSTGRES_PASSWORD from .env for both services. vast-start.sh prints http://${SKEID_LISTEN}/v1. Docs: README Service stack section, examples/README.md, skeid-service-stack skill. Dockerfile untouched. Verified: bash -n + dash -n on both scripts, docker compose config -q (with .env.example, both profiles), YAML parse of skeid.yaml, healthcheck one-liner run. prove -lr t/ fails in 3 protocol tests unrelated to this card (see note).
+
+2026-09-29 17:32 Committed as 2ac34be
