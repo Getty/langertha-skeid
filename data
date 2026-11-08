@@ -1,0 +1,41 @@
+---
+claimed_at: 2026-10-14T04:08:04Z
+claimed_by: abbau
+class: standard
+completed: 2026-10-14T04:08:04Z
+created: 2026-10-06T19:40:11Z
+id: 106
+priority: medium
+started: 2026-10-14T03:53:41Z
+status: done
+tags:
+- bug
+- streaming
+- usage
+- sse
+- review-2026-10-06
+title: 'Stream relay reads only `data: ` with a space: an upstream that sends `data:{...}`
+  is metered as zero tokens, and the Anthropic/Ollama faces answer empty'
+updated: 2026-10-14T04:08:04Z
+---
+
+`_proxy_openai_stream` reads the upstream stream along with `next unless $line =~ /^data: (.+?)\s*$/;` (`lib/Langertha/Skeid/Proxy.pm:1941`). The SSE format makes the space after the colon optional, and servers that write `data:{...}` exist (Spring-based gateways, older TGI builds). Langertha core reads both (`^data:\s*(.*)$`, `langertha/lib/Langertha/Role/Chat.pm:1939`); Skeid skips every such line. Nothing fails, so nothing is logged:
+
+- **OpenAI face (relayed):** the bytes reach the client untouched, but no frame is parsed, so `$upstream_usage` stays undef and the usage event records `ok=1` with 0 input / 0 output tokens and no cost -- a served request that bills nothing (ADR 0004), the same outcome k30 fixed for another framing.
+- **Anthropic and Ollama faces (translated):** no delta ever reaches the translator, so the client gets a well-formed stream with no text in it, `ok=1`, zero tokens.
+
+**Reproduced** with a raw-socket upstream as in `t/39-upstream-sse-content-type.t`, once with `data: ` and once with `data:`:
+
+```
+space    /v1/chat/completions  status=200 client_text='Hello' event: ok=1 in=3 out=1
+space    /v1/messages          status=200 client_text='Hello' event: ok=1 in=3 out=1
+nospace  /v1/chat/completions  status=200 client_text='Hello' event: ok=1 in=0 out=0
+nospace  /v1/messages          status=200 client_text=''      event: ok=1 in=0 out=0
+```
+
+**Done when** the read-along accepts the field with or without the space (`/^data:\s?(.*)$/`, trailing `\r` stripped), a test beside t/39 pins both spellings on a relayed and a translated face (tokens metered, text delivered), and -- worth deciding in the same card -- a translated stream that ends with headers sent but not one parsed frame is recorded as failed rather than `ok=1`.
+
+---
+Fleet review 2026-10-06 · kind: bug · confidence: verified
+
+2026-10-14 03:53 Done: Pfad /home/getty/dev/langertha-skeid/.claude/worktrees/abbau, Branch skeid-abbau (von mcp-gateway), Commit 81c9124. Relay-Read-along akzeptiert data: mit/ohne Space und CRLF (Proxy.pm _proxy_openai_stream); t/39-upstream-sse-data-spacing.t (36 Tests) rot gegen altes lib/ (10 fail), grün neu; prove -lr t/ 5162 PASS. Offen: 'Stream ohne geparstes Frame = failed' NICHT umgesetzt. Empfehlung: ja, ok=0 wenn Header gesendet, aber kein Frame mit dekodierbarem JSON; eigener Fehlercode + Log mit Node-Id; leere Completion nicht als Fehler zählen. Entscheidung beim Koordinator.
