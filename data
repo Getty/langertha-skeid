@@ -1,0 +1,54 @@
+---
+class: standard
+completed: 2026-08-08
+created: 2026-08-08T14:24:37Z
+id: 12
+priority: high
+status: done
+tags:
+- routing
+- policy
+- feature
+title: 'Per-key routing policy: node tags, model aliases, tiers (ADR 0008)'
+updated: 2026-08-08T23:46:15Z
+---
+
+Implements ADR 0008. Order matters -- each step is useful on its own.
+
+1. Node tags. Add a tags field, resolve tag selectors to node-id lists at config load. This alone removes the per-request node-list scan and hash copy in _eligible_nodes.
+2. Model aliases + tiers. Client-facing name -> ordered tier list, each tier a tag selector plus its own wait_ms. Fall-through on failed admission, not failed eligibility.
+3. Policy profiles + default_policy + per-key exceptions, resolved once at config load into shared immutable objects. Keys not listed take the default, so N identical customers cost zero entries.
+4. Failure codes stay distinct: unknown alias 503, alias not granted 403, all permitted tiers saturated 429.
+
+Hard requirement with its own test: a tier a policy forbids must be INVISIBLE to eligibility for that key, not merely deprioritised. The test exists to prove data cannot reach an excluded cloud.
+
+Usage events must carry both the requested alias and the served model, or cost attribution breaks silently.
+Step 1 DONE: node tags. tags on nodes (normalized: lowercase, trim, dedupe, order-preserving, accepts list or 'a, b' string), select_nodes / nodes.select with AND semantics, tags argument on pick_node / route_state / route.next / route.state, tags part of the route key so selections do not share a round-robin cursor. Derived node lists cached, invalidated by a generation counter bumped on every inventory change (including a direct assignment through the nodes accessor, caught by a Moo trigger). t/24-node-tags.t, 31 assertions, verified to fail when the invalidation is removed.
+
+MEASURED, and the performance justification did NOT hold: at 8 nodes the cache makes no difference (127.3 vs 126.5 req/s, less than run-to-run spread). Only at 100 nodes is it visible (~4%: 127.5/126.5 vs 122.5). ADR 0008 corrected -- the cache is kept for tier fall-through and the policy layer, not because routing was slow.
+
+Remaining: step 2 (aliases + tiers), step 3 (policies + default_policy + per-key exceptions), step 4 (403/429/503 separation).
+Step 2 DONE: model aliases + tiers.
+
+set_model_alias / route_plan / alias.set / route.plan. An alias is an ordered list of tiers; each tier is a tag selector + the model to ask those nodes for + its own wait_ms (default 0) + optional engine. A model with no alias resolves to a single implicit tier on its own name with the global wait, so aliasless configs are byte-for-byte unchanged.
+
+_begin_route_async walks the plan: no eligible node in a tier -> skip immediately (waiting cannot conjure a node); eligible but unadmitted -> wait out that tier's window, then fall through; plan exhausted -> 503 if no tier was ever eligible, 429 if one was. Verified by timing in t/25: 4ms fall-through at wait_ms 0, 256ms at wait_ms 250, 3ms past a dead tier with a 5s window.
+
+Requested vs served model is now real: the upstream body carries the served model, the usage event carries both. requested_model added to both shipped schemas plus an ALTER-on-prepare migration in UsageStore::DBI, because CREATE TABLE IF NOT EXISTS does nothing to an existing table and the failure mode is silently missing billing data. Regression test in t/12 builds an old-schema table and upgrades it.
+
+Suite: 259 tests via dzil test.
+
+Remaining for this ticket: step 3 (policy profiles, default_policy, per-key exceptions, resolved-and-interned at config load) and step 4 (403 for an alias a key may not use). Note step 4 needs step 3 -- there is no per-key grant to check yet.
+Steps 3 and 4 DONE -- ticket complete.
+
+Policy profiles + default_policy + per-key exceptions, resolved once at config load. A key entry is a profile name, or a hash with 'policy' plus SPARSE overrides (absent field keeps the profile's value). Unlisted keys take default_policy, so N identically-configured customers cost zero entries. Identical resolutions are interned by fingerprint, so keys on one profile share one object (asserted via refaddr). Naming an undefined policy croaks at load -- failing open would hand out access.
+
+route_plan returns { tiers, permitted, reason }. permitted => 0 covers model_not_permitted and all_tiers_denied; both render 403 permission_error. Saturation of PERMITTED capacity stays 429 -- no fall-through to a denied node when the allowed ones are full, which is the failure the whole design exists to prevent.
+
+The hard requirement is met in both halves: deny_tags filters node SELECTION as well as dropping tiers from the plan. Tier-level only would have been theatre -- a key denied 'cloud' could reach a cloud node by asking for its raw model name instead of the alias.
+
+FOUND AND FIXED while testing it, a real hole this ticket would otherwise have left wide open: _request_api_key_id believed the client's x-skeid-key-id header. Until now that was 'only' invoice forgery; with policies it becomes 'pick your own permissions in one header line'. The id is now derived from the presented key (Langertha::Skeid->key_id_for_key), and the header is honoured only under routing.trust_key_id_header for deployments that authenticate in front of Skeid. New 'skeid keyid' CLI prints the id, because a config must be able to name a customer without holding their key.
+
+t/26-key-policies.t, 50 assertions, verified to fail under two separate sabotages: removing the node-level deny (5 failures) and always trusting the header (3 failures). Suite: 309 tests via dzil test.
+
+Docs: ADR 0008 status accepted/implemented + identity section, CONTEXT.md (Policy, Denied tag, Refusal, reworked Customer key ID), skeid-core and skeid-protocols skills, README, examples/service/skeid.yaml, init-skeid.sh, bench config, Changes.
