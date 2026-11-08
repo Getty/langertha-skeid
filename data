@@ -1,0 +1,22 @@
+---
+claimed_at: 2026-09-30T07:56:10Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-09-30T07:56:05Z
+created: 2026-09-30T07:52:36Z
+id: 86
+priority: low
+started: 2026-09-30T07:53:04Z
+status: done
+tags:
+- docs
+- adr
+title: 'ADR 0019: mark EV vs Poll with --workers 4 at c=64 as open'
+updated: 2026-09-30T07:56:10Z
+---
+
+Document as explicitly open, status stays proposed, no measurement.
+
+2026-09-30 07:54 ADR 0019: EV vs Poll --workers 4 c=64 marked open/unmeasured, status stays proposed; bench report already said open, unchanged.
+
+2026-09-30 07:56 Committed 512e2e0
