@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-09-30T03:34:41Z
+claimed_by: skeid-worker
+class: standard
+completed: 2026-09-30T03:34:36Z
+created: 2026-09-29T20:01:10Z
+depends_on:
+- 73
+id: 81
+priority: low
+started: 2026-09-30T03:29:58Z
+status: done
+tags:
+- core
+- usage
+- question
+title: A client abort counts as a node error in request.finish
+updated: 2026-09-30T03:34:41Z
+---
+
+k73 finishes an aborted request with ok => 0, which raises the node's error counter and errors_in_window in the registry snapshot, although the node did nothing wrong. Reported only, not used for admission today. Wanted: decide whether finish_request gets a third outcome (aborted) that is counted apart.
+
+2026-09-30 03:32 finish_request takes aborted => 1 (third outcome): counted as node_metrics.aborted, not error, not errors_in_window/last_failure_at. Proxy: the 4 client-abort finishes (JSON + stream, pre-forward gone) pass aborted. Usage event unchanged. t/61 extended; prove -lr t/ only the 3 known reds.
+
+2026-09-30 03:34 Committed as 82f3354
