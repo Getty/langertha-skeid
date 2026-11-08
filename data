@@ -1,0 +1,18 @@
+---
+claimed_at: 2026-09-25T18:06:07Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T18:06:07Z
+created: 2026-09-25T18:02:12Z
+id: 45
+priority: low
+started: 2026-09-25T18:06:07Z
+status: done
+tags:
+- docs
+- drift
+title: 'skeid-protocols skill: Ollama route table stale (stream 501, no /api/generate)'
+updated: 2026-09-25T18:06:07Z
+---
+
+Found in k43: .claude/skills/skeid-protocols/SKILL.md line 31 still says Ollama stream:true -> 501 (streaming is translated since the Ollama stream translator) and lists only /api/chat /api/tags /api/ps. /api/generate exists since k43. Also skeid-core SKILL.md line 17 names only /api/chat for Protocol::Ollama. Skill files may be hardlinked -- check manage-skills before editing.
