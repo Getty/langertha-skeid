@@ -1,0 +1,21 @@
+---
+claimed_at: 2026-08-11T04:20:10Z
+claimed_by: skeid-orchestrator
+class: standard
+completed: 2026-08-11T04:20:10Z
+created: 2026-08-08T04:28:11Z
+id: 8
+priority: low
+started: 2026-08-11T04:20:10Z
+status: done
+tags:
+- feature
+- protocols
+- adr
+title: Anthropic and Ollama streaming return 501
+updated: 2026-08-11T04:20:10Z
+---
+
+stream: true on /v1/messages and /api/chat is refused with 501. Implementing it means re-chunking OpenAI SSE deltas into Anthropic events / Ollama NDJSON and carrying the usage accumulator through the translation.
+
+ADR-sized: decide the seam before writing code (ADR 0001 explains why the current line is drawn where it is). Do not half-add it.
