@@ -1,0 +1,20 @@
+---
+claimed_at: 2026-09-25T08:09:35Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T08:09:35Z
+created: 2026-09-25T08:01:30Z
+id: 34
+priority: medium
+started: 2026-09-25T08:09:35Z
+status: done
+tags:
+- protocol
+- ollama
+- tools
+title: Ollama face passes client tool_calls arguments (object) upstream unchanged;
+  OpenAI upstream expects a JSON string
+updated: 2026-09-25T08:09:35Z
+---
+
+From skeid #33 audit: Protocol/Ollama.pm request_to_openai forwards messages as-is. Ollama's assistant message tool_calls[].function.arguments is an OBJECT, OpenAI chat/completions expects a string (and a tool message needs tool_call_id, which Ollama lacks). Translate: arguments object -> character JSON string (encode_json_text_safe), synthesize ids for assistant tool_calls and map following role=tool messages to them in order (Ollama tool messages carry tool_name). Tests with a mock upstream.
