@@ -1,0 +1,21 @@
+---
+claimed_at: 2026-09-25T18:26:41Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T18:26:41Z
+created: 2026-09-25T18:08:20Z
+id: 47
+priority: low
+started: 2026-09-25T18:26:41Z
+status: done
+tags:
+- protocol
+- ollama
+- drift
+title: 'Ollama face errors are OpenAI-shaped objects, Ollama sends {"error": "string"}'
+updated: 2026-09-25T18:26:41Z
+---
+
+Found in the skeid #44 type audit. /api/chat and /api/generate render route/admission/upstream errors via _render_error in the OpenAI envelope {error:{message,type}}. Ollama answers errors as {"error":"<message>"} (a string); the Go api client decodes StatusError.ErrorMessage as a string and a typed client fails on the object. Only the Invalid JSON body 400 in _handle_ollama is Ollama-shaped today. Fix mirrors core karr #224 for Anthropic: stash skeid.error_format => ollama on both routes, _render_error emits {error => $message}. t/54 currently pins $res->json->{error}{type} eq permission_error on /api/generate and must be changed deliberately.
+
+2026-09-25 18:25 Implemented on branch k47-ollama-errors, commit 0196967 (not pushed). /api/* under Ollama error marker, Ollama::Stream error_event. t/56 new, t/54 updated.
