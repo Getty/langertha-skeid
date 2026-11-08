@@ -1,0 +1,49 @@
+---
+claimed_at: 2026-08-11T22:52:01Z
+claimed_by: claude
+class: standard
+completed: 2026-08-11T22:52:01Z
+created: 2026-08-11T04:14:55Z
+id: 23
+priority: medium
+started: 2026-08-11T22:46:04Z
+status: done
+tags:
+- feature
+- protocols
+- streaming
+- karr-22-blocker
+title: Streamed tool_use in Anthropic::Stream
+updated: 2026-08-11T22:52:01Z
+---
+
+Anthropic::Stream currently does NOT honour streaming tool calls. finish_reason=tool_calls maps stop_reason to tool_use, but no tool_use block is emitted in the stream — so an Anthropic client doing real work (Claude Code, Cursor, anything that invokes tools) sees:
+
+1. message_start + content_block_start (type=text)
+2. deltas with text
+3. content_block_stop
+4. message_delta with stop_reason=tool_use
+5. message_stop
+
+No tool_use content block. stop_reason tool_use with empty content array. Clients cannot recover from this — they have to assume the model hung.
+
+The OpenAI stream-side is fine: tool_calls.id, tool_calls.function.name, tool_calls.function.arguments all arrive in pieces across deltas and the Anthropic mapping just has to emit them as the right Anthropic events at the right moments.
+
+Fix has three pieces:
+- Track a streaming tool_use block index (one Anthropic event stream can carry multiple tool_use blocks in parallel — common with agents that fan out a parallel search).
+- On the first delta that mentions a new tool_call id, emit content_block_start(type=tool_use, id=...toolu_xxx, name=...), opening a new content block.
+- On each subsequent delta with arguments for that id, emit content_block_delta(type=input_json_delta, partial_json=...).
+- On the final chunk, close the block with content_block_stop.
+
+Same fix is what Langertha already models for non-streaming responses (the Anthropic tool_use block has type, id, name, input); this is just expressing it through SSE events instead of a single JSON message.
+
+Precondition for karr #22 option B (t/34-agent-flow-tools.t). Land it first or in the same commit; agent-flow text-only (#22 option A) does NOT need it and can proceed regardless.
+
+Done-when:
+- Anthropic::Stream can carry a tool_call split across multiple deltas
+- the resulting Anthropic event sequence starts with content_block_start(type=tool_use) for every tool and ends each with content_block_stop
+- message_delta.usage.output_tokens covers the tool_use text plus any prose
+- the protocol worker's report on karr #8 covers this (their report will mention the gap; close it here)
+- prove -lr t/ green
+
+Why this is a separate ticket, not folded into #8: #8 is closing a stale-POD gap, this is a feature addition. Mixing them would conflate cleanup with new behaviour.
