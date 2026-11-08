@@ -1,0 +1,101 @@
+---
+claimed_at: 2026-09-15T17:32:23Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-15T17:32:23Z
+created: 2026-08-08T14:24:53Z
+id: 15
+priority: medium
+started: 2026-09-15T17:32:23Z
+status: done
+tags:
+- performance
+- usage
+title: Measure a remote usage store before building UsageStore::Buffered
+updated: 2026-09-15T17:32:23Z
+---
+
+Measured: jsonlog costs nothing (karr #10). NOT measured: a DBI backend against a real PostgreSQL over TCP, which is a round-trip on the request path and can hang or fail.
+
+Measure that first with bench/. Only if it costs real time, add a UsageStore::Buffered decorator around any store: bounded queue, flush on batch size or timer, flush on shutdown, JsonLog stays synchronous.
+
+Overflow policy must be drop-and-count-loudly. Silently dropping billing data under a sink outage is the worst possible failure. Note the trade against ADR 0004: a crash loses one event today, up to N with buffering -- that is a config decision, not a default.
+
+Separately and cheaply: when no usage store is configured at all, record_usage still builds the whole event before discovering there is no sink. Skip the work when disabled.
+
+2026-09-10 01:43 Cheap part DONE (commit 076c05d): record_usage now returns the not-configured result before building/normalising the event when there is no sink at all. _has_usage_sink counts a store_usage_event callback, a usage store object, OR a subclass _store_usage_event override (a documented extension, t/14), so the skip is coderef-gated and does not swallow that case. New t/17-usage-record-skip.t.
+
+UsageStore::Buffered NOT built, on purpose: this ticket is measurement-bound and the measurement it names -- a DBI backend against a real PostgreSQL over TCP -- was never taken. The 2026-08-15 bench round measured jsonlog only; the gateway-comparison report records that the bench config writes usage to no database store. jsonlog costs nothing (k10), so nothing on record justifies a bounded-buffer decorator. The heavier alternative (usage-WAL + separate writer process) exists only as an unadopted DRAFT spec, preserved in git stash 'skeid-wip-leiche-2026-09-10'. Leaving open: reopen the Buffered decision only after an actual remote-DBI-over-TCP measurement with bench/.
+
+2026-09-15 17:12 MEASURED (2026-09-15): DBI usage store vs a REAL PostgreSQL over TCP DOES cost measurable
+request-path time -- unlike jsonlog, which costs nothing (re-confirms k10). RECOMMENDATION:
+do NOT build UsageStore::Buffered on this evidence. Details below.
+
+SETUP
+- git 3457499 (working tree had an UNRELATED uncommitted diff in admission/worker code --
+  worker_count/_admission_divisor/_inflight_allows/reload_config; it does NOT touch
+  record_usage/_store_usage_event/the DBI store, so the usage path measured == HEAD).
+- PostgreSQL 16.15-alpine in podman, bound 127.0.0.1:5433, REAL durable defaults
+  fsync=on synchronous_commit=on full_page_writes=on. No OpenBao, no compose stack.
+- fakellm: taskset -c 1 bench/fakellm --port 18080 --ttft-ms 20 --tokens-per-second 1000 --tokens 64
+- llmbench: nice -n 19 ionice -c3 taskset -c 2,3 bench/llmbench --port <P> --requests 500 --concurrency 16 --tokens 64 [--stream] --json
+- proxy: taskset -c 0 perl -Ilib bin/skeid serve --listen 127.0.0.1:<P> --config <cfg>
+    jsonlog cfg  = usage_store{backend: jsonlog, mode: dir}
+    dbi cfg      = usage_store{backend: postgresql, host:127.0.0.1, port:5433, dbname:skeid}
+- workers=1 (single event loop). One llmbench run at a time. All 3000 requests ok, 0 failed;
+  postgres received exactly 1010 rows (500 measured + 5 warmup per mode).
+
+RAW per-INSERT cost over TCP (single persistent conn, prepare_cached, autocommit):
+  synchronous_commit=on : p50 1.47 / p95 1.73 / p99 1.87 ms   <- the fsync IS the cost
+  synchronous_commit=off: p50 0.12 / p95 0.14 / p99 0.19 ms   (~12x cheaper; TCP RTT ~0.12ms)
+
+JSON path, c=16, 500 req (non-streamed: TTFT == total latency):
+  target            req/s   p50     p95     p99
+  baseline direct   186.8   83.22   85.99   99.82
+  skeid jsonlog     124.3  118.59  156.43  192.70
+  skeid dbi-pg       89.7  170.90  205.56  208.27
+  DBI vs jsonlog:  req/s -34.6 (-27.8%) ; p50 +52.3ms ; p95 +49.1ms ; p99 +15.6ms
+
+STREAM path, c=16, 500 req (TTFT = time to first content byte):
+  target            req/s   TTFT p50  p95     p99     total p50
+  baseline direct   187.0   20.18    21.59   23.44   83.23
+  skeid jsonlog     108.3   64.17    93.63  105.32  144.34
+  skeid dbi-pg       87.8   68.24    87.26   99.33  179.87
+  DBI vs jsonlog:  req/s -20.5 (-18.9%) ; TTFT p50 +4.1ms ; TTFT p95/p99 unchanged (noise) ;
+                   total p50 +35.5ms
+
+MECHANISM / INTERPRETATION
+- The usage write runs AFTER request.finish (post-response), so it cannot delay the SAME
+  request's first token. Confirmed: streaming TTFT is essentially FLAT (+4ms p50, tail within
+  noise). The ticket's fear -- a request-path stall inflating TTFT -- did NOT materialise.
+- The cost is a THROUGHPUT-CEILING drop (-19% stream / -28% json) + total-latency rise
+  (+35..+52ms p50): each ~1.47ms synchronous fsync-insert blocks the single event loop and
+  serialises all in-flight requests behind it. Driver = WAL fsync, not the TCP round-trip.
+
+WHY NOT BUILD UsageStore::Buffered (drop-and-count-loudly, vs ADR 0004):
+1. jsonlog is the documented default and pays ~nothing; the cost is DBI-over-TCP's alone, an
+   opt-in blocking store (ADR 0004: "a store that can block must be opt-in").
+2. It is a throughput ceiling, not a TTFT stall -> recoverable by PREFORK (ADR 0010: 1->4
+   workers 128->170 req/s) which spreads the blocking write across N loops with ZERO durability
+   cost. (Gap: DBI+prefork NOT measured here.)
+3. Dominant cost is the per-commit fsync -- a postgres-side knob (synchronous_commit / group
+   commit), not a Skeid code problem.
+4. Buffered trades DURABLE BILLING DATA for latency: ADR 0004 accepts losing 1 event on crash;
+   buffering makes it up to N. Justified only by a concrete deployment that is pinned to
+   synchronous request-path postgres, cannot use jsonlog+out-of-band ingestion, has the
+   throughput ceiling as its real bottleneck AND cannot add workers, and signs off on the
+   crash-loss window. This measurement establishes none of those.
+
+NUMBER THAT WOULD FLIP IT: a real deployment forced onto synchronous request-path postgres
+where prefork+DB tuning cannot recover the throughput and the up-to-N crash-loss window is
+acceptable. Absent that, keep jsonlog default; ship events to postgres out-of-band.
+
+GAPS NOT MEASURED: single run per cell (no run-to-run variance; c=4 smoke agreed in
+direction); workers=1 only (DBI+prefork = the recovery path, unmeasured); loopback TCP only (a
+REMOTE/TLS postgres adds RTT to every blocking write -> makes DBI worse, strengthens "use
+jsonlog"); empty->1010-row table (no large hot-table index/autovacuum cost); no
+hang/connection-loss fault injection (a synchronous store that HANGS stalls the loop
+indefinitely -- a reliability argument for jsonlog, orthogonal to latency); concurrency swept
+at c=16 only.
+
+2026-09-15 17:32 Messung genommen (DBI-über-TCP vs jsonlog): kein TTFT-Stall, nur Durchsatz-Ceiling; Buffered NICHT gerechtfertigt. User-Freigabe 2026-09-15: schließen.
