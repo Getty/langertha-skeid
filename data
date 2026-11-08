@@ -1,0 +1,33 @@
+---
+block_reason: 'Entscheidung ausstehend: ändert die Bedeutung der Registry-Snapshot-Fehlerzahlen
+  (ADR)'
+blocked: true
+claimed_at: 2026-10-15T03:10:16Z
+claimed_by: abbau
+class: standard
+completed: 2026-10-15T03:10:16Z
+created: 2026-10-03T04:39:05Z
+id: 99
+priority: low
+started: 2026-10-14T03:55:44Z
+status: done
+tags:
+- core
+- design
+title: Client-caused 4xx count as node errors in request.finish and the registry snapshot
+updated: 2026-10-15T03:10:16Z
+---
+
+Noted while building the rerank route (k92), existing behaviour. request.finish is called with ok => 0 for every upstream 4xx, and since k92 for a request refused after admission (400, a document a TEI node cannot take). A failed request counts toward the node's error counter, errors_in_window and last_failure_at in the registry snapshot -- so a client that sends bad requests makes a healthy node look like a failing one to a fronting Skeid. A client abort is already counted apart (k81).
+
+Decide: whether a 4xx that is the client's to fix (400, 404, 413, 422; not 401/403/429, which say something about the node's key or capacity) should be a fourth outcome like `aborted`, counted apart and outside the error window. ADR-worthy: it changes what the registry snapshot's error numbers mean.
+
+2026-10-14 03:57 Empfehlung (nicht umgesetzt, ADR-pflichtig): ja, viertes Outcome neben ok/error/aborted, z.B. 'rejected': 400, 404, 413, 422 (client-verschuldet) zählen getrennt, nicht in error counter, errors_in_window und last_failure_at; 401/403/429 bleiben Node-Fehler (Key/Kapazität). Registry-Snapshot bekommt ein eigenes Feld, bestehende Felder behalten ihre Bedeutung; ADR zur geänderten Semantik, Abstimmung mit fronting-Skeid (Registry-Format ADR 0017, Versionsfeld).
+
+2026-10-15 01:31 ENTSCHEIDUNG Getty 2026-10-15: ja, viertes Outcome 'rejected' mit eigenem Snapshot-Feld, ADR dazu. Bauen.
+
+2026-10-15 01:48 Built: rejected outcome (400/404/413/422), snapshot field rejected_in_window (version stays 1, consumer ignores unknown node fields), ADR 0024, t/77. Awaiting full suite.
+
+2026-10-15 01:50 Done: rejected outcome in finish_request/Proxy (JSON, stream, unsendable refusal), snapshot field rejected_in_window (version 1), ADR 0024, Changes, CONTEXT, t/77 (red on old lib, green on new). Full suite 84 files/5315 tests; only t/69 pairing sum needed +rejected, fixed, green.
+
+Branch bau-a (Worktree .claude/worktrees/bau-a), Commit 9d8a7d6, lokal. Viertes Outcome 'rejected' (400/404/413/422; 401/403/429 bleiben Node-Fehler), Snapshot-Feld rejected_in_window, version bleibt 1, ADR 0024. t/77 neu (50 Tests, rot gegen HEAD-lib). Suite 87 Dateien/5575 Tests PASS. Folge in fronting-Skeid: Registry-Konsument liest nur bekannte Felder, kein Eingriff noetig.
