@@ -1,0 +1,21 @@
+---
+claimed_at: 2026-09-25T08:14:33Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T08:14:33Z
+created: 2026-09-25T08:07:28Z
+id: 36
+priority: low
+started: 2026-09-25T08:14:33Z
+status: done
+tags:
+- metering
+- streaming
+- cleanup
+title: content_bytes is computed but never consumed
+updated: 2026-09-25T08:14:33Z
+---
+
+Found while fixing skeid #35: Proxy.pm _proxy_openai_stream accumulates $accumulated_content_bytes and never reads it; both stream translators expose content_bytes via ->usage, which no caller in lib/ uses (only their POD). The POD claims it is "the fallback when an upstream never reports token counts", but no usage event falls back to it. Decide: wire it into the usage event as the documented fallback (a new field? ADR 0004 usage-event contract), or delete the counter and the third usage() return value. Counting is UTF-8 bytes since #35.
+
+2026-09-25 08:14 Wired as optional content_bytes on streamed usage events (all faces), DBI nullable column, ADR 0004 Update; commit on branch k36-content-bytes
