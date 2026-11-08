@@ -1,0 +1,21 @@
+---
+class: standard
+completed: 2026-08-08
+created: 2026-08-08T04:28:01Z
+id: 6
+priority: medium
+status: done
+tags:
+- bug
+- examples
+- openbao
+title: 'compose: skeid-init root token does not match the OpenBao dev root token'
+updated: 2026-08-08T04:43:12Z
+---
+
+docker-compose.yml sets BAO_DEV_ROOT_TOKEN: s.UdctACbMos6qGU3a9v1oeiTB on the openbao service, but the skeid-init service passes OPENBAO_ROOT_TOKEN: skeid-root-token, which init-skeid.sh exports as BAO_TOKEN for every setup call. The two disagree, so the init container authenticates with a token that does not exist.
+
+init-skeid.sh masks it with `|| true` on several curls, so it can appear to succeed while creating nothing.
+
+Fix: one source for the dev root token, referenced by both services.
+Fixed: both services now read OPENBAO_ROOT_TOKEN from the same compose variable.
