@@ -1,0 +1,20 @@
+---
+claimed_at: 2026-09-09T06:40:24Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-09T06:40:24Z
+created: 2026-08-09T04:13:43Z
+id: 21
+priority: low
+started: 2026-09-09T06:40:24Z
+status: done
+tags:
+- usage
+- performance
+- ops
+- docs
+title: Confirm traffic logging story covers fast+safe -- jsonlog dir mode is the answer
+updated: 2026-09-09T06:40:24Z
+---
+
+2026-09-09 06:40 Duplikat von k20 (identischer Titel, leerer Body, 3 Minuten nach k20 angelegt). Die aktionierbare Substanz lebt vollstaendig in k20 (Traffic-Logging-Story, jsonlog directory mode, opt-in fsync-Flag, README- und Compose-Doku). Als Duplikat geschlossen; k20 bleibt der getrackte Vorgang.
