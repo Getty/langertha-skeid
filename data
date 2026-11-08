@@ -1,0 +1,21 @@
+---
+claimed_at: 2026-09-25T18:18:14Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T18:18:14Z
+created: 2026-09-25T18:02:07Z
+id: 44
+priority: low
+started: 2026-09-25T18:18:14Z
+status: done
+tags:
+- protocol
+- ollama
+- drift
+title: Ollama /api/chat non-stream answers done as number 1, not JSON true
+updated: 2026-09-25T18:18:14Z
+---
+
+Found in k43: Protocol::Ollama::response_from_openai sets done => 1, so /api/chat non-stream sends "done":1. Ollama sends a JSON boolean; typed clients (Go, Rust serde) may reject a number. The stream translator and the new /api/generate use \1 (true). Fix: done => \1, assert ref($json->{done}) in t/34.
+
+2026-09-25 18:16 Fixed in 3fb8901 on branch k44-46 (done => \1); t/34 raw-body type audit of chat/generate/stream/tags/ps. Error envelope drift split to k47.
