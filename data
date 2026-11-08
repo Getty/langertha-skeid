@@ -1,0 +1,26 @@
+---
+claimed_at: 2026-09-29T17:36:08Z
+claimed_by: skeid-worker-cli
+class: standard
+completed: 2026-09-29T17:36:04Z
+created: 2026-09-29T17:15:05Z
+id: 69
+priority: medium
+started: 2026-09-29T17:15:38Z
+status: done
+tags:
+- bug
+- cli
+- usage
+title: 'skeid usage on a jsonlog store: numeric warning, garbled event id, Store:
+  (none); no CLI way to name a jsonlog store'
+updated: 2026-09-29T17:36:08Z
+---
+
+Found by the k59 POD audit (verified): skeid usage against a jsonlog usage store prints a numeric warning, a garbled event id and 'Store: (none)'. Also skeid usage cannot name a jsonlog store from the command line (only via config). Fix the report path and add the option; test with a jsonlog fixture.
+
+2026-09-29 17:23 Cause: bin/skeid printed recent ids with %d (jsonlog id is a string: '20260929-...' -> numeric warning + truncated id), Store label only knew sqlite/postgresql, no CLI option built a jsonlog store. Fix: %s for id, JsonLog report carries log_path and CLI labels it, new --log-path|--jsonlog (implies backend jsonlog, mode inferred as in normalize_config). Test t/59-cli-usage-jsonlog.t.
+
+2026-09-29 17:27 Done. bin/skeid usage: recent ids printed with %s (jsonlog id is a string -> was numeric warning + truncated id); Store line names the jsonlog path (JsonLog report now carries log_path, documented in the UsageStore contract); new --log-path|--jsonlog PATH builds a jsonlog store (implies backend jsonlog; dir vs file inferred as in normalize_config), --backend now documents jsonlog. POD: bin/skeid synopsis/usage/options, UsageStore contract. README Reports + CLI sections. Test t/59-cli-usage-jsonlog.t (dir via --log-path/--jsonlog/--backend, file mode, via --config; runs bin/skeid -w); red at HEAD verified (all three reported symptoms reproduced). Full suite: Files=61, Tests=3192, PASS.
+
+2026-09-29 17:36 Committed as 9ff745a
