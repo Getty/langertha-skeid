@@ -1,0 +1,19 @@
+---
+claimed_at: 2026-09-25T18:03:08Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T18:03:08Z
+created: 2026-09-25T17:49:20Z
+id: 43
+priority: low
+started: 2026-09-25T18:03:08Z
+status: done
+tags:
+- protocol
+- ollama
+- vision
+title: Ollama /api/generate face (with request-level images)
+updated: 2026-09-25T18:03:08Z
+---
+
+Found during k42: skeid serves no POST /api/generate at all (routes: /api/chat, /api/tags, /api/ps). k42 asked for /api/generate request-level images to become image_url data URLs "likewise"; that needs the route first: prompt/system/images -> one user message (+ system), response as {response, done, ...} NDJSON (not message), plus a manifest decision (the ollama endpoint already claims the root). Helpers exist: Langertha::Skeid::Protocol::image_url_part / image_media_type (magic-byte sniff). Also open: images inside an Anthropic tool_result content array are JSON-stringified into the tool message text (OpenAI tool messages take no image parts) -- decide whether to lift them into a following user message.
