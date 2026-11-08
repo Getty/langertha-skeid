@@ -1,0 +1,19 @@
+---
+claimed_at: 2026-09-25T17:49:50Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T17:49:50Z
+created: 2026-09-25T17:44:19Z
+id: 42
+priority: medium
+started: 2026-09-25T17:49:50Z
+status: done
+tags:
+- vision
+- protocol
+- manifest
+title: Images through the Anthropic/Ollama faces + image_input in the per-key manifest
+updated: 2026-09-25T17:49:50Z
+---
+
+Core k266 adds image_input (model-scoped) to Manifest::Builder's allowlist; skeid's per-face capability lists (#29 I3) don't include it, so a config can't publish vision. First verify each face carries images upstream (skeid talks OpenAI-shaped upstream): OpenAI face relays raw (ok); Anthropic face image blocks (base64/url source) -> OpenAI image_url parts (data URL / url); Ollama face message.images (raw base64) -> image_url data URLs with sniffed media type. Fix translation where missing, then list image_input on faces that carry images. Tests per face (translation shape + manifest publishes image_input only where carried).
