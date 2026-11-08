@@ -1,0 +1,22 @@
+---
+claimed_at: 2026-09-30T03:49:00Z
+claimed_by: skeid-protocol-worker
+class: standard
+completed: 2026-09-30T03:49:00Z
+created: 2026-09-30T03:29:40Z
+id: 83
+priority: low
+started: 2026-09-30T03:35:03Z
+status: done
+tags:
+- proxy
+- protocols
+title: Anthropic handler appends the translator's exception text to its 400 answer
+updated: 2026-09-30T03:49:00Z
+---
+
+_handle_anthropic sends `Invalid request: $msg` to the client. k82 deliberately uses a fixed text in _handle_ollama, because the exception text can quote request content (see k75). Wanted: a red test first, then the fixed text in the Anthropic handler as well.
+
+2026-09-30 03:46 Anthropic handler answers fixed 'Invalid request' unless the translator threw a Protocol::Refusal (deliberate, worded refusals keep their message; t/37 and Anthropic POD assert that text). New t/64 (red before: exception text in answer). Full suite: only known-red 20/37/56 plus t/57 flaking under memory pressure (passes alone). Doc mention for maintainers: skeid-protocols skill unaffected.
+
+2026-09-30 03:48 Committed as a94a443
