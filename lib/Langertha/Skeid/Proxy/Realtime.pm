@@ -12,7 +12,7 @@ use namespace::clean;
 
 =head1 DESCRIPTION
 
-The relay of the realtime route (skeid k95, ADR 0029). C<Langertha::Skeid::Proxy> answers the
+The relay of the realtime route (ADR 0029). C<Langertha::Skeid::Proxy> answers the
 handshake -- the client gate, the model, routing, admission, the node's key, the upstream
 WebSocket, the upgrade -- and then hands both open WebSockets to L</start_session>. From there a
 B<session> is two transactions, the client's and the node's, and this module is everything that

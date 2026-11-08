@@ -235,7 +235,7 @@ node says. See L<Langertha::Skeid/Pluggable Usage Storage>.
 =head2 Documents routes
 
 C<POST /v1/convert/file> and C<POST /v1/convert/source> are the synchronous calls of docling-serve
-under its own paths (skeid k94, ADR 0028), so a docling client only changes its base URL. They
+under its own paths (ADR 0028), so a docling client only changes its base URL. They
 are relayed like the audio routes: the multipart form goes upstream part for part, a source body
 (JSON, files as base64) is decoded once and written again, and the node's answer -- JSON, or a
 zip when several documents or outputs come back -- is relayed byte for byte, whatever its
@@ -265,7 +265,7 @@ nothing priced. See L<Langertha::Skeid::Protocol::Documents>.
 
 =head2 MCP routes
 
-The MCP gateway (skeid k103, ADR 0022): a customer reaches the MCP servers the config assigned
+The MCP gateway (ADR 0022): a customer reaches the MCP servers the config assigned
 to its key (L<Langertha::Skeid/mcp>) with that key, one route per server. Skeid relays MCP's
 Streamable HTTP transport and reads none of it -- no JSON-RPC, no tool list, no session. What it
 knows of the wire is in L<Langertha::Skeid::Protocol::MCP>.

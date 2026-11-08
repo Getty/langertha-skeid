@@ -26,7 +26,7 @@ another (L<Langertha::Skeid/customer_source_fetcher>). It runs
 L<Langertha::Skeid::CustomerSource/statement> through plain, blocking L<DBI> and
 L<DBD::Pg> -- B<in a child process> (L<Mojo::IOLoop/subprocess>), never on the event loop:
 DBD::Pg has no non-blocking connect, and a connect that blocks the loop stalls every stream in
-flight in the worker for up to C<connect_timeout_s> (ADR 0026, k109). The parent sees only the
+flight in the worker for up to C<connect_timeout_s> (ADR 0026). The parent sees only the
 finished rows, or an error.
 
 Each fetch forks a child that connects, runs the statement, disconnects and returns the rows.

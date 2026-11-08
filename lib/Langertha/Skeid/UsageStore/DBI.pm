@@ -33,8 +33,7 @@ event and answers at once, and a L<Mojo::IOLoop> timer writes the queue in one t
 request is answered without waiting for the database, and a burst of events costs one commit
 instead of one each. The flush itself is still a synchronous database call on the loop -- it
 runs once per interval instead of once per request, it is not off the loop. The price is a wider
-loss window: events still queued when the process dies without a flush are lost (ADR 0005,
-Update skeid k78). Off by default.
+loss window: events still queued when the process dies without a flush are lost (ADR 0005). Off by default.
 
 C<spool_dir> keeps the events the database cannot take while it is down: they are appended to a
 local file instead of being reported lost, and written once the database answers again (see

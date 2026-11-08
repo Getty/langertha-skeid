@@ -259,7 +259,7 @@ through the same loader. The top-level keys below are every one Skeid reads -- a
 the file is ignored. A reload is all or nothing: a config that fails anywhere leaves the previous
 one in force, and is reported by L</reload_status>.
 
-A reload makes the running config equal to the file (skeid k65), as a restart with that file
+A reload makes the running config equal to the file, as a restart with that file
 would:
 
 =over 4
@@ -426,7 +426,7 @@ warning.
   client_auth:
     keys: [shared, k_9c8b7a6f5e4de5f60718293a4b5c6d7e8f901a2b]
 
-Client authentication (skeid k90), for a Skeid that is itself the public entry rather than
+Client authentication, for a Skeid that is itself the public entry rather than
 sitting behind a gateway that authenticates. With the section, the client routes -- C</v1/*>,
 C</api/*> and the provider manifest -- answer C<401> to a request without a key or with a key
 whose id is not on the list, before anything is routed, forwarded or metered; C</health> and
@@ -625,7 +625,7 @@ absolute path.
         description: Files on your own machine
         keys: [alice]
 
-The MCP gateway (skeid k103, ADR 0022): MCP servers assigned to customer key ids. A key reaches
+The MCP gateway (ADR 0022): MCP servers assigned to customer key ids. A key reaches
 a server assigned to it under C</mcp/E<lt>nameE<gt>> with its own Skeid key, and
 C</v1/mcp/servers> lists what it was assigned; see L<Langertha::Skeid::Proxy/MCP routes>.
 Without the section both routes are unknown paths, as before.
@@ -688,8 +688,7 @@ The defaults come from L</ENVIRONMENT> when set there.
   admin:
     api_key_env: SKEID_ADMIN_API_KEY   # or api_key: "..."
 
-The key for the C</skeid/*> admin API. It comes from the first of these that has one
-(skeid k64):
+The key for the C</skeid/*> admin API. It comes from the first of these that has one:
 
 =over 4
 

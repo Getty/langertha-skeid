@@ -77,7 +77,7 @@ array (image parts) gets it as a text part of its own.
 A later system message is never moved into the leading one: that would change the start of the
 prompt on every turn and with it the node's prefix cache. A request without a system message in
 C<messages> is translated exactly as before. An empty top-level C<system> (C<"">) is dropped
-like an empty block array: no empty system message goes upstream (k101).
+like an empty block array: no empty system message goes upstream.
 
 Content block arrays
 fold to text, unless a user message carries an C<image> block: then its text and image blocks
