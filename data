@@ -1,0 +1,19 @@
+---
+claimed_at: 2026-09-25T16:49:40Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T16:49:40Z
+created: 2026-09-25T16:38:57Z
+id: 41
+priority: high
+started: 2026-09-25T16:49:40Z
+status: done
+tags:
+- pricing
+- usage
+- streaming
+title: 'Streamed requests are not priced: usage event cost is 0'
+updated: 2026-09-25T16:49:40Z
+---
+
+Found during skeid #28. _proxy_openai_stream records metrics = { usage => $accumulated_usage } without running metrics.normalize, and record_usage only copies cost fields out of metrics, so every streamed usage event has cost_input/output/total_usd (and the new cost_cache_*_usd) = 0 regardless of model_pricing. Verified: usage.record with a stream-shaped metrics hash and pricing 3/15 per million stores cost_total_usd 0. Fix: keep the provider-verbatim usage block from the final SSE usage frame (not only the normalized input/output/total/cached sums), price it through metrics.normalize / Langertha::Usage->from_hash + Pricing like the non-streaming path, including cache rates. Related: the event records no cache_write_tokens count (only its cost); consider adding it as a nullable column the ADR 0013 way. Done when: a streamed request through the proxy with pricing set stores the same cost as the same usage non-streamed (test on both paths).
