@@ -1,0 +1,21 @@
+---
+claimed_at: 2026-09-25T16:41:23Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T16:41:23Z
+created: 2026-09-15T18:02:59Z
+id: 28
+priority: medium
+started: 2026-09-25T16:41:23Z
+status: done
+tags:
+- pricing
+- langertha
+title: 'Cache-aware pricing: discount cached_tokens once Langertha::Pricing models
+  a cache rate'
+updated: 2026-09-25T16:41:23Z
+---
+
+cached_tokens is recorded per usage event since k27 (ADR 0013), but cost_*_usd still bills cached tokens at the normal input rate. Correct billing needs Langertha::Pricing->cost_for to model a cache-discount rate (and ideally Langertha::Usage to expose the count so it can be priced from the normalized path instead of the raw payload). Until that lands upstream, Skeid must not invent a discount of its own. Done-when: Langertha::Pricing models a cache rate; Skeid prices cached_tokens at it; a test proves the stored cost reflects the discount. Builds on the recorded count from k27.
+
+2026-09-25 16:40 Implemented on branch k28-cache-pricing (8574eca); streaming events unpriced -> #41
