@@ -1,0 +1,18 @@
+---
+claimed_at: 2026-09-25T21:15:36Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T21:15:36Z
+created: 2026-09-25T20:36:32Z
+id: 49
+priority: medium
+started: 2026-09-25T21:06:30Z
+status: done
+tags:
+- security
+- registry
+title: 'Registry snapshot: read-only credential instead of downstream admin key'
+updated: 2026-09-25T21:15:36Z
+---
+
+From #18 review (I2): the fronting tier polls GET /skeid/registry/snapshot with the downstream admin key, which is write-capable (all admin routes). Add a dedicated read-only scope/credential (e.g. SKEID_REGISTRY_READ_KEY or key scope "registry:read") that only authorizes the snapshot route; admin key keeps working for compat. Update ADR 0017.
