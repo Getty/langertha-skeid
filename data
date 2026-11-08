@@ -1,0 +1,20 @@
+---
+claimed_at: 2026-09-25T08:01:25Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T08:01:25Z
+created: 2026-09-25T07:57:06Z
+id: 33
+priority: medium
+started: 2026-09-25T08:01:25Z
+status: done
+tags:
+- protocol
+- anthropic
+- encoding
+title: 'encode_json_safe produces bytes for nested JSON strings: non-ASCII tool args/results
+  double-encoded upstream (core k252 pattern)'
+updated: 2026-09-25T08:01:25Z
+---
+
+From core k252: Langertha::Skeid::Protocol::encode_json_safe uses byte-producing encode_json; Protocol/Anthropic.pm request_to_openai uses it for tool_use.input -> function.arguments (~95) and tool_result content (~110); the whole body is encoded again when sent upstream, so Köln arrives as KÃ¶ln. Fix: a character-string encoder for nested JSON (JSON::MaybeXS->new(utf8=>0, canonical=>1)); keep byte encoding for whole SSE lines (Anthropic/Stream.pm, Ollama/Stream.pm). Tests with Köln/東京/emoji through request_to_openai and a mock upstream.
