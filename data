@@ -1,0 +1,22 @@
+---
+claimed_at: 2026-09-29T20:00:59Z
+claimed_by: skeid-worker-docker
+class: standard
+completed: 2026-09-30T02:49:04Z
+created: 2026-09-29T19:37:50Z
+id: 76
+priority: low
+started: 2026-09-29T19:38:38Z
+status: done
+tags:
+- docker
+- service-stack
+title: Docker image runs as root, keeps the compiler, installs DBI/DBD::Pg unpinned
+updated: 2026-09-30T02:49:04Z
+---
+
+Dockerfile: no USER, build-essential stays in the final image, 'cpanm --notest DBI DBD::Pg' runs after the cpanfile install without versions. Wanted: unprivileged user, build tools not in the runtime image (multi-stage or purge), DBI/DBD::Pg through the cpanfile pins. The compose stack in examples/service must keep working (volumes, /etc/skeid/skeid.yaml, jsonlog directory ownership).
+
+Commit-ready in /home/getty/dev/langertha-skeid/.claude/worktrees/agent-af616f171e1137657. Multi-stage, uid 10001, recommends through cpm. Built and run once (239MB, /health 200, uid 10001) with --with-recommends; the committed flag is --top-level-relationship requires,recommends, checked in the build stage but NOT rebuilt end to end. Build needed LANGERTHA_SRC (0.503 not on CPAN) and DOCKER_BUILDKIT=0 on this box.
+
+2026-09-30 02:48 Committed as 831e3a5
