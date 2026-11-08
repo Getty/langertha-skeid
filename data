@@ -1,0 +1,20 @@
+---
+class: standard
+completed: 2026-08-08
+created: 2026-08-08T04:27:19Z
+id: 2
+priority: high
+status: done
+tags:
+- bug
+- release
+- cpanfile
+title: cpanfile is missing runtime dependencies (namespace::clean, File::ShareDir,
+  HTTP::Tiny)
+updated: 2026-08-08T04:43:02Z
+---
+
+lib/Langertha/Skeid.pm uses File::ShareDir; lib/Langertha/Skeid/KeyBroker/OpenBao.pm uses namespace::clean and HTTP::Tiny. None are declared in cpanfile. namespace::clean and File::ShareDir are not core, so a clean-perl install of the tarball fails at runtime, not at install time.
+
+Fix: declare them. Then grep every use statement in lib/ and bin/ against the cpanfile rather than trusting it.
+Fixed: File::ShareDir, namespace::clean, HTTP::Tiny declared in cpanfile.
