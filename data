@@ -1,0 +1,34 @@
+---
+class: standard
+created: 2026-11-06T15:48:33Z
+id: 113
+priority: low
+status: backlog
+tags:
+- idea
+- parked
+- budget
+- kubernetes
+title: 'Idee (geparkt): Budget-Limit in der Config + Skeid als Drop-in vor OpenAI/Anthropic
+  im Kubernetes'
+updated: 2026-11-06T15:48:33Z
+---
+
+Geparkt am 2026-11-06 auf Wunsch des Maintainers. Noch NICHT durchgesprochen, nichts davon ist beschlossen. Weiter mit einer Brainstorming-Runde, erst danach Design und Plan.
+
+## Wunsch des Maintainers (seine Worte, sinngemäß)
+- In der Konfiguration ganz einfach ein Budget-Limit setzen können.
+- Die großen Plattformen unterstützen (platform.openai.com, platform.claude.com).
+- Vielleicht Infos/Helfer im Package, wie man Kubernetes so umbiegt, dass die Provider-API über Skeid läuft ("OpenAI kapern").
+
+## Arbeitsthese (Vermutung des Agenten, nicht bestätigt)
+Apps im Cluster meinen, sie reden mit api.openai.com / api.anthropic.com, laufen aber über Skeid. Skeid zählt die Kosten und stoppt beim Budget, wie das Spend-Limit der Provider-Konsolen, aber providerübergreifend und unter eigener Kontrolle. Wahrscheinlich zwei Teile: (1) Budget in der Config, (2) Drop-in im Cluster samt Kubernetes-Anleitung.
+
+## Befunde (Stand 0.004 / main)
+- Kein Budget- oder Ausgabenzähler vorhanden. pricing gibt es, Default '*' = 0, keine mitgelieferte Preisliste für OpenAI/Anthropic.
+- Routen heute: /v1/models, /v1/chat/completions, /v1/embeddings, Audio, Rerank, Documents, Realtime, /v1/messages, Ollama, MCP. Es fehlen /v1/responses (vom aktuellen OpenAI-SDK bevorzugt), Files, Batches, Images, /v1/messages/count_tokens. Ein transparenter Drop-in würde Apps brechen, die diese nutzen.
+- Kubernetes: am einfachsten OPENAI_BASE_URL / ANTHROPIC_BASE_URL in die Pods injizieren (offizielle SDKs lesen das). Echte DNS-Umleitung von api.openai.com braucht eine eigene CA, der jeder Pod vertraut.
+- Verwandt: das Docker-Image startet ohne gemountete /etc/skeid/skeid.yaml gar nicht (Exit 2). Ein "einfach starten"-Modus könnte Teil davon werden.
+
+## Offene erste Frage
+Was läuft im Kubernetes, das heute direkt mit OpenAI redet und eingefangen werden soll? Danach: wem gehört das Budget (App/Team oder Kunde), und was passiert, wenn es leer ist?
