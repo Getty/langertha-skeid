@@ -1,0 +1,26 @@
+---
+claimed_at: 2026-09-29T17:43:56Z
+claimed_by: skeid-worker-dbi
+class: standard
+completed: 2026-09-29T17:43:56Z
+created: 2026-09-29T17:27:52Z
+id: 71
+priority: high
+started: 2026-09-29T17:38:55Z
+status: done
+tags:
+- bug
+- usage
+- billing
+- dbi
+title: DBI usage store keeps a dead PostgreSQL handle after the connection drops
+updated: 2026-09-29T17:43:56Z
+---
+
+Found while fixing k70: if the PostgreSQL connection drops, UsageStore::DBI keeps using the dead handle, so every later usage event is lost until restart (now at least logged at error level since k70). Reconnect (ping / connect_cached / reconnect on failure, once per event, without blocking the loop longer than today's synchronous write -- ADR 0005 already accepts DBI writes as synchronous). Test with SQLite by closing the handle under the store.
+
+2026-09-29 17:40 Cause: UsageStore::DBI->dbh caches the handle in _dbh and returns it forever; nothing checks it after a failed statement, so a dropped connection makes every later store/report fail on the dead handle until restart. Plan: store/report run through one helper -- on failure, check the handle (Active + ping, only on the failure path); dead -> drop it, connect once, retry that one call once; live -> report the error as before (the k70 DROP TABLE case must not reconnect). No schema re-prepare on reconnect: prepare runs at configure time and croaks if it cannot connect, so a store in service always has its table; a dropped connection does not drop tables. Test first: t/60-usage-dbi-reconnect.t (SQLite, handle disconnected under the store; reconnect failure via mocked DBI::connect).
+
+2026-09-29 17:43 Done, not committed. Fix: UsageStore::DBI store/report now go through _with_handle. When a statement fails, it checks the handle (Active, then ping, and only after a failure, so a healthy write costs nothing extra). If the handle is dead: disconnect, connect once, retry that one call once, and keep the new handle for later events. If the handle is live, the error is reported with no reconnect, so k70's DROP TABLE case is unchanged. A failed reconnect gives { ok => 0, error => 'usage database connection lost, reconnect failed: ...' }, masked by _error_text as before. The next event tries to connect again, so the store recovers once the database is back. No loop, no wait. The schema is not re-applied on reconnect: prepare runs at configure time and croaks if it cannot connect. Known corner, documented in POD: if the connection drops after the server committed the insert but before it answered, the retry can write the event twice (same request_id); the alternative was losing the event. Tests: new t/60-usage-dbi-reconnect.t (23 tests: SQLite handle disconnected under the store, then store and report; live-handle failure not retried; DBI::connect mocked to die with a password in the DSN: exactly one attempt, clean error, no die, recovery after). It failed on the old store (tests 2-4 failed, then it died) and passes with the fix. nice -n 19 prove -lr -I/home/getty/dev/langertha/lib t/ -> Files=62, Tests=3215, Result: PASS. Docs: DBI.pm POD (store, report, disconnect) and one README sentence in 'Usage and billing'. Proposed subject: 'Reconnect a DBI usage store whose connection dropped (skeid k71)'.
+
+2026-09-29 17:43 Committed as 846e2b7
