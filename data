@@ -1,0 +1,23 @@
+---
+claimed_at: 2026-09-10T01:53:50Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-10T01:53:50Z
+created: 2026-09-10T01:43:31Z
+id: 26
+priority: medium
+started: 2026-09-10T01:53:50Z
+status: done
+tags:
+- bug
+- protocols
+- translation
+title: Non-streamed /v1/messages and /api/chat return empty content
+updated: 2026-09-10T01:53:50Z
+---
+
+The non-streaming translation path passes the Mojo::Message::Response object (the $res handed to the _proxy_openai_json_async callback in Proxy.pm) straight to Protocol::Anthropic->response_from_openai / Protocol::Ollama->response_from_openai, which read it as a decoded hashref ($res->{choices}, ...). Every field reads undef, so a non-streamed Anthropic or Ollama request returns status 200 with a well-formed envelope but no content and zero tokens. Streaming is unaffected (separate Stream path).
+
+A ready end-to-end test that pins this (t/34-json-translation.t, both Anthropic and Ollama non-stream cases) is sitting unadopted in git stash "skeid-wip-leiche-2026-09-10", together with the rest of the 2026-08-15 benchmark/optimization WIP. Fix: decode the upstream body once and hand the hashref to response_from_openai (t/20 already proves response_from_openai is correct given a hashref); then adopt t/34. Found while triaging that WIP; only t/34 (untracked, stashed) exercised it, so committed HEAD is green without the fix.
+
+2026-09-10 01:53 Fixed on migrated HEAD: _proxy_openai_json_async now passes the decoded upstream body as a 4th callback arg; Anthropic/Ollama translation sites consume the hashref, OpenAI passthrough keeps raw $res. Adopted stashed t/34 (14 tests). Commit b565505.
