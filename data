@@ -1,0 +1,47 @@
+---
+class: standard
+created: 2026-11-05T23:41:17Z
+id: 118
+priority: high
+status: backlog
+tags:
+- filter
+- pii
+- architecture
+- downstream
+title: 'Filter seam: extract request texts, ask a filter, substitute into JSON strings,
+  translate the answer back (incl. SSE and tool-call arguments)'
+updated: 2026-11-08T00:49:10Z
+---
+
+Why: a deployment wants a privacy filter (PII) on any Skeid layer it runs (edge, per-org, GPU-side, sidecars). Decision by the maintainer (2026-11-05). Keep Skeid generic: Skeid knows texts, spans and placeholders, not PII. The deployment keeps its own design notes.
+
+Scope:
+1. ADR (new): for a request the filter handled, the body goes upstream re-encoded with only JSON string values replaced. This is an exception to ADR 0023 (bytes as the client spelled them), scoped to filtered requests. Key order is kept by substituting into the original bytes at the string-token offsets, not by decode/encode.
+2. Contract (versioned, like ADR 0030):
+   - filter_request_p($ctx) on the Skeid class, default no-op. $ctx holds the face, the route, node.tags, the customer key id, the configured organization, the incoming mark header, and texts[{id: json-path, text}].
+   - It returns { decision: pass|replace|local|refuse, texts, map[{text,start,end,placeholder}], headers{}, usage{} }.
+   - It runs after the node pick. local re-plans with the denied tag (cloud) or answers 503 with the documented message.
+   - Shipped implementation Langertha::Skeid::Filter::HTTP, config filter: { url, token_env, timeout_ms, when: [tags], organization, pass_headers }. Every non-200, a timeout or bad JSON means refuse (fail-closed).
+3. Texts are extracted per face:
+   - chat: messages[].content (string and text parts), name, tool results, string values inside tool_calls[].function.arguments, system;
+   - embeddings: input.
+   Never keys, schemas, tools[] or function names. Non-text parts and relayed routes (audio, documents, rerank, realtime, MCP, stateful Responses) towards a node in when are refuse/local.
+4. Back-translation: Skeid builds the reverse table from the original text plus map, in memory only, and drops it at the end of the answer.
+   - Lenient forms ([X_tag], ⟦X tag⟧, inner spaces) are accepted only for known tags; unknown ones are counted (pii_unknown).
+   - Non-stream and SSE: hold back from the last ⟦ or [ for up to 40 chars until it is closed.
+   - Tool-call argument fragments are tracked per call; values are inserted JSON-escaped.
+   - This sits before the face translators (OpenAI/Anthropic/Ollama). Once a filter has replaced text, the OpenAI stream is no longer relayed untouched (Proxy.pm read loop).
+5. Usage: merge usage{} from the filter into the usage event, only allowlisted pii_*/filter_* scalar/hash fields. Never log bodies, maps or placeholders.
+6. Without a filter: section and without an overriding class, behaviour stays byte for byte unchanged (tests).
+
+Tests:
+- a fake filter under t/;
+- substitution keeps key order and escapes;
+- SSE holdback across chunk borders;
+- tool-call fragments;
+- refuse paths and the refused relayed routes;
+- usage allowlist.
+Test vectors: placeholder vectors supplied by the deployment (copied in, for lenient matching).
+
+Release: downstream deployments pin the version that ships it.
