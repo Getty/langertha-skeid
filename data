@@ -1,0 +1,19 @@
+---
+claimed_at: 2026-09-25T16:33:24Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T16:33:24Z
+created: 2026-09-25T16:28:05Z
+id: 40
+priority: low
+started: 2026-09-25T16:33:24Z
+status: done
+tags:
+- probes
+- admin
+title: set_node_health bumps the inventory generation, which restarts every capacity
+  probe
+updated: 2026-09-25T16:33:24Z
+---
+
+Found while doing skeid #38. _inventory_generation is the key for two things: the route cache and the probe restart in Proxy before_dispatch. set_node_health bumps it, because health is part of eligibility and the route cache has to drop. As a side effect, each admin health flip stops and restarts every capacity probe on the next request, and forget_capacity drops all readings. Fix: give probes their own inventory key, for example a digest of node ids plus capacity blocks, so that a health flip clears the route cache without restarting probes. t/47-config-reload-change-detection.t works around it by counting from after the first request that follows the flip.
