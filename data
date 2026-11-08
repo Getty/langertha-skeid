@@ -1,0 +1,19 @@
+---
+claimed_at: 2026-09-25T16:08:22Z
+claimed_by: claude
+class: standard
+completed: 2026-09-25T16:08:22Z
+created: 2026-09-24T19:40:58Z
+id: 29
+priority: low
+started: 2026-09-25T16:08:22Z
+status: done
+tags:
+- manifest
+- provider-discovery
+- needs:langertha#191
+title: Provider-Manifest /.well-known/langertha.json gefiltert pro Kunden-Key
+updated: 2026-09-25T16:08:22Z
+---
+
+Aus langertha-raider ADR 0007 (2026-09-24). Skeid veroeffentlicht pro autorisiertem Kundenkontext nur die ausdruecklich freigegebenen Modelle/Routen (konfigurierbar, nicht automatisch). Nutzt Schema/Builder aus langertha#191. Caches nach Autorisierungskontext trennen: kein Ausliefern des reicheren Katalogs eines anderen Keys (Test mit zwei Kunden-Keys). Keine Node-URLs/Upstream-Keys leaken.
