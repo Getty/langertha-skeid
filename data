@@ -1,0 +1,33 @@
+---
+claimed_at: 2026-09-26T05:07:44Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-26T05:07:44Z
+created: 2026-09-26T03:36:22Z
+id: 53
+priority: high
+started: 2026-09-26T05:07:44Z
+status: done
+tags:
+- bug
+- proxy
+- capacity
+title: 'Upstream-429: Fehlerpfade überspringen Capacity-Beobachtung und Retry-After'
+updated: 2026-09-26T05:07:44Z
+---
+
+Follow-up zu k13. Bestätigt auf Skeid 1a848c6: Proxy.pm:747-772 sowie :945-1004 verlassen JSON-/übersetzte Stream-Fehlerpfade vor _observe_capacity. Fake-Upstream antwortet 429 + Retry-After:60; jeweils zwei OpenAI-JSON-, Anthropic-Stream- und Ollama-Stream-Requests ergeben upstream_hits=2, capacity_reading fehlt.
+Ziel: vorhandene Response-Header auch bei HTTP-Fehlern auswerten, bevor zurückgekehrt wird. Transportfehler ohne Response nicht zu Headern erfinden; HTTP-/API-format-Fehlerform bleibt unverändert. Backoff darf Health nicht verändern.
+Abnahme: rot/grün Test für echte 429 auf allen genannten Pfaden, kein erneuter sofortiger Upstream-Call, Admission/finish und Usage genau einmal. Nur Proxy.pm und dedizierte neue Tests.
+
+2026-09-26 03:38 Begonnen: bestehende Capacity-/Fehlerpfad-Tests und Proxy-Response-Verarbeitung werden gelesen; Regressionstest entsteht vor dem Fix in t/51-proxy-error-backoff.t.
+
+2026-09-26 03:43 Rot belegt: prove -I/home/getty/dev/langertha-skeid/lib -v /home/getty/dev/langertha-skeid/t/51-proxy-error-backoff.t. Echte 429 + Retry-After:60 erzeugen auf OpenAI-JSON, Anthropic-Stream und Ollama-Stream keine Capacity-Reading; der direkte Retry erreicht Upstream ein zweites Mal und dupliziert Usage/Start/Finish. Ursache: Mojo meldet HTTP 429 via tx->error und beide Fehler-Returns liegen vor _observe_capacity.
+
+2026-09-26 03:50 Fertig zur Review: JSON- und Stream-Upstream-Pfade beobachten die echte Response jetzt genau einmal vor tx->error-Returns. 429 + Retry-After:60 erzeugt Backoff auf OpenAI-JSON, Anthropic-Stream und Ollama-Stream; direkter Retry bleibt lokal, Error-Shape/Health/Usage und Start/Finish bleiben unverändert gepaart. Neuer Test t/51-proxy-error-backoff.t. Rot vor Fix: 2 Upstream-Hits pro Face und keine Reading; grün im finalen Fokuslauf (7 Dateien, 514 Tests).
+
+2026-09-26 04:09 Unabhängiger Nachtest durch Dispatcher auf aktuellem gemeinsamen Arbeitsbaum: nice -n 19 ionice -c3 prove -l t/50-proxy-request-lifecycle.t t/51-proxy-error-backoff.t -> Files=2, Tests=14, Result: PASS. Gesamtsuite folgt erst nach Ende der Ollama-Nachhärtung.
+
+2026-09-26 04:48 Abschließende unabhängige Verifikation auf ruhendem gemeinsamen Arbeitsbaum, einschließlich stabilisiertem Lifecycle-Test: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 nice -n 19 ionice -c3 prove -lr t/ -> Files=55, Tests=3052, Result: PASS (67 s). Tatsächlich geladen: Langertha 0.503 aus lokalem Core 193005702eb286481f00438575021659ebbbc118; Tool->classify vorhanden. git diff --check PASS. Der separate Gesamtlauf mit installiertem älterem 0.503-Snapshot bleibt ausschließlich in t/20, t/37 und t/56-ollama-stream-tools.t rot (fehlende classify-/Stream-Tool-Fähigkeiten), siehe k58. Lifecycle-Test darin grün. Karten bleiben review, nicht done; keine Code-Commits/Pushes/Releases, keine globale Installation. Vollständige Abschlusslogs: /tmp/skeid-core-final.YEW7fV.log und /tmp/skeid-installed-final.f51066.log.
+
+2026-09-26 05:07 Committed ab94178: Proxy: observe capacity on upstream error paths before returning (skeid #53)
