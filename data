@@ -1,0 +1,61 @@
+---
+class: standard
+completed: 2026-10-03T04:13:53Z
+created: 2026-10-03T03:30:58Z
+id: 91
+priority: high
+started: 2026-10-03T03:31:14Z
+status: done
+tags:
+- audio
+- proxy
+- usage
+title: 'Audio transcription: POST /v1/audio/transcriptions and /v1/audio/translations,
+  multipart upload, SSE stream, audio_seconds in the usage event'
+updated: 2026-10-03T04:14:39Z
+---
+
+Skeid becomes the single entry in front of a GPU cluster that also runs Whisper. Audio transcription has to come in through Skeid like chat does: behind client_auth (k90), routed over nodes (eligibility, admission, capacity, health), one usage event per forwarded request.
+
+Routes (OpenAI face, behind the same client gate as /v1/chat/completions):
+- POST /v1/audio/transcriptions -- multipart/form-data: file, model, language, prompt, response_format, temperature, timestamp_granularities[], stream, and whatever else the client sends
+- POST /v1/audio/translations -- same handler, other upstream path
+
+Upstream: {node.url}/audio/transcriptions resp. /audio/translations, the dialect vLLM (Whisper) and speaches (faster-whisper-server) both speak. No translation: the form goes upstream as the client sent it, only `model` is replaced by the served model when an alias tier names another one (ADR 0008). Unknown form fields and repeated ones pass through.
+
+Upload handling:
+- configurable limit, hot reloaded: `uploads: { max_bytes: N }`, default 26214400 (25 MiB, OpenAI's own limit). Over it: 413 in the OpenAI error shape, no node touched, nothing metered. The JSON routes keep Mojolicious' own limit -- nothing changes for them.
+- the upload is not held twice in memory: Mojolicious spools a part above 256 KiB to a temp file; the upstream request is built from the parts already parsed (file asset reused), not from a copy of the body.
+- a caller client_auth refuses must not get its upload buffered first, where the server allows that.
+
+Streaming: form field stream=true. The upstream's SSE is relayed byte-for-byte (SSE relay, same queue/drain, client abort and cut-stream handling as chat). Three dialects exist and all pass untouched:
+- OpenAI and speaches: {"type":"transcript.text.delta","delta":"..."} ... {"type":"transcript.text.done","text":"...","usage"?}; speaches ends without [DONE]
+- vLLM: {"object":"transcription.chunk","choices":[{"delta":{"content":"..."}}]} ... data: [DONE]; a usage frame ({"choices":[],"usage":{prompt_tokens,completion_tokens,total_tokens}}) only when the client sends stream_include_usage=true or the server runs with --enable-force-include-usage
+Skeid reads along: any frame's `usage` block is merged as on the chat stream, content_bytes counts the delta text of either dialect. Skeid does not inject stream_include_usage -- the OpenAI face never changes what the client asked for (the chat relay does not inject include_usage either).
+
+Usage event (ADR 0004), endpoint /v1/audio/transcriptions or /v1/audio/translations:
+- new optional field `audio_seconds` (nullable, like content_bytes): from usage.seconds when usage.type is "duration" (vLLM json, OpenAI whisper-1), else the top-level `duration` of a verbose_json answer (vLLM, speaches), else absent = not measured
+- tokens through the existing metrics normalization when the upstream reports them (OpenAI usage.type "tokens": input_tokens/output_tokens/total_tokens; vLLM stream usage frame)
+- text/srt/vtt answers are not JSON: relayed as they are, nothing to read, the event has duration_ms and status only
+- stores: jsonlog writes the field, DBI gets a nullable column through the additive migration; report totals / by key / by model carry audio_seconds
+- pricing per second is not modelled by Langertha::Pricing: recorded, not priced (as cached tokens were first, ADR 0013)
+
+Done when: both routes work non-streamed and streamed against local fake upstreams in t/ (vLLM-shaped and speaches-shaped), with two nodes of the same model sharing the load, max_conns and health respected, request.start/request.finish paired on every exit path (upstream error, client abort, oversize, unkeyed node), client_auth answering 401 before anything is forwarded, existing routes and tests unchanged, prove -lr t/ green. README, CONTEXT.md, POD, skeid-protocols skill and an ADR for the relayed non-chat routes and their usage units follow.
+
+Known gaps to leave as they are: vLLM translations and every speaches json answer report no usage at all (seconds only with response_format=verbose_json); no capability check -- a chat request naming a Whisper model is routed to the Whisper node and refused there.
+
+2026-10-03 03:36 Design settled after reading Proxy.pm and Mojolicious 9.49: per-route size limit set from an after_build_tx hook on the request content's body event (headers known, body not yet read); upstream multipart built with the Transactor multipart generator from the parsed parts (assets reused, client boundary kept); _proxy_openai_json_async/_proxy_openai_stream get one optional $relay hash (request builder, usage units, stream delta text).
+
+2026-10-03 03:48 Second pass (continuing the interrupted one): read the whole uncommitted diff; prove -lr t/ with it is green before any change of mine (Files=72, Tests=4436, PASS). Keeping its shape (after_build_tx limit, generator-built upstream form, $relay hash); now reviewing details, then tests, docs, ADR 0021.
+
+2026-10-03 03:54 t/68-audio-transcription.t written (14 subtests) and green against the inherited code plus two fixes of mine: (1) Content-Disposition is read liberally (parameter name in any case, spaces around =, bare or quoted value, name* refused) so a second model field cannot hide behind a spelling the node reads and Skeid did not -- the inherited regex let NAME="model", name = "model" and name*= through; (2) stream is on for pydantic's truth set (1 true on yes t y, any case), not only true/1 -- vLLM and speaches read the form through pydantic, and a mismatch means the SSE is buffered and its usage unread. Next: stores/CLI tests, mutation checks, docs, ADR.
+
+2026-10-03 04:11 Done in this pass. Kept from the interrupted pass: the after_build_tx/body-event upload limit, the generator-built upstream form (asset reused, client boundary), the $relay hash on _proxy_openai_json_async/_proxy_openai_stream, uploads.max_bytes config + declared-section tracking, audio_seconds through record_usage / JsonLog / DBI / SQL / skeid usage. Changed: (1) the audio wire knowledge moved out of Proxy.pm into the new Langertha::Skeid::Protocol::Audio (routes, form_fields, is_true, upstream_parts, usage_units, delta_text) -- ADR 0001 keeps wire names inside Protocol::*; (2) Content-Disposition read liberally, name* refused, so a second model field cannot hide from Skeid; (3) stream on for pydantic's truth set (1 true on yes t y), not only true/1; (4) the client's Expect header is not forwarded on an upload -- verified with a raw fake node that a node's 100 Continue makes Mojo::UserAgent swap the response object and the stream relay then returns an empty 200 with ok=1. Added: t/68-audio-transcription.t (22 subtests), POD, README, CONTEXT.md, ADR 0021 (+ Update notes in ADR 0001 and 0004), skeid-protocols and skeid-core skills, Changes, t/00-load.t line for the new module. Verified: prove -lr t/ -> Files=73, Tests=4459, PASS. Mutation-checked (each made t/68 fail): no _limit_upload, no client gate in it, no exact size check, no model rewrite, two models allowed, Expect forwarded, zero instead of absent audio_seconds, no delta_text, upload slurped into memory, a leaked upload asset, CLI printing audio always, stream only true/1. skeid usage text output for a store without audio events compared against HEAD's bin/skeid: identical.
+
+2026-10-03 04:11 Also found (outside this card, not fixed): (a) _forward_headers passes a client's Expect: 100-continue upstream on the JSON routes too; a node that answers 100 Continue breaks _proxy_openai_stream the same way (empty 200, ok=1). Skeid always holds the body before it calls a node, so 'expect' belongs on the strip list for every route -- own card, skeid board. (b) Mojolicious never sends 100 Continue: curl uploads above 1 MiB wait out curl's 1 s before sending. _limit_upload knows at that moment whether the upload is welcome and could write the interim response -- own card if wanted. (c) Langertha::Usage has no audio seconds and Langertha::Pricing no per-second rate; audio_seconds is read raw in Protocol::Audio->usage_units as cached_tokens first was (ADR 0013). Ticket for the Langertha board: Usage carries seconds from usage.type=duration / verbose_json duration, Pricing a per-second rate; then metrics.normalize reports and prices them. (d) The provider manifest (ADR 0015) does not publish the audio routes or a transcription capability: its OpenAI endpoint is the openai-chat dialect -- needs a Langertha::Manifest dialect first (Langertha board). (e) jsonlog report: by_key/by_model rows of equal cost come out in hash order, so skeid usage output is not stable between runs (pre-existing). (f) skeid-core skill's config block lists no client_auth: line (k90 drift). (g) CLAUDE.md repo map line for lib/Langertha/Skeid/Protocol/ does not mention the relayed Audio module -- not mine to edit. (h) No bench run: the after_build_tx hook adds one closure and one event subscription to every request; skeid-perf-tester should confirm it is noise before a release note claims anything.
+
+Done: both audio routes relayed (non-stream and SSE) behind client_auth, routed and metered; uploads.max_bytes with early 413/401; audio_seconds through event, stores, report and CLI; wire knowledge in the new Langertha::Skeid::Protocol::Audio; ADR 0021, README, CONTEXT, POD, skills, Changes. Verified: prove -lr t/ -> Files=73, Tests=4459, Result: PASS; t/68-audio-transcription.t mutation-checked. Tree is commit-ready, nothing committed. Follow-ups are listed in the previous note.
+
+2026-10-03 04:13 Committed locally: d0d7bff (code, tests, share/sql, Changes), 3d9785d (docs)
+
+2026-10-03 04:14 Commit messages reworded, hashes now 0303b52 and 1bf62bb
