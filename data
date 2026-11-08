@@ -1,0 +1,33 @@
+---
+claimed_at: 2026-09-29T20:00:48Z
+claimed_by: skeid-worker-abort
+class: standard
+completed: 2026-09-30T02:48:46Z
+created: 2026-09-29T19:37:35Z
+id: 73
+priority: high
+started: 2026-09-29T19:38:25Z
+status: done
+tags:
+- proxy
+- lifecycle
+- streaming
+title: 'A client that hangs up is not noticed: upstream keeps running, waiting requests
+  still take a slot'
+updated: 2026-09-30T02:48:46Z
+---
+
+Found by reading Proxy.pm (2026-09-29), not reproduced yet.
+
+Proxy.pm has no finish/close handler on the client transaction and t/ has no client-abort case, although the house rule names client-abort as an exit path that needs its request.finish.
+
+Suspected consequences, each to be proven by a test before it is fixed:
+1. _begin_route_async: a request waiting for capacity keeps polling after its client is gone, then takes a slot and calls upstream for nobody.
+2. _proxy_openai_json_async / _proxy_openai_stream: the upstream transaction is not cancelled; the node slot is held and tokens are generated (and billed upstream) for up to request_timeout (300s).
+3. _proxy_openai_stream: after the client is gone the write_chunk drain callback probably never fires, $draining stays 1, the queue grows, $drain is never cleared -- the k51 leak would be back for aborted streams.
+
+Wanted: on client close the wait timer stops, the upstream transaction is cancelled, request.finish runs exactly once, exactly one usage event is recorded (failed, with what the stream had reported so far, ADR 0004), and the controller is released (same liveness check as t/50-proxy-request-lifecycle.t).
+
+Commit-ready in /home/getty/dev/langertha-skeid/.claude/worktrees/agent-a8c72aa014fc5e0a3. All three hypotheses confirmed by red tests (t/61-proxy-client-abort.t); the waiting request leaked its slot until restart. Abort records status 499 / error_type client_abort, upstream connection closed. Open: request.finish ok=>0 on abort counts as a node error; abort during key resolution acts when the key arrives.
+
+2026-09-30 02:48 Committed as f7147e0
