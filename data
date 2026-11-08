@@ -1,0 +1,36 @@
+---
+claimed_at: 2026-09-29T17:14:32Z
+claimed_by: skeid-worker-pod
+class: standard
+completed: 2026-09-29T17:14:32Z
+created: 2026-09-29T16:54:00Z
+id: 59
+priority: medium
+started: 2026-09-29T16:54:17Z
+status: done
+tags:
+- docs
+- pod
+title: 'Docs: POD for every shipped module and bin/skeid matches the code'
+updated: 2026-09-29T17:14:32Z
+---
+
+Audit POD in lib/**/*.pm and bin/skeid against the code. Proxy.pm and bin/skeid carry no POD at all; bin/skeid needs a usage POD (serve/usage subcommands, every option). Every public attribute/method documented with =attr/=method (getty-perl-pod), every config key the code reads documented in Langertha::Skeid POD, nothing documented that no longer exists. No behavior change.
+
+2026-09-29 16:57 Reading done; POD audit in progress across lib/**/*.pm and bin/skeid. Found code bugs (not fixed, docs-only card) -- noted separately.
+
+2026-09-29 17:13 Code bugs found while auditing (NOT fixed -- docs-only card; each needs its own card, skeid board):
+1. build_app(admin_api_key) / 'skeid serve --admin-api-key' is lost on the first changed config reload: _apply_config sets admin_api_key('') in config-managed mode when the config names no key. Verified: key 'cli-key' -> '' after rewriting the file.
+2. /api/tags names a node without a model '' instead of its id: tags_from_nodes uses model // id, but add_node stores model => ''. Verified.
+3. 'skeid serve --config PATH' with a nonexistent PATH silently starts with no config (no nodes), no warning.
+4. 'skeid usage' on a jsonlog store: Recent line printf '#%d' on a string event id -> 'isn't numeric' warning and '#20260929'; 'Store: (none)'. Verified.
+5. UsageStore::DBI->store dies (RaiseError) when a statement fails, against the store contract 'reported, not thrown'; the proxy's eval catches it and logs only at debug level, so a lost billing event is invisible at default log level.
+6. 'skeid usage' store options replace the config store wholesale; a jsonlog store cannot be named from the CLI (--backend jsonlog --db X croaks: log_path required).
+7. KeyBroker::OpenBao->list_secrets does no KV-v2 path rewrite (needs secret/metadata/...), unlike resolve_key; unused in the dist.
+Design questions (documented as-is): /v1/models and /api/tags list node models only -- no aliases, no per-key policy, unhealthy nodes included. pricing entries removed from the config keep their price until restart; routing keys removed from the config keep their value.
+House-rule drift (release-manager / worker): bin/skeid has no our $VERSION; runtime require inside methods (Skeid add_node + registry_snapshot, CapacityProbe for_node/start/stop, Ollama::Stream OpenAIBase, UsageStore for_config, Proxy build_app OpenBao); redundant use strict/warnings after use Moo in Skeid.pm, UsageStore/DBI.pm, UsageStore/JsonLog.pm; File::Spec in DBI/JsonLog.
+Test env: plain 'prove -lr t/' fails 3 files (t/20, t/37, t/56) because the installed Langertha 0.503 snapshot lacks Langertha::Tool->classify -- identical on a clean HEAD tree; with -I/home/getty/dev/langertha/lib all pass.
+
+2026-09-29 17:13 Done: POD-only changes in bin/skeid and all 19 lib/**/*.pm (code identical to HEAD with POD stripped, checked per file). Proxy.pm and bin/skeid got full POD (routes/auth/identity/upstream/errors/build_app; serve/usage/keyid with every option, defaults and ENV). Langertha::Skeid: new CONFIGURATION section covering every key _apply_config and helpers read (nodes, pricing, aliases, policies/default_policy/names/keys incl. overrides+manifest, routing.*, admin*, registry, manifest, usage_store, usage_db_path) with defaults and absent-section semantics, ENVIRONMENT (8 SKEID_* vars), =attr for every public attribute, =method for every public method, call_function dispatch table (27 functions). Fixed wrong docs: Protocol::Anthropic claimed streamed tool calls are not re-emitted as tool_use (they are); Protocol/UsageStore helpers documented as methods -> =func; DBI store 'never throws' -> dies on failing statement; OpenBao DESCRIPTION list rendered as one paragraph; 'Option 2' without option 1; policy_for_key/route_plan examples used a name as key id. SEE ALSO on every module. Verified: podchecker on the POD as [@Author::GETTY] builds it: all 20 OK; dzil build + AUTHOR_TESTING prove t/author-pod-syntax.t: PASS; perl -c bin/skeid OK; prove -lr -I/home/getty/dev/langertha/lib t/: Files=55 Tests=3052 PASS (plain prove -lr t/ fails t/20,t/37,t/56 identically on clean HEAD -- installed Langertha lacks Tool->classify). Code bugs found are in the previous note, unfixed.
+
+2026-09-29 17:14 Committed as 3d067c6
