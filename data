@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-09-29T17:35:45Z
+claimed_by: skeid-worker-cli
+class: standard
+completed: 2026-09-29T17:35:40Z
+created: 2026-09-29T17:14:27Z
+id: 68
+priority: medium
+started: 2026-09-29T17:15:32Z
+status: done
+tags:
+- bug
+- cli
+- config
+title: skeid serve --config with a missing path silently starts empty
+updated: 2026-09-29T17:35:45Z
+---
+
+Found by the k59 POD audit: bin/skeid serve --config /does/not/exist starts with no config and no nodes instead of failing loudly. Fail at startup with a clear error (a reload of a vanished file is a different case -- keep the last good config there, as today).
+
+2026-09-29 17:23 Cause: bin/skeid dropped config_file unless -f, and Skeid::_read_config treated a missing config_file as {} -- both silent. Vanished-after-load: maybe_reload_config returned 0 with no log (silent, config kept). Fix: bin/skeid _config_file() exits 2 with 'ERROR: config file not found: PATH' on an explicit --config (serve and usage); no --config keeps 'use ./skeid.yaml if present'. Library: _read_config croaks 'config file not found' (construction / config.reload); maybe_reload_config keeps config and warns once per disappearance. Test t/59-cli-serve-config.t (red at HEAD verified: serve started with Config: (none)).
+
+2026-09-29 17:27 Done. bin/skeid: an explicit --config that is not a regular file prints 'ERROR: config file not found: PATH' to stderr and exits 2 (serve and usage); without --config ./skeid.yaml is used if present, else no config (unchanged). Langertha::Skeid: _read_config croaks 'config file not found: PATH' (construction, config.reload, build_app). Vanished-after-load was silent: maybe_reload_config now keeps the config and warns once per disappearance (_config_file_missing flag), reset when the file is back. Note: the Docker default CMD passes --config /etc/skeid/skeid.yaml, so an image run without a mounted config now exits instead of starting empty -- README Docker section says so. POD: bin/skeid --config (serve+usage), Skeid.pm config_file attr + maybe_reload_config. README Docker + CLI sections. Test t/59-cli-serve-config.t (runs bin/skeid via $^X with fork+timeout; library missing-file croak; vanish/warn-once/return/vanish-again); red at HEAD verified. Full suite: Files=61, Tests=3192, PASS.
+
+2026-09-29 17:35 Committed as 36f6e2e
