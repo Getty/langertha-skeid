@@ -1,0 +1,26 @@
+---
+block_reason: 'Entscheidung ausstehend (Empfehlung: verwerfen)'
+blocked: true
+claimed_at: 2026-10-15T03:10:22Z
+claimed_by: abbau
+class: standard
+completed: 2026-10-15T03:10:22Z
+created: 2026-10-03T20:39:15Z
+id: 101
+priority: low
+started: 2026-10-14T03:55:27Z
+status: done
+tags:
+- anthropic
+- translation
+title: 'Anthropic route: system "" is forwarded as an empty system message'
+updated: 2026-10-15T03:10:22Z
+---
+
+Found while working k100. request_to_openai (lib/Langertha/Skeid/Protocol/Anthropic.pm) drops an empty system block array but forwards a top-level system: "" as { role => system, content => "" }. A strict chat template may dislike an empty system message, and it differs from the array case. k100 left it untouched to keep requests without a system message in messages byte-identical. Done: decide whether an empty top-level system string is dropped like the empty block array; test on the forwarded OpenAI messages.
+
+2026-10-14 03:57 Empfehlung (nicht umgesetzt): system "" wie das leere Block-Array behandeln, also verwerfen. Betrifft nur den leeren String; Requests ohne system oder mit nicht-leerem system bleiben byte-identisch, der Präfix-Cache-Grund aus k100 greift nicht. Umfang: eine Bedingung in request_to_openai (Protocol/Anthropic.pm) plus Test auf die weitergeleiteten OpenAI-Messages.
+
+2026-10-15 01:31 ENTSCHEIDUNG Getty 2026-10-15: ja, system "" wie das leere Array verwerfen. Bauen.
+
+Branch bau-a, Commit 20949b0, lokal. system "" wird wie das leere Array verworfen; Test in t/71 rot gegen HEAD-lib. Suite PASS.
