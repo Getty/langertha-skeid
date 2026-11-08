@@ -1,0 +1,33 @@
+---
+claimed_at: 2026-09-15T17:09:46Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-15T17:09:46Z
+created: 2026-08-08T14:24:59Z
+id: 16
+priority: low
+started: 2026-09-15T17:09:46Z
+status: done
+tags:
+- research
+- capacity
+title: Find out what AKI.io reports in its response headers
+updated: 2026-09-15T17:09:46Z
+---
+
+Their public docs (aki.io/docs) document per-key monthly euro budgets and per-key endpoint restrictions, but say nothing about rate-limit headers.
+
+Empirical check: one request with a real key, dump every response header. If they follow the OpenAI x-ratelimit-* convention, the passive ratelimit_headers probe from ADR 0009 works for them unchanged. If not, it is a custom probe.
+
+Worth doing for every provider actually in use -- the header names are not standardised.
+Researched, partly answered, and it produced a real fix.
+
+ANSWERED for the mainstream providers: OpenAI, Groq, the Meta Llama API and the OpenAI-compatible crowd all send x-ratelimit-{limit,remaining}-{requests,tokens} plus x-ratelimit-reset-*; Anthropic uses anthropic-ratelimit-{requests,tokens,input-tokens}-{limit,remaining}; the IETF draft spelling (ratelimit-limit / ratelimit-remaining, no x-) shows up on smaller gateways. All of those are now in the probe.
+
+THE FIX THIS TURNED UP: the ratelimit probe was only reading the REQUEST quota. For an LLM API that is the wrong one to watch -- providers meter tokens as well, and the token budget is normally what runs out first. A node with 990 of 1000 requests left and zero tokens left was still being admitted and answered 429. Both quotas are read now, tightest wins, compared as a fraction since the units differ. Commit 648e14f, tests in t/28.
+
+NOT ANSWERED for AKI.io itself. It is not an OpenAI-compatible endpoint: Langertha::Engine::AKI posts to https://aki.io/api/call/<model> with the key as a query parameter, and there is no public documentation of its response headers. This needs one real request with a real key, not a search engine -- run it and read the headers, then either add the spellings to \@RATELIMIT_QUOTAS or write a custom probe against its /api/endpoints route, which may expose quota state directly.
+
+Leaving open for that. Low cost once someone has a key.
+
+2026-09-15 17:09 EMPIRICALLY ANSWERED (real key, live aki.io, 2026-09-15). AKI.IO publishes NO capacity signal. Every route -- GET /api/endpoints, GET /api/endpoints/<model>, POST /api/call/<model> -- answers from a bare Apache with exactly: access-control-allow-origin, content-length, content-type: application/json, date, server: Apache. NO x-ratelimit-*, NO ratelimit-*, NO anthropic-ratelimit-*, NO Retry-After, NO quota headers. /api/endpoints body is only {endpoints:[...]} (17 endpoints); /api/endpoints/<model> body is {category,description,http_methods,max_context_length,name,parameter_description,title,version} -- no per-key budget/quota/remaining/usage field to poll. The chat call returns HTTP 200 with an in-body success flag; budget/entitlement failures surface as success:false / "Client not authorized ..." in the JSON body, never as a 429 status or header. CONCLUSION: neither a @RATELIMIT_QUOTAS spelling (no header to match) nor a Custom /api/endpoints probe (no quota field to read) is viable. AKI nodes correctly fall back to inflight admission (default), which is right for a single frontend; its monthly euro budget is server-side account policy, not a live concurrency signal. CHANGED: added a regression subtest in t/28-capacity-probe.t pinning AKI real header set -> observe_response_headers records nothing (guards against a future spelling accidentally matching a bare header). Full suite green (639 tests). No @RATELIMIT_QUOTAS / probe code change -- documented as the answer per the ticket plan. Key never stored/logged/echoed.
