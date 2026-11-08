@@ -1,0 +1,33 @@
+---
+class: standard
+completed: 2026-08-09
+created: 2026-08-08T04:27:24Z
+id: 3
+priority: high
+status: done
+tags:
+- performance
+- keybroker
+- event-loop
+title: KeyBroker::OpenBao blocks the event loop per request and never caches
+updated: 2026-08-09T00:02:37Z
+---
+
+resolve_key does a synchronous HTTP::Tiny round-trip to OpenBao on the request path, once per forwarded request that uses api_key_ref. That blocks the whole IO loop for the vault RTT and violates ADR 0005.
+
+Two independent fixes:
+1. In-memory TTL cache of resolved keys. ADR 0003 forbids a disk cache, not a memory one.
+2. Non-blocking client (Mojo::UserAgent) so a cache miss does not stall other requests.
+
+Measure before and after with bench/ (ADR 0007) — this should be visible as a TTFT delta at concurrency > 1.
+DONE. Both halves, plus the measurement the ticket asked for.
+
+Cache and coalescing live in the base class Langertha::Skeid::KeyBroker, so every broker gets them: key_async is the request path's only entry point (cache_ttl 300s, negative_cache_ttl 5s, concurrent misses for one reference collapsed into a single resolution), resolve_key stays what a subclass implements, resolve_key_async defaults to calling it so a three-line custom broker still works. forget_key is what rotation calls.
+
+::OpenBao resolves non-blocking via Mojo::UserAgent, keeps HTTP::Tiny for boot and for callers with no IO loop, and renews on a Mojo::IOLoop->recurring started by build_app -- so the request least able to afford the round-trip (the first after a quiet period) no longer pays for it. Renewal failure warns while the token is still valid and dies once it has expired; ADR 0003 updated to say so rather than leaving the ADR and the code disagreeing.
+
+t/27-keybroker-nonblocking.t proves it behaviourally, not by timing: while one request's key resolution is outstanding, the proxy must answer /health. A blocking resolve cannot pass that -- verified, 5 of 10 assertions fail when key_async is made synchronous.
+
+MEASURED (docs/bench/2026-08-09-keybroker-async.md), two runs, json+stream, c=16, 320 requests: the extra callback on every request costs nothing measurable. json 124.3/131.0 req/s vs a 118.8 baseline, TTFT p50 121.7/120.3 vs 129.7. Stream is 5% under its baseline point (129.7/127.4 vs 136.1) with TTFT unchanged, which reads as run-to-run variance -- said so in the report rather than claiming a win. The vault path itself is NOT measured here: the bench config has no api_key_ref, and doing it properly needs a real OpenBao.
+
+Also fixed here because building a new unverified TLS path would have been absurd: karr #4.
