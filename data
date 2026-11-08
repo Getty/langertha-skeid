@@ -1,0 +1,36 @@
+---
+claimed_at: 2026-09-26T05:06:23Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-26T05:06:23Z
+created: 2026-09-26T03:36:22Z
+id: 51
+priority: high
+started: 2026-09-26T05:06:23Z
+status: done
+tags:
+- bug
+- proxy
+- memory
+title: 'Request-Lifecycle: selbstreferenzieller Routing-Callback hält fertige Controller
+  fest'
+updated: 2026-09-26T05:06:23Z
+---
+
+Bestätigt auf Skeid 1a848c6: lib/Langertha/Skeid/Proxy.pm:691-731 hält über $tick einen starken Selbstzyklus und damit Controller/Request-Callback. Lokaler Repro: 3 abgeschlossene JSON-Chats bleiben per weak ref lebendig, 0/3 Fake-Upstream- und 0/4 Health-Controller; inflight bereits 0.
+Ziel: Lebensdauer von rekursiven Routing-/zugehörigen Stream-Callbacks begrenzen, ohne Event-Loop-Blocking oder kaputte Timer. Regressionstests für sofortige Admission, Warten/Timeout und Streaming, soweit derselbe Lifecycle betroffen ist. Jeder erfolgreiche request.start braucht genau ein request.finish. Keine neue Abbruch-/Queue-Architektur nebenbei.
+Abnahme: neuer Test vor Fix rot, nach Fix grün; Controller nach Abschluss freigegeben, bestehende Streaming-/Admission-Tests grün. Nur Proxy.pm und neue dedizierte Tests; keine Protokolltranslatoren ändern.
+
+2026-09-26 03:38 Begonnen: bestehende Lifecycle-/Streaming-Tests und Proxy-Callbacks werden gelesen; Regressionstest entsteht vor dem Fix in t/50-proxy-request-lifecycle.t.
+
+2026-09-26 03:43 Rot belegt: prove -I/home/getty/dev/langertha-skeid/lib -v /home/getty/dev/langertha-skeid/t/50-proxy-request-lifecycle.t. 3/3 sofortige JSON-, Timer-Warte-, Timeout-, no-eligible- und Stream-Controller bleiben nach Abschluss als Weak-Refs lebendig; Admission-/Usage-Paarung ist dabei bereits korrekt. Ursache: starke Selbstreferenzen in $tick und $drain.
+
+2026-09-26 03:50 Fertig zur Review: _begin_route_async löst $tick auf jedem terminalen Erfolgs-/Fehlerpfad; der Stream löst $drain nach Fehler/Queue-Ende und entfernt den abgeschlossenen read-Listener, dessen Closure zusätzlich Upstream-TX und Client-Controller zyklisch hielt. Neuer Test t/50-proxy-request-lifecycle.t deckt 3x sofortige JSON-Admisson, Timer-Warten, Timeout, no eligible, Stream-Abschluss sowie Start/Finish/Usage ab. Rot vor Fix: alle erfassten Chat-Controller lebten; grün im finalen Fokuslauf (7 Dateien, 514 Tests).
+
+2026-09-26 04:09 Unabhängiger Nachtest durch Dispatcher auf aktuellem gemeinsamen Arbeitsbaum: nice -n 19 ionice -c3 prove -l t/50-proxy-request-lifecycle.t t/51-proxy-error-backoff.t -> Files=2, Tests=14, Result: PASS. Gesamtsuite folgt erst nach Ende der Ollama-Nachhärtung.
+
+2026-09-26 04:44 Review-Nachhärtung der zeitabhängigen Fixture: Deterministischer RED-Nachweis mit einem test-only 60-ms-Event-Loop-Stall nach dem ersten Busy-Zustand, bei unverändert nominalem 20-ms-Freigabetimer und 40-ms-Wartefenster. Timeline: Stall ab 3.0 ms, Resume 63.3 ms, Freigabe 64.4 ms; der wartende Request erhielt 429 statt 200, Usage blieb bei 3 statt 4, und genau die Top-Level-Subtests 6-8 fielen durch die kumulativen Usage-Erwartungen. Damit ist die Ursache die Scheduling-Race der Fixture, nicht der Langertha::Tool->classify-Pfad. Ausschließlich t/50-proxy-request-lifecycle.t stabilisiert: Local::LifecycleSkeid beobachtet den echten busy route.state und gibt die belegte Kapazität per next_tick vor dem echten Retry-Timer frei; die bloße >=15-ms-Wallclock-Prüfung wurde durch die stärkere Prüfung ersetzt, dass der schwache Controller während Busy/Wait lebt und nach Erfolg freigegeben ist. 429-Timeout, 503-no-eligible, Start/Finish/inflight und Usage bleiben unverändert geprüft. Derselbe 60-ms-Stall über das 40-ms-Deadline-Fenster ist danach grün. Serielle Fokusläufe: 3/3 mit installiertem /home/getty/perl5/lib/perl5/Langertha.pm und 3/3 mit lokalem /home/getty/dev/langertha/lib/Langertha.pm, jeweils Files=1, Tests=8, Result PASS. Keine Vollsuite gemäß engem Auftrag; der vorhandene 55-Dateien/3052-Tests-PASS-Lauf liegt vor dieser finalen Teständerung, daher sollte der finale Tree vor Abschluss erneut mit prove -lr t/ gesamthaft geprüft werden.
+
+2026-09-26 04:48 Abschließende unabhängige Verifikation auf ruhendem gemeinsamen Arbeitsbaum, einschließlich stabilisiertem Lifecycle-Test: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 nice -n 19 ionice -c3 prove -lr t/ -> Files=55, Tests=3052, Result: PASS (67 s). Tatsächlich geladen: Langertha 0.503 aus lokalem Core 193005702eb286481f00438575021659ebbbc118; Tool->classify vorhanden. git diff --check PASS. Der separate Gesamtlauf mit installiertem älterem 0.503-Snapshot bleibt ausschließlich in t/20, t/37 und t/56-ollama-stream-tools.t rot (fehlende classify-/Stream-Tool-Fähigkeiten), siehe k58. Lifecycle-Test darin grün. Karten bleiben review, nicht done; keine Code-Commits/Pushes/Releases, keine globale Installation. Vollständige Abschlusslogs: /tmp/skeid-core-final.YEW7fV.log und /tmp/skeid-installed-final.f51066.log.
+
+2026-09-26 05:06 Committed 40a8838: Proxy: release recursive routing and drain callbacks after a request ends (skeid #51)
