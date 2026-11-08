@@ -1,0 +1,38 @@
+---
+block_reason: 'Entscheidung ausstehend: Public API, vendored UI-Assets (Empfehlung
+  in Notiz)'
+blocked: true
+claimed_at: 2026-10-15T03:10:34Z
+claimed_by: abbau
+class: standard
+completed: 2026-10-15T03:10:34Z
+created: 2026-10-06T05:09:22Z
+id: 105
+priority: medium
+started: 2026-10-14T03:56:01Z
+status: done
+tags:
+- api
+- docs
+title: OpenAPI description of the proxy API, served at /openapi.json with a Swagger
+  UI
+updated: 2026-10-15T03:10:34Z
+---
+
+An operator who exposes Skeid as the public model API (api.<domain>) wants machine-readable documentation from day one, generated from what the proxy actually serves instead of written by hand.
+
+What exists: the routes are listed in the POD of Langertha::Skeid::Proxy (GET /v1/models, /v1/chat/completions, /v1/embeddings, /v1/audio/*, /v1/rerank, the Anthropic and Ollama faces, /skeid admin). There is no OpenAPI document and no UI.
+
+Wanted:
+- GET /openapi.json: OpenAPI 3.1 for the client-facing routes that are enabled in this configuration (a face that is switched off does not appear). Admin routes under /skeid stay out, or go into a separate document behind the admin key.
+- A Swagger UI (or equivalent) under one path, switchable off, served without pulling assets from a CDN.
+- The security scheme documents client_auth (bearer key).
+- Model names in the examples come from the same source as GET /v1/models.
+
+Done when: the document validates against OpenAPI 3.1, a test fails when a client-facing route is added without an entry, and the UI can list models and send one chat request with a key.
+
+2026-10-14 03:57 Empfehlung (nicht umgesetzt, Public-API-Entscheidung): (1) Dokument aus einer expliziten Routen-Tabelle im Proxy erzeugen, die auch die Registrierung speist, damit der Test 'Route ohne Eintrag schlägt fehl' möglich ist, statt aus POD zu parsen. (2) /openapi.json nur für aktivierte Faces; Admin-Routen in ein getrenntes Dokument hinter dem Admin-Key. (3) Swagger UI vendored unter share/ (swagger-ui-dist, Apache-2.0, ca. 1.5 MB; CDN-frei laut Karte). Offen: Vendoring von Lizenz/Größe, Pfad und Schalter der UI, ob Admin-Doc ausgeliefert wird. Aufwand mittel, 2 Worker-Durchgänge.
+
+2026-10-15 01:32 ENTSCHEIDUNG Getty 2026-10-15: jetzt bauen, Routen-Tabelle; Admin-Routen in getrenntes Dokument hinter dem Admin-Key; Swagger UI NICHT vendored, sondern bei Anfrage nachladen und cachen, hinter einem Schalter (nicht automatisch); ohne Schalter nur /openapi.json.
+
+Branch bau-a, Commit 37c3b92, lokal. Routen-Tabelle (Proxy->route_table) speist Registrierung und /openapi.json; /skeid/openapi.json hinter Admin-Key; Swagger UI nicht vendored: openapi.swagger_ui (default aus) + openapi.cache_dir, bei Aktivierung Nachladen von swagger-ui-dist@5.17.14 (jsdelivr, SHA-256 gepinnt) beim ersten /docs-Aufruf, ohne Schalter 404 und kein Netz. ADR 0025. t/78-80, 5 Mutationen rot. Offen: kein 3.1-Validator installiert (Strukturtest), /docs ungated (Browser hat noch keinen Key), kein servers-Eintrag hinter Pfad-Prefix-Proxy. Beruehrt Skeid.pm (Config-Attrs) -- moegliche Merge-Kollision mit k108/k109.
