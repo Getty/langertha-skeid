@@ -1,0 +1,49 @@
+---
+claimed_at: 2026-09-26T05:07:03Z
+claimed_by: langertha-skeid
+class: standard
+completed: 2026-09-26T05:07:03Z
+created: 2026-09-26T03:36:22Z
+id: 52
+priority: high
+started: 2026-09-26T05:07:03Z
+status: done
+tags:
+- bug
+- usage
+- billing
+title: 'JsonLog: kollidierende Event-IDs überschreiben bestätigte Billing-Events'
+updated: 2026-09-26T05:07:03Z
+---
+
+Bestätigt auf Skeid 1a848c6: UsageStore/JsonLog.pm:85-89 erzeugt Sekunde + sechsstelligen rand; :108 öffnet mit >. Zwei erzwungen kollidierende Events melden beide ok=1, gespeichert bleibt nur das zweite.
+Ziel: exklusive Dateierzeugung mit begrenzter, nachvollziehbarer Kollisionsbehandlung und robusten IDs; niemals existierende Events truncieren. Kein asynchroner Writer/Store-Redesign, kein Performanceversprechen (siehe k10). IO-Fehler dürfen nicht als erfolgreicher persistierter Event ausgegeben werden.
+Abnahme: deterministischer Kollisions-Regressions-Test zunächst rot/nach Fix grün; beide unterschiedlichen Events bleiben, fsync-/file-mode-Kontrakte bestehen; begrenzte Fehlerbehandlung. Nur JsonLog.pm und dedizierte neue Tests.
+
+2026-09-26 03:38 Begonnen: bestehende JsonLog-Verträge und Tests werden gelesen; Regressionstest für echte Namenskollision und begrenzte Fehlerpfade kommt zuerst.
+
+2026-09-26 03:39 RED belegt: prove -lv t/52-jsonlog-collisions.t scheitert 3/5; zweite feste _event_id wird mit Erfolg gemeldet, nur eine Datei bleibt und enthält ausschließlich das zweite Event.
+
+2026-09-26 03:45 Fix umgesetzt: dir mode erstellt per O_EXCL und versucht höchstens 16 IDs; IDs sind Sekunde+PID+prozesslokale Sequenz und setzen die Sequenz nach fork per PID-Wechsel zurück. Schreib-, flush-, sync-, close- und flock-Fehler liefern ok=0; fehlerhaft neu erstellte dir-Dateien werden entfernt. Gezielter Lauf t/16+t/18+t/52 war 59/59 grün.
+
+2026-09-26 03:46 Gesamtlauf prove -lr t/ (gegen den parallel veränderten Shared Tree) war rot: bekannte Langertha-0.503-Fehler t/20 und t/37; zusätzlich fremde Proxy-Arbeit mit -Compilefehlern in t/55-t/57 und Fehlschlägen in t/50. JsonLog-Scope bleibt im frischen gezielten Lauf 59/59 grün; keine fremden Dateien angefasst.
+
+2026-09-26 03:47 Korrektur zum vorigen Hinweis: Die fremden Proxy-Compilefehler nennen die Variable $weak_tick.
+
+2026-09-26 03:47 Review-ready: JsonLog dir writes use exclusive bounded creation; PID/sequence IDs survive forked workers; I/O, fsync, close and flock failures no longer report ok. RED: t/52 failed 3/5 on overwrite, then 1/13 on fork IDs, then 6/19 on I/O errors. GREEN: prove -lv t/16-usage-jsonlog.t t/18-usage-jsonlog-fsync.t t/52-jsonlog-collisions.t => Files=3, Tests=59, Result PASS. Full prove -lr t/ remained red from known Langertha t/20+t/37 and parallel Proxy changes t/50+t/55-t/57.
+
+2026-09-26 04:17 Unabhängiges Sol-Review: keine weiteren bestätigten JsonLog-/Gewichtsregressionen. Gewichteter Algorithmus in 454740 statischen Zuständen gegen alten Algorithmus verglichen, ohne Abweichung. Gezielte 10 Testdateien/282 Tests PASS. Abschließender gemeinsamer Testlauf folgt nach Randfall-Korrekturen an k54/k55/k57.
+
+2026-09-26 04:19 Zusätzlicher präziser Reviewpunkt am neuen ID-Schema: Zeit + PID + neu gestartete Prozesssequenz ist in zwei PID-Namespaces (beide PID1) identisch. Damit gibt es deterministische ID-Duplikate im file-mode bzw. wiederholte EEXIST-Kollisionen im dir-mode; O_EXCL verhindert Überschreiben, garantiert aber nicht erfolgreiche Writes innerhalb 16 Versuchen. Vor Abnahme pro-Prozess-Initialisierung eindeutig machen (z.B. zufälliger Nonce, nach Fork erneuert) und denselben PID/Zeitpunkt mit frischer Initialisierung deterministisch testen. Bestehende exklusive Erzeugung und Retry-Grenze bleiben.
+
+2026-09-26 04:20 Gezielte Review-Korrektur begonnen: reproduziere deterministisch identische IDs bei gleichem PID/Zeitwert und frischer Prozessidentität; O_EXCL, 16 Retries und bestehende I/O-Fehlerpfade bleiben unverändert.
+
+2026-09-26 04:25 RED bestätigt: prove -I.../lib -lv t/52-jsonlog-collisions.t => 3/27 fehlgeschlagen. Bei festem Zeitpunkt und gleicher PID fehlten prozesslokale Nonces (Sequenz lief 1→2 statt pro Initialisierung neu bei 1); nach Fork blieb die ID ohne erneuerten Nonce. Bestehende Kollisions-/Erschöpfungs- und I/O-Tests blieben grün.
+
+2026-09-26 04:26 Fix grün: Event-ID-State trägt nun 128-Bit-Prozessnonce aus /dev/urandom (portabler SHA-256-Fallback ohne srand), PID und Sequenz; PID-Wechsel nach Fork erneuert Nonce und setzt Sequenz zurück. O_EXCL/16 Versuche und I/O-Pfade unverändert. Gezielter Lauf t/16+t/18+t/52: Files=3, Tests=67, Result PASS.
+
+2026-09-26 04:27 Review-Korrektur fertig: Event-IDs kombinieren Zeit, PID, 128-Bit-Prozessnonce und Sequenz; Nonce/Sequenz werden nach Fork erneuert, ohne globales srand oder neue Dependency. Deterministische Tests decken gleiche PID/Zeit bei frischer Initialisierung, file-mode, Fork-Refresh sowie exakt 16 O_EXCL-Kollisionen ab. RED 3/27; GREEN prove t/16 t/18 t/52: Files=3, Tests=67, Result PASS.
+
+2026-09-26 04:48 Abschließende unabhängige Verifikation auf ruhendem gemeinsamen Arbeitsbaum, einschließlich stabilisiertem Lifecycle-Test: PERL5LIB=/home/getty/dev/langertha/lib:/home/getty/perl5/lib/perl5 nice -n 19 ionice -c3 prove -lr t/ -> Files=55, Tests=3052, Result: PASS (67 s). Tatsächlich geladen: Langertha 0.503 aus lokalem Core 193005702eb286481f00438575021659ebbbc118; Tool->classify vorhanden. git diff --check PASS. Der separate Gesamtlauf mit installiertem älterem 0.503-Snapshot bleibt ausschließlich in t/20, t/37 und t/56-ollama-stream-tools.t rot (fehlende classify-/Stream-Tool-Fähigkeiten), siehe k58. Lifecycle-Test darin grün. Karten bleiben review, nicht done; keine Code-Commits/Pushes/Releases, keine globale Installation. Vollständige Abschlusslogs: /tmp/skeid-core-final.YEW7fV.log und /tmp/skeid-installed-final.f51066.log.
+
+2026-09-26 05:06 Committed 8f7a26e: JsonLog: exclusive event-id creation stops collisions from overwriting billing events (skeid #52)
