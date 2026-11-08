@@ -1,0 +1,44 @@
+---
+class: standard
+completed: 2026-10-03T04:45:22Z
+created: 2026-10-03T03:30:58Z
+id: 93
+priority: medium
+started: 2026-10-03T04:39:05Z
+status: done
+tags:
+- embeddings
+- proxy
+- test
+title: 'Embeddings over several nodes: pin distribution, admission, health and token
+  usage with a test; document embedding nodes'
+updated: 2026-10-03T04:45:33Z
+---
+
+Question: is POST /v1/embeddings distributed over two nodes of the same model today, and is its usage counted?
+
+Checked against main (2b0c049), two fake nodes serving one model, max_conns 2 each:
+- routing: yes. /v1/embeddings goes through _begin_route_async like chat: route.plan (policy, alias tiers), route.state, route.next, request.start. Six sequential requests land 3/3.
+- health: a node set unhealthy gets nothing, the other takes all.
+- admission: six concurrent slow requests -> four admitted (peak 2 per node), two answered 429 after route_wait; inflight is back to 0 afterwards.
+- capacity probes: the same _capacity_allows as chat; a vLLM embedding node is covered by the Prometheus probe defaults.
+- usage: one event per forwarded request, endpoint /v1/embeddings; usage.prompt_tokens / total_tokens become input_tokens / total_tokens, priced by the model's input_per_million. output_tokens is 0.
+- client_auth (k90) already gates the route (t/67).
+
+What is missing:
+1. No test pins any of this: the suite calls /v1/embeddings with one node only (t/38, t/61, t/67). Build: a test with two embedding nodes -- distribution, health, max_conns/429, alias tier, tokens and cost in the usage event, TEI- and infinity-shaped answers.
+2. Docs do not say that an embedding server is just a node: README node examples (vLLM, TEI, infinity), with the caveats below.
+3. Caveats to document, not to build:
+   - infinity serves /embeddings at the root unless started with --url-prefix /v1, and its usage counts characters unless lengths_via_tokenize is on
+   - the Prometheus probe's default metric names cover vLLM, SGLang and TGI; a TEI or infinity node names its own metrics in the capacity block, or runs on inflight admission
+   - one request is one slot whatever its batch size: a 1000-input request weighs like a 1-input one. max_conns has to be chosen with that in mind
+   - a JSON body above Mojolicious' 16 MiB message limit is refused as invalid JSON
+   - there is no Ollama embeddings face (/api/embed)
+
+Done when: the test exists and is green, README and the skeid-protocols skill show an embedding node, and whatever the test turns up as a defect is fixed or filed as its own card.
+
+2026-10-03 04:43 t/70-embeddings-nodes.t added (10 subtests), README embedding node section, skeid-core client_auth line, skeid-protocols embeddings note. No lib/ change, no defect found. prove -lr t/: Files=75 Tests=4492 PASS.
+
+Done: regression test t/70 + docs; no code change; full suite green
+
+2026-10-03 04:45 Committed as 5bc4f84
