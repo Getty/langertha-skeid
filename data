@@ -1,0 +1,22 @@
+---
+class: standard
+completed: 2026-08-09
+created: 2026-08-08T04:27:29Z
+id: 4
+priority: high
+status: done
+tags:
+- security
+- keybroker
+title: KeyBroker::OpenBao hardcodes verify_ssl => 0
+updated: 2026-08-09T00:03:22Z
+---
+
+HTTP::Tiny is constructed with verify_ssl => 0 and a "dev mode - set to 1 in prod" comment. An https OpenBao address is therefore not verified, and nothing in the deployment path flips it.
+
+Fix: attribute defaulting to 1, overridable per instance / by ENV for dev. A comment is not a control.
+DONE, alongside karr #3 -- the async rewrite added a second HTTP client, and shipping a new one with verification off would have doubled the hole instead of fixing it.
+
+verify_ssl is now an attribute defaulting to 1, honoured by both clients (HTTP::Tiny verify_ssl, Mojo::UserAgent insecure). OPENBAO_VERIFY_SSL=0 is the documented escape hatch for a dev vault with a self-signed certificate; the POD says plainly what turning it off costs, because on an https:// address it hands the AppRole token to anything that can intercept the connection.
+
+Two related leaks closed while in there: a failed KV read logged the vault response body (now the reference and the HTTP status only), and the renewal timer's closure held a strong reference to the broker, so DEMOLISH never ran and the token outlived the object meant to be the only thing holding it. The timer is weak now and DEMOLISH removes it and clears the key cache.
