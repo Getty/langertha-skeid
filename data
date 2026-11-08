@@ -1,0 +1,42 @@
+---
+claimed_at: 2026-10-15T04:44:18Z
+claimed_by: claude
+class: standard
+completed: 2026-10-15T03:15:44Z
+created: 2026-10-12T04:31:38Z
+id: 108
+priority: high
+started: 2026-10-12T04:35:19Z
+status: done
+tags:
+- config
+- auth
+- postgresql
+- keys
+title: Customer keys, names and policies from PostgreSQL as a config source
+updated: 2026-10-15T05:26:14Z
+---
+
+Goal: Skeid can load the caller side of its config – names:, keys: (per-key policy, model access), client_auth: – from a PostgreSQL database instead of (or merged with) the YAML file. The database is owned by another application, which creates and revokes customer keys; Skeid only reads.
+
+Constraints from the ADRs:
+- Only customer key IDs (k_ + full SHA-1, ADR 0016) are stored, never keys (ADR 0003).
+- Resolved at config load/reload, never per request (ADR 0008, 0020); refresh must be async (ADR 0005) – e.g. periodic reload or LISTEN/NOTIFY.
+- Skeid defines the contract: the table/view shape it reads, so the owning application can provide a view. Generic, no knowledge of who owns the database.
+- Usage already goes to PostgreSQL via UsageStore::DBI; same DSN should be usable.
+
+First a design (ADR draft + config shape + table/view contract), no code. Open questions: precedence file vs database, what happens when the DB is unreachable at load/reload (keep last good set?), revocation latency.
+
+ADR draft committed: docs/adr/0022-customer-keys-can-come-from-a-database-view.md (Status: proposed), commit b101c06 on branch worktree-k108-adr-customer-source (not pushed, not merged). Design: customer_source: section in YAML; contract = SELECT key_id, name, policy, models FROM <relation>, one row per active key id (row absent = revoked); rows validated before merge, rejected rows grant nothing and never fail a reload; file wins per key id; allowlist is a union, only when client_auth is declared; deny_tags/profiles/manifest stay file-only; background Mojo::Pg fetcher (poll + optional LISTEN/NOTIFY), never on the request path; keep the last good snapshot during an outage, optional max_stale_s; degraded fail-closed start; separate connection/role even with from_usage_store. Open questions: (1) Mojo::Pg vs hand-rolled DBD::Pg async; (2) degraded start vs refuse to start; (3) max_stale_s default 0 vs finite; (4) deny_tags/manifest per row (proposed no); (5) keep the display-only name column?; (6) DB names referenceable from the file (proposed no); (7) env-gated real-PG xt/ test?
+
+Implemented ADR 0022 (accepted). Commits on local main: b101c06 (ADR draft), f12cb30 (ADR accepted + resolved questions + blocking-connect gap), 2eef8d6 (customer_source implementation, t/72-75, docs, Changes). prove -lr t/: Files=80, Tests=4968, PASS (after installing Langertha 0.503 + DBD::SQLite locally; 6 pre-existing env failures otherwise). Left: DBD::Pg connect blocks the loop up to connect_timeout_s -> k109; real Mojo::Pg fetcher never run against a real DB (manual procedure in examples/service/skeid.yaml). Not pushed.
+
+2026-10-15 01:33 BEFUND Hub 2026-10-15: Die in der Notiz genannten Commits b101c06/f12cb30/2eef8d6 und der Branch worktree-k108-adr-customer-source existieren in diesem Repo NICHT (nicht in Branches, Reflog, fsck-Dangling, Stash; auch kein anderes Skeid-Checkout). Arbeit ist verloren oder lag in einem inzwischen verschwundenen Clone. Der Entwurf steht nur noch in der Notiz oben. Status zurueck auf backlog. ADR-Nummer 0022 ist inzwischen vom MCP-Gateway belegt (0022-mcp-servers-are-relayed-...); ein Neubau nimmt die naechste freie Nummer.
+
+2026-10-15 Bau B: Pfad .claude/worktrees/b-108-109, Branch worktree-b-108-109, Commit 6a3961d (+62bf28f, 2f37079 ADR 0024, accepted). prove -lr t/: Files=84 Tests=5339 PASS. Neu: CustomerSource.pm, CustomerSource/DBI.pm, t/77-customer-source.t (74 Tests, SQLite ueber echte Subprocess-Strecke; Mutationen rot). Proxy.pm unveraendert. ABWEICHUNG von der Notiz: kein Mojo::Pg (nicht installiert, Connect blockiert dort gleich) -- DBI/DBD::Pg im Kind, siehe ADR. NICHT verifiziert: libpq/LISTEN-NOTIFY gegen echten PostgreSQL, Fetcher-Start unter Prefork (Verfahren: examples/service/skeid.yaml). Offen: customer_names nicht in /skeid/config (braucht Haken in Proxy.pm, Worker A). Kein Geschwister-Repo betroffen.
+
+2026-10-15 03:15 Hub 2026-10-15: gemergt (main af5920c, ADR auf 0026 umnummeriert, Test t/81), Suite 88 Dateien/5649 Tests gruen, t/81 rot gegen altes lib/. NICHT verifiziert: libpq/LISTEN-NOTIFY gegen echtes PostgreSQL, Fetcher-Start unter Prefork (Verfahren in examples/service/skeid.yaml). OFFEN: customer_names/customer_report erscheinen noch nicht in /skeid/config (Haken in Proxy.pm). Abweichung: DBI/DBD::Pg im Kindprozess statt Mojo::Pg (nicht installiert).
+
+2026-10-15 ENTSCHEIDUNG Getty (Runde 2, bindend): Original (origin/main, ADR 0022 Mojo::Pg) behalten, nur Kindprozess-Connect (#109) portieren; PostgreSQL-Pruefung gegen Cluster-PostgreSQL (nur lesend, eigene Testdatenbank) freigegeben.
+
+2026-10-15 05:26 Verifikation gegen echtes PostgreSQL 18.6 (2026-10-15, t/90, eigene DB skeid_verify_<pid>, Rolle skeid_reader_<pid>, beides danach gedroppt; nur eigene DB angefasst): text[] models kommt als arrayref, NULL bleibt undef, widerrufene Zeile fehlt in der View; LISTEN/NOTIFY: Key rein 352 ms, Widerruf 350 ms (Poll 4 s, Debounce 250 ms); nach pg_terminate_backend Reconnect, naechste Aenderung nach 4.1 s (Poll); DB lehnt Verbindungen ab (ALLOW_CONNECTIONS false): status ok=0, letzter guter Snapshot bleibt, Erholung nach 4.1 s; falsches Passwort -> Fehler ohne Passwort; skeid serve --workers 3: Startup-Fetch ok, 12/12 Requests ueber alle Worker durchgelassen, Widerruf in 540 ms bei allen Workern, SIGQUIT sauber, keine Restverbindungen. FEHLER gefunden+behoben: unter Prefork hatte kein Worker bis zu refresh_interval_s nach dem Start eine LISTEN-Verbindung (Widerruf bis 30 s statt <1 s); customer_source_release stellt jetzt einen fetch_now per next_tick ein (Regressionstest t/84, rot ohne Fix). /skeid/config: neu customer_names (key id => name) und customer_report (accepted/rejected/shadowed), Test t/89 (rot ohne Haken, kein Schluessel/Passwort im Body). Nicht verifiziert: LISTEN mit Passwort-Rolle ueber pgbouncer/Transaction-Pooling, grosse Tabellen.
