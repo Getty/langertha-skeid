@@ -1,0 +1,29 @@
+---
+class: standard
+completed: 2026-08-08
+created: 2026-08-08T04:26:33Z
+id: 1
+priority: high
+status: done
+tags:
+- bug
+- config
+- admin
+title: "admin.api_key_env is not supported â\x80\x94 admin API silently disabled in
+  the service stack"
+updated: 2026-08-08T04:42:58Z
+---
+
+examples/service/skeid.yaml declares:
+
+  admin:
+    api_key_env: SKEID_ADMIN_API_KEY
+
+but reload_config only understands admin_api_key or admin.api_key. In config-managed mode an
+absent key sets admin_api_key to the empty string, which disables /skeid/* entirely (404).
+So the shipped stack sets SKEID_ADMIN_API_KEY in compose and the admin API is dead anyway.
+
+Fix: support api_key_env in reload_config, consistent with the existing password_env idiom in
+usage_store. Test: config with api_key_env + env set => /skeid/nodes answers 401 without a
+token and 200 with it.
+Fixed: reload_config now supports admin_api_key_env and admin.api_key_env, consistent with usage_store password_env. Regression test in t/21-admin-auth.t.
