@@ -1,0 +1,50 @@
+---
+claimed_at: 2026-08-11T22:51:56Z
+claimed_by: claude
+class: standard
+completed: 2026-08-11T22:51:56Z
+created: 2026-08-11T04:13:41Z
+id: 22
+priority: medium
+started: 2026-08-11T22:51:56Z
+status: done
+tags:
+- tests
+- protocols
+- docs
+- karr-23-dependency
+title: Claude-Code-style agent flow scenario test
+updated: 2026-08-11T22:51:56Z
+---
+
+A multi-turn agent conversation (Claude Code style) exercises the translation layers, streaming, and the usage accumulator in a way single-shot tests do not. Worth a scenario test under t/ that proves the path end-to-end.
+
+What an agent flow actually is, in this code vocabulary:
+- many sequential turns, each one a streamed request to /v1/messages or /v1/chat/completions
+- each turn the LLM may emit text, may invoke a tool, and runs for many tokens
+- the conversation history (system + every prior turn + every prior tool call + tool_result) accumulates in the messages array and grows with each turn
+- one usage event fires per request; the sum across turns is the bill
+
+Two scope options, in order of dependency:
+
+OPTION A - TEXT-ONLY AGENT FLOW (runnable today, no upstream feature work)
+- Perl fixture, no C compiler required (user asked for non-C mocker).
+- Six to ten sequential streamed turns at /v1/messages, accumulating the messages array on the client side between requests. All turns return plain text.
+- Asserts: every response is a well-formed Anthropic SSE stream, message_start carries the requested model, the accumulated messages round-trip end-to-end, one usage event per turn with input_tokens growing across turns, no admission leak.
+- Lands as t/33-agent-flow.t.
+
+OPTION B - AGENT FLOW WITH TOOL CALLS (requires work first)
+- The same loop, but on the second turn the upstream returns finish_reason=tool_calls.
+- Today Anthropic::Stream has NO input_json_delta path. finish_reason tool_calls sets stop_reason tool_use but no tool_use block is emitted, so an Anthropic client would see tool_use stop_reason with an empty content array. That is a bug not yet tripped.
+- Precondition: separate ticket Streamed tool_use in Anthropic::Stream to add content_block_start(type=tool_use), input_json_delta chunk, content_block_stop.
+- After that lands, agent-flow with tools becomes t/34-agent-flow-tools.t.
+
+Why t/, not bench/: bench/ uses a C fake for exact timing envelopes under concurrency. An agent flow tests correctness across turns, not timing - that is test territory. Also t/ runs by default in prove -lr t/, matching the user hint of an always-running part of the suite.
+
+Why not examples/: examples/ is for runnable, network-touching demos (OpenBao, PostgreSQL). An agent flow uses neither, so examples/ is too heavy. Can promote later if it grows.
+
+Done-when:
+- t/33-agent-flow.t exists, runs by default (no env var), at least 10 subtests
+- prove -lr t/ green, file count 20 -> 21
+- a sibling karr ticket captures option-B follow-up Streamed tool_use in Anthropic::Stream
+- README mentions the test exists as the canonical multi-turn scenario
