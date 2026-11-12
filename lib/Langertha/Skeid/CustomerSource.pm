@@ -12,6 +12,7 @@ use Scalar::Util qw(weaken);
 use Time::HiRes ();
 use Mojo::IOLoop;
 use Langertha::Skeid::UsageStore;
+use Langertha::Skeid::Rate;
 
 =head1 SYNOPSIS
 
@@ -26,6 +27,7 @@ use Langertha::Skeid::UsageStore;
   # What Skeid runs against it, and nothing else:
   my $sql = Langertha::Skeid::CustomerSource->statement('skeid.customer_keys');
   # SELECT key_id, name, policy, models FROM "skeid"."customer_keys"
+  # with rate_column: SELECT key_id, name, policy, models, rate FROM ...
 
 =head1 DESCRIPTION
 
@@ -50,6 +52,12 @@ in the file's C<policies:>; C<NULL> takes C<default_policy>) and C<models> (C<te
 keeps the profile's list, C<'{}'> is no models). A row present means the key is active. See
 L</check_rows> for what is rejected.
 
+With C<rate_column: true> in the section a fifth column is read, C<rate> (C<jsonb>, C<json> or
+text holding JSON; C<NULL> keeps the policy's rate): the key's own request rate (skeid k126), in
+the shape of a policy's C<rate>. It may only tighten the rate of the row's policy -- the
+operator's policy is the ceiling -- so a row that asks for more is rejected. Views without the
+column keep working as long as the section does not name it.
+
 =cut
 
 my @COLUMNS = qw( key_id name policy models );
@@ -60,7 +68,7 @@ my $IDENT = qr/[A-Za-z_][A-Za-z0-9_]{0,62}/;
 
 my %KNOWN_KEYS = map { $_ => 1 } qw(
   backend dsn host port dbname database user password_env from_usage_store
-  relation refresh_interval_s listen max_stale_s connect_timeout_s
+  relation refresh_interval_s listen max_stale_s connect_timeout_s rate_column
 );
 
 # The connection keys from_usage_store takes from the usage store instead.
@@ -111,6 +119,7 @@ sub normalize_config {
   croak 'customer_source.relation is required: the table or view to read, schema-qualified '
     . 'allowed' unless defined($relation) && !ref($relation) && length($relation);
   $class->statement($relation);
+  my $rate_column = _true($section->{rate_column});
 
   my %conn;
   if (_true($section->{from_usage_store})) {
@@ -151,6 +160,7 @@ sub normalize_config {
     listen             => $listen,
     max_stale_s        => _seconds($section, 'max_stale_s', 0, 1),
     connect_timeout_s  => _seconds($section, 'connect_timeout_s', 5, 0),
+    rate_column        => $rate_column,
   };
 }
 
@@ -178,7 +188,8 @@ sub _seconds {
 
   my $sql = Langertha::Skeid::CustomerSource->statement('skeid.customer_keys');
 
-The one statement Skeid runs against the relation: its four columns by name, the relation
+The one statement Skeid runs against the relation: its four columns by name (five, with
+C<rate>, when C<< rate => 1 >> is passed), the relation
 quoted as an identifier (each part of a schema-qualified name on its own). Quoting keeps the
 case as written: C<Skeid.Keys> reads C<"Skeid"."Keys">, not C<skeid.keys>. Croaks on a relation
 that is not one identifier or two joined by a dot -- letters, digits and underscores, not
@@ -187,12 +198,12 @@ starting with a digit -- so nothing in it is ever read as SQL.
 =cut
 
 sub statement {
-  my ($class, $relation) = @_;
+  my ($class, $relation, %opts) = @_;
   croak 'customer_source.relation must be a table or view name, schema-qualified allowed '
     . '(letters, digits and underscores: schema.relation)'
     unless defined($relation) && !ref($relation) && $relation =~ /\A$IDENT(?:\.$IDENT)?\z/;
   my $quoted = join '.', map { qq{"$_"} } split /\./, $relation;
-  return 'SELECT ' . join(', ', @COLUMNS) . " FROM $quoted";
+  return 'SELECT ' . join(', ', @COLUMNS, ($opts{rate} ? 'rate' : ())) . " FROM $quoted";
 }
 
 =method check_rows
@@ -216,6 +227,7 @@ Neither a label nor a reason carries any other value of the row.
 sub check_rows {
   my ($class, $rows, %opts) = @_;
   my $policies = ref($opts{policies}) eq 'HASH' ? $opts{policies} : {};
+  my $default  = $opts{default_policy};
   $rows = [] unless ref($rows) eq 'ARRAY';
 
   # Duplicates are counted over every row that has a key_id string at all: a key_id shared with
@@ -233,6 +245,8 @@ sub check_rows {
     $position++;
     my $label = _label($row, $position);
     my $reason = _row_problem($row, $policies, \%seen);
+    my $rate;
+    ($rate, $reason) = _row_rate($row, $policies, $default) unless defined $reason;
     if (defined $reason) {
       push @rejected, { row => $label, reason => $reason };
       next;
@@ -242,6 +256,7 @@ sub check_rows {
       name   => (defined($row->{name}) && !ref($row->{name}) ? "$row->{name}" : undef),
       policy => $row->{policy},
       models => (defined($row->{models}) ? [ map { "$_" } @{$row->{models}} ] : undef),
+      ($rate ? (rate => $rate) : ()),
       label  => $label,
     };
   }
@@ -268,6 +283,27 @@ sub _row_problem {
       if grep { !defined($_) || ref($_) || !length($_) } @$models;
   }
   return undef;
+}
+
+# A row's own rate (skeid k126): (undef) without one, ($rate) within its policy's, or
+# (undef, $reason) -- the reason names no value of the row.
+my $RATE_JSON = JSON::MaybeXS->new(utf8 => 0, allow_nonref => 0);
+sub _row_rate {
+  my ($row, $policies, $default) = @_;
+  my $spec = $row->{rate};
+  return () unless defined $spec;
+  if (!ref $spec) {
+    $spec = eval { $RATE_JSON->decode("$spec") };
+    return (undef, 'rate is not a JSON object of per_s, burst, per_min') unless ref($spec) eq 'HASH';
+  }
+  my $name = defined($row->{policy}) ? $row->{policy} : $default;
+  my $policy = (defined($name) && ref($policies->{$name}) eq 'HASH') ? $policies->{$name} : {};
+  my $ceiling = eval { Langertha::Skeid::Rate->normalize($policy->{rate}) };
+  return (undef, 'the rate of the row\'s policy is malformed') if $@;
+  my $rate = eval { Langertha::Skeid::Rate->within($spec, $ceiling) };
+  return (undef, 'rate is not a rate of per_s, burst, per_min') if $@;
+  return (undef, 'rate is looser than the rate of the row\'s policy') unless $rate;
+  return ($rate);
 }
 
 # A row's label in a report: its name, else its position. A name is a display label the owning
@@ -326,7 +362,8 @@ contains can make the merged config fail to load.
 sub merge_into {
   my ($class, $cfg, $rows) = @_;
   my $checked = $class->check_rows($rows,
-    policies => (ref($cfg->{policies}) eq 'HASH' ? $cfg->{policies} : {}));
+    policies       => (ref($cfg->{policies}) eq 'HASH' ? $cfg->{policies} : {}),
+    default_policy => $cfg->{default_policy});
 
   my %names = ref($cfg->{names}) eq 'HASH' ? %{$cfg->{names}} : ();
   my %file_ids;
@@ -350,10 +387,11 @@ sub merge_into {
       push @shadowed, $row->{label};
       next;
     }
-    next unless defined($row->{policy}) || defined($row->{models});
+    next unless defined($row->{policy}) || defined($row->{models}) || $row->{rate};
     $entries{$id} = {
       (defined($row->{policy}) ? (policy => $row->{policy}) : ()),
       (defined($row->{models}) ? (models => $row->{models}) : ()),
+      ($row->{rate} ? (rate => $row->{rate}) : ()),
     };
   }
 

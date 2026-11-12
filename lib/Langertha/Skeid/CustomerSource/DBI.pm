@@ -72,7 +72,8 @@ The statement every fetch runs, from L<Langertha::Skeid::CustomerSource/statemen
 
 sub statement {
   my ($self) = @_;
-  return Langertha::Skeid::CustomerSource->statement($self->config->{relation});
+  return Langertha::Skeid::CustomerSource->statement($self->config->{relation},
+    rate => $self->config->{rate_column});
 }
 
 =method dsn

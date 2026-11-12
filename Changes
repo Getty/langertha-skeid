@@ -2,6 +2,9 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Customer source: with rate_column: true a fifth column, rate (JSON), gives a key its
+      own request rate. It may only tighten the rate of the row's policy; a row asking for
+      more is rejected with a reason. Langertha::Skeid::Rate holds the rate's shape.
     - Usage purge: POST /skeid/usage/purge and skeid usage-purge delete the usage events
       of a set of customer key ids (an organisation's, on an erasure request) and/or those
       created before a time, with a dry-run count; idempotent, answered with what matched

@@ -215,7 +215,8 @@ key is unlimited. Over it, the request is answered C<429> with C<Retry-After> be
 -- nothing reaches a node -- and recorded as a usage event with C<error_type> C<key_rate_limited>.
 The buckets are in memory per process and the rate is divided like C<max_conns>
 (L</worker_count>, L</frontend_count>); a key of a customer source takes the rate of the
-policy its row names. See L</rate_admit>.
+policy its row names, or with C<rate_column> its row's own rate, which may only tighten the
+policy's (L<Langertha::Skeid::CustomerSource/The row contract>). See L</rate_admit>.
 
 Identity comes from the API key the caller presented — see L</key_id_for_key>. See also ADR
 0008 in the distribution repository.
@@ -513,6 +514,7 @@ key id is what has to be on the list.
     listen: skeid_customer_keys          # optional NOTIFY channel: a notification fetches sooner
     max_stale_s: 0                       # default 0: keep the last good rows during an outage
     connect_timeout_s: 5                 # default 5; also bounds each query
+    rate_column: false                   # default false; true reads a fifth column, rate
 
 Customer keys from a database relation (ADR 0026), for when another application -- a
 self-service console -- issues and revokes them. Skeid runs one statement,
