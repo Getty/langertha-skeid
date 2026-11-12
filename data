@@ -1,0 +1,21 @@
+---
+class: standard
+completed: 2026-11-12T06:14:09Z
+created: 2026-11-12T06:09:27Z
+id: 127
+priority: medium
+started: 2026-11-12T06:14:09Z
+status: done
+tags:
+- openbao
+- keybroker
+title: 'KeyBroker OpenBao: Anmeldung per Token-Datei (OPENBAO_TOKEN_FILE) fuer viele
+  Prozesse hinter einem Starter (aus cai-core#303)'
+updated: 2026-11-12T06:14:09Z
+---
+
+Aus cai-core#303 (Rest von core#171). Der Wirt in cai-core (share/wirt/cai-skeid-wirt) startet je Organisation einen skeid serve-Prozess und startet ihn neu bei Absturz oder Config-Aenderung. KeyBroker::OpenBao meldet sich heute nur mit OPENBAO_ROLE_ID + OPENBAO_SECRET_ID aus der Umgebung an (Proxy.pm ~Z. 45, KeyBroker/OpenBao.pm). Eine secret_id ist einmalig (ADR 0013 in cai-core: wrapped, single use), reicht also nur fuer den ersten Prozess.
+Wunsch: KeyBroker nimmt alternativ ein Token aus einer Datei, z. B. OPENBAO_TOKEN_FILE=<pfad>. Er liest die Datei bei jedem Erneuern bzw. vor Ablauf neu, denn der Starter haelt dort ein periodisches Token in tmpfs aktuell. Kein Token in argv oder Log. Fehlt die Datei oder ist sie leer: lauter Fehler, kein Rueckfall auf ungeschuetzte Werte. Vorrang, wenn beides gesetzt ist: dokumentieren (Vorschlag: Datei gewinnt nicht still, sondern Konfig-Fehler).
+Fertig, wenn: Test mit OpenBao-Doppel zeigt Anmeldung per Datei, Neulesen nach Token-Wechsel, Fehler bei fehlender oder leerer Datei; eine Faehigkeit (z. B. 'openbao_token_file') ist abfragbar, damit cai-core sie als Gate in @SKEID_CAN fuehren kann. Danach baut cai-core den Wirt um (core#303).
+
+2026-11-12 06:14 Done in ba628f8 (pushed). OPENBAO_TOKEN_FILE / token_file: read at construction (missing/empty/multi-line dies), re-read when its sub-second mtime/size/inode changes (checked before each resolution) and unconditionally on every start_renewal tick (renew_secs); no AppRole login, no renew-self in this mode; later missing/empty warns (path only) and keeps the last token; token never logged; token_file together with OPENBAO_ROLE_ID/SECRET_ID dies in build_app. Capability: 'skeid capabilities' / Langertha::Skeid->capabilities lists openbao_token_file. t/96-openbao-token-file.t (21, OpenBao double: login via file, rotation, timer re-read, missing/empty, both-modes error, build_app wiring). prove -lr t/ PASS. Hint for the starter: replace the file by rename.
