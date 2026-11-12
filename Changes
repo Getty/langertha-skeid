@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Usage contract: every usage event records finish_reason (stop, length,
+      content_filter, tool_calls, error, other), ttft_ms for streamed answers and
+      correlation_id from the header routing.correlation_header names (8-64 of
+      [A-Za-z0-9._-], passed through unchanged). The DBI stores add the three nullable
+      columns to an existing table.
     - Key rate: a policy (or a keys entry) may carry rate: { per_s, burst, per_min }. A
       customer key over it is answered 429 with Retry-After in its face's shape before
       anything is routed, and the refusal is a usage event with error_type

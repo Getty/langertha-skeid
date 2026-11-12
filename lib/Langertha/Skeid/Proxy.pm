@@ -2495,6 +2495,7 @@ sub _proxy_openai_json_async {
       ok           => ($status < 500) ? 1 : 0,
       duration_ms  => $duration_ms,
       metrics      => $metrics,
+      finish_reason => _payload_finish_reason($payload),
       ($relay->{units} ? $relay->{units}->($payload, $res) : ()),
     });
 
@@ -2560,6 +2561,11 @@ sub _proxy_openai_stream {
   # call as a non-streamed answer (skeid #41). undef until a frame carries one.
   my $upstream_usage;
   my $accumulated_content_bytes = 0;
+  # The usage contract (skeid k121): how the answer ended, and when its first token came.
+  my ($finish_reason, $ttft_ms);
+  my $answer_facts = sub {
+    return (finish_reason => $finish_reason, (defined($ttft_ms) ? (ttft_ms => $ttft_ms) : ()));
+  };
   # UTF-8 bytes of the content this stream relayed or translated, for the usage event (skeid #36).
   # A relayed stream counts off the OpenAI deltas it read along; a translated one takes its
   # translator's own count -- the text it actually wrote in the client's format. An observation
@@ -2635,6 +2641,7 @@ sub _proxy_openai_stream {
       error_type    => 'translation_error',
       error_message => 'Stream translation failed',
       content_bytes => $content_bytes->(),
+      $answer_facts->(),
       metrics       => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
       $units->(),
     });
@@ -2704,15 +2711,24 @@ sub _proxy_openai_stream {
       my $json = eval { decode_json($payload) };
       next unless $json && ref($json) eq 'HASH';
 
-      if (my $delta = $json->{choices}[0]{delta}) {
+      my $choice = ref($json->{choices}) eq 'ARRAY' ? $json->{choices}[0] : undef;
+      if (ref($choice) eq 'HASH' && (my $delta = $choice->{delta})) {
         if (my $delta_content = $delta->{content}) {
           $accumulated_content_bytes += Langertha::Skeid::Protocol::utf8_length($delta_content);
         }
+        $ttft_ms //= _duration_ms($started)
+          if ref($delta) eq 'HASH' && grep { defined($_) && length($_) }
+            $delta->{content}, $delta->{reasoning_content}, $delta->{reasoning},
+            (ref($delta->{tool_calls}) eq 'ARRAY' && @{$delta->{tool_calls}} ? 'tool_calls' : undef);
       }
+      $finish_reason = $choice->{finish_reason}
+        if ref($choice) eq 'HASH' && defined($choice->{finish_reason}) && !ref($choice->{finish_reason});
       if ($relay->{delta_text}) {
         my $text = $relay->{delta_text}->($json);
-        $accumulated_content_bytes += Langertha::Skeid::Protocol::utf8_length($text)
-          if defined($text) && length($text);
+        if (defined($text) && length($text)) {
+          $accumulated_content_bytes += Langertha::Skeid::Protocol::utf8_length($text);
+          $ttft_ms //= _duration_ms($started);
+        }
       }
 
       if (ref($json->{usage}) eq 'HASH') {
@@ -2771,6 +2787,7 @@ sub _proxy_openai_stream {
       node_id       => $node_id,
       duration_ms   => $duration_ms,
       content_bytes => $content_bytes->(),
+      $answer_facts->(),
       metrics       => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
       $units->(),
     });
@@ -2813,6 +2830,7 @@ sub _proxy_openai_stream {
           error_type    => 'upstream_error',
           error_message => ($err->{message} // 'unknown'),
           content_bytes => $content_bytes->(),
+          $answer_facts->(),
           metrics       => _stream_metrics($c, $meta, $body, _duration_ms($started), $upstream_usage),
           $units->(),
         });
@@ -2896,6 +2914,7 @@ sub _proxy_openai_stream {
       ok           => ($had_error || $status >= 500) ? 0 : 1,
       duration_ms  => $duration_ms,
       content_bytes => $content_bytes->(),
+      $answer_facts->(),
       metrics      => _stream_metrics($c, $meta, $body, $duration_ms, $upstream_usage),
       $units->(),
     });
@@ -3620,6 +3639,44 @@ sub _request_id {
   return 'req_' . int(time * 1000) . '_' . int(rand(1_000_000));
 }
 
+# finish_reason in the usage contract's words (skeid k121): stop, length, content_filter,
+# tool_calls, error or other. A failed request is `error`, whatever came before; a request whose
+# answer has no finish reason (embeddings, audio, rerank, documents) has none.
+my %FINISH_REASON = (
+  stop => 'stop', length => 'length', content_filter => 'content_filter',
+  tool_calls => 'tool_calls', function_call => 'tool_calls',
+);
+
+sub _finish_reason_field {
+  my ($args) = @_;
+  return (finish_reason => 'error')
+    if !$args->{ok} && (($args->{status_code} // 0) >= 400 || length($args->{error_type} // ''));
+  my $raw = $args->{finish_reason};
+  return () unless defined($raw) && !ref($raw) && length($raw);
+  return (finish_reason => ($FINISH_REASON{lc $raw} // 'other'));
+}
+
+# The finish reason of a non-streamed OpenAI answer, if it has one.
+sub _payload_finish_reason {
+  my ($payload) = @_;
+  return undef unless ref($payload) eq 'HASH' && ref($payload->{choices}) eq 'ARRAY';
+  my $choice = $payload->{choices}[0];
+  return undef unless ref($choice) eq 'HASH';
+  my $reason = $choice->{finish_reason};
+  return (defined($reason) && !ref($reason)) ? $reason : undef;
+}
+
+# The caller's correlation id (skeid k121): the header routing.correlation_header names, passed
+# through unchanged when it is 8 to 64 of [A-Za-z0-9._-]; anything else is not recorded.
+sub _correlation_field {
+  my ($c) = @_;
+  my $header = $c->skeid->correlation_header;
+  return () unless defined($header) && length($header);
+  my $value = $c->req->headers->header($header);
+  return () unless defined($value) && $value =~ /\A[A-Za-z0-9._-]{8,64}\z/;
+  return (correlation_id => $value);
+}
+
 sub _record_usage_event {
   my ($c, $args) = @_;
   $args ||= {};
@@ -3665,6 +3722,11 @@ sub _record_usage_event {
       (defined($args->{documents}) ? (documents => 0 + $args->{documents}) : ()),
       # The documents routes, when the answer carried a page count (skeid k94, ADR 0028).
       (defined($args->{pages}) ? (pages => 0 + $args->{pages}) : ()),
+      # The usage contract (skeid k121): how the answer ended, when its first token came (streams
+      # only), and the caller's correlation id when the config names its header.
+      _finish_reason_field($args),
+      (defined($args->{ttft_ms}) ? (ttft_ms => 0 + $args->{ttft_ms}) : ()),
+      _correlation_field($c),
       metrics       => $safe_metrics,
     });
   };

@@ -262,6 +262,12 @@ my @ADDED_COLUMNS = (
   # Pages a documents request converted (skeid k94, ADR 0028), read off the answer's
   # json_content. Nullable: only a documents event whose answer carried a page count has one.
   ['pages', 'BIGINT'],
+  # The usage contract (skeid k121): how the answer ended, the time to its first token (streams
+  # only) and the caller's correlation id. Nullable: an old row, or an event without one, reads
+  # NULL.
+  ['finish_reason', 'TEXT'],
+  ['ttft_ms', 'BIGINT'],
+  ['correlation_id', 'TEXT'],
 );
 
 sub _add_missing_columns {
@@ -695,7 +701,7 @@ my @EVENT_COLUMNS = qw(
   status_code ok duration_ms input_tokens output_tokens total_tokens cached_tokens tool_calls
   cost_input_usd cost_output_usd cost_total_usd error_type error_message requested_model
   content_bytes cost_cache_read_usd cost_cache_write_usd cache_write_tokens audio_seconds
-  documents pages
+  documents pages finish_reason ttft_ms correlation_id
 );
 # Nullable, written as NULL when the event has no such key -- "not measured", not a zero:
 #   cached_tokens          an event that carried no cache count
@@ -706,6 +712,9 @@ my @EVENT_COLUMNS = qw(
 #   audio_seconds          only an audio route's event, and only when its node reported it
 #   documents              only a rerank or documents event
 #   pages                  only a documents event whose answer said how many pages it was
+#   finish_reason          an event whose answer had none (embeddings, audio, ...) and no error
+#   ttft_ms                only a streamed event that relayed a token
+#   correlation_id         an event whose caller sent none, or the config names no header
 # requested_model falls back to model, then ''.
 my $INSERT_SQL = 'INSERT INTO usage_events (' . join(', ', @EVENT_COLUMNS) . ') VALUES ('
   . join(', ', ('?') x @EVENT_COLUMNS) . ')';

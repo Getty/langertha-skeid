@@ -89,6 +89,13 @@ Directory mode is auto-detected when the path is an existing directory or ends
 with C</>.  It writes one C<.json> file per event, which avoids file-level
 locking and concurrent-write collisions entirely.
 
+Three fields of an event say how a request went for its caller (skeid k121), each absent
+(C<NULL> in a DBI store) when it is not known: C<finish_reason> -- C<stop>, C<length>,
+C<content_filter>, C<tool_calls>, C<error> (any failed request) or C<other>, from the upstream's
+OpenAI answer whatever face the client spoke; C<length> is the truncated answer an agent fails
+on silently. C<ttft_ms> -- milliseconds from admission to the first token of a streamed answer.
+C<correlation_id> -- the value of the header L</correlation_header> names, unchanged.
+
 B<Constructor callbacks> (custom backend, no subclassing):
 
   my $skeid = Langertha::Skeid->new(
@@ -726,6 +733,7 @@ repeats a URL, a header value or a C<keys> entry.
     wait_poll_ms: 25             # default 25, at least 1: how often a waiting request retries
     trust_key_id_header: false   # default false; see key_id_for_key
     frontend_count: 1            # default 1, at least 1; see frontend_count
+    correlation_header: X-Correlation-ID   # default none; see correlation_header
 
 The defaults come from L</ENVIRONMENT> when set there.
 
@@ -1182,6 +1190,25 @@ C<routing.trust_key_id_header>). Turn it on only behind a gateway that authentic
 and sets that header itself: the key id selects both the routing policy and the bill.
 
 =cut
+
+=attr correlation_header
+
+The request header whose value a usage event records as C<correlation_id> (default none, or
+C<SKEID_CORRELATION_HEADER>; config C<routing.correlation_header>). The value is recorded
+unchanged when it is 8 to 64 characters of C<A-Z a-z 0-9 . _ ->, and not at all otherwise; it is
+the caller's own id, to join Skeid's usage with the caller's records.
+
+=cut
+
+has correlation_header => (
+  is      => 'rw',
+  builder => '_build_correlation_header',
+);
+
+sub _build_correlation_header {
+  my $name = $ENV{SKEID_CORRELATION_HEADER};
+  return (defined($name) && length($name)) ? _normalize_correlation_header($name) : undef;
+}
 
 # Whether x-skeid-key-id / x-api-key-id from the client may name the customer. Off by default:
 # once a policy hangs off the key id, believing that header lets any client pick its own
@@ -1719,7 +1746,15 @@ my %ROUTING_SETTINGS = (
   # so a stray 0 falls back to today's single-frontend behaviour instead of dividing max_conns
   # to nothing.
   frontend_count      => [ frontend_count        => sub { my $n = int(0 + $_[0]); $n < 1 ? 1 : $n } ],
+  correlation_header  => [ correlation_header    => \&_normalize_correlation_header ],
 );
+
+sub _normalize_correlation_header {
+  my ($name) = @_;
+  croak 'routing.correlation_header must be a header name'
+    if ref($name) || $name !~ /\A[!#\$%&'*+.^_`|~0-9A-Za-z-]+\z/;
+  return "$name";
+}
 
 sub BUILD {
   my ($self, $args) = @_;
@@ -3612,6 +3647,13 @@ sub record_usage {
   # The pages a documents request converted (skeid k94, ADR 0028), read off json_content of the
   # answer when it carries one. Optional like audio_seconds: absent is not measured, never 0.
   $event{pages} = _num($args{pages}) if defined $args{pages};
+  # The usage contract (skeid k121), each optional like the ones above: how the answer ended
+  # (stop, length, content_filter, tool_calls, error, other), the time to its first token in ms
+  # (streams only), and the caller's correlation id. Absent is "not known", never a default.
+  for my $field (qw( finish_reason correlation_id )) {
+    $event{$field} = "$args{$field}" if defined($args{$field}) && !ref($args{$field});
+  }
+  $event{ttft_ms} = _num($args{ttft_ms}) if defined $args{ttft_ms};
 
   return $self->_store_usage_event(\%event);
 }

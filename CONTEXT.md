@@ -311,6 +311,13 @@ billing unit
 and the reason Skeid exists between a client and a node.
 _Avoid_: log line, metric, sample.
 
+**Finish reason** (`finish_reason`):
+How an answer ended, on its **Usage event**: `stop`, `length`, `content_filter`, `tool_calls`,
+`error` (any failed request) or `other`; absent where the answer has none (embeddings, audio).
+Beside it `ttft_ms` (time to the first token, streams only) and `correlation_id` (the caller's
+own id from a configured header) — the usage contract a platform reads (skeid k121).
+_Avoid_: stop reason (Anthropic's wire name), status.
+
 **Audio seconds** (`audio_seconds`):
 The seconds of audio a node says it worked on, on the **Usage event** of an audio **Relayed
 route**. The first **usage unit** that is not a token count: an optional event field recorded
