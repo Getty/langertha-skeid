@@ -1,0 +1,33 @@
+---
+class: standard
+completed: 2026-11-12T05:08:01Z
+created: 2026-11-04T07:35:56Z
+id: 112
+priority: high
+started: 2026-11-12T05:08:01Z
+status: done
+tags:
+- security
+- config
+- nodes
+- downstream
+title: 'Nodes from a second, less trusted file: node_files with an allowlist for api_key_env,
+  no api_key_ref, url hosts'
+updated: 2026-11-12T05:53:53Z
+---
+
+From a downstream security review, 2026-11-04: a GPU manager writes Skeid's node list into a ConfigMap (nodes.yaml) that Skeid reads by mtime reload. Today Skeid reads exactly one config file, and a node entry may name any api_key_env and any api_key_ref. Whoever can write that list (a compromised manager) could make Skeid send any environment variable or broker secret as a node key to a URL of its choosing.
+Want: the main config names extra node files with constraints, e.g.
+  node_files:
+    - path: /etc/skeid/extra/nodes.yaml
+      allow_api_key_env: '^SKEID_NODE_EXTRA_[A-Z0-9_]+_API_KEY$'
+      allow_api_key_ref: false
+      allow_url_hosts: [ '*.node-manager.svc' ]
+      allow_kinds: [ documents, chat ]
+A node from such a file that breaks a constraint is rejected (reload status names file, position and rule, never the value); the rest of the file still loads; the file only contributes nodes (no policies, keys, aliases). Reload by mtime per file, all-or-nothing per file. Interplay with the admin API and customer_source/node_source as for file nodes today.
+Alternative to weigh in the ADR: a deployment's own Skeid class (ADR 0030, k111) reading the list itself — but the constraint is generic, every deployment with a second writer needs it.
+Order: after k111 (one writer per repo). Until Skeid can, a deployment may merge the two files in a sidecar with this allowlist.
+
+2026-11-12 05:08 Done in 78b62c1 (pushed): node_files with path, allow_api_key_env (regex, default none), allow_api_key_ref (default false), allow_url_hosts (required, * = one label), allow_kinds (default chat); allowlisted fields (no capacity); id_taken against main/earlier files; per-node rejection by {position, rule}, per-file last-good on parse error/missing/non-nodes keys; re-read on mtime/size/inode; contribution in the fingerprint (loader versions too); GET /skeid/config node_files. Module Langertha::Skeid::NodeFiles, ADR 0031, t/91-node-files.t (59 tests). prove -lr t/ 107 files 6280 tests PASS.
+
+2026-11-12 05:53 Review fixes in cae8ba0 (pushed): see commit message (node files: alias/size/depth bound, no client credentials to keyless node-file nodes, health kept on node-file-only change; rate: unlisted keys share one bucket without client_auth; jsonlog purge: lock re-check, permissions kept).
