@@ -1,0 +1,23 @@
+---
+class: standard
+completed: 2026-11-12T05:20:45Z
+created: 2026-11-07T03:39:58Z
+id: 122
+priority: medium
+started: 2026-11-12T05:20:45Z
+status: done
+tags:
+- privacy
+- downstream
+title: Delete usage data of one organisation on request
+updated: 2026-11-12T05:54:02Z
+---
+
+A deployment's erasure process has a step for proxy usage data; it cannot complete until Skeid offers a way to delete (or anonymise) all usage rows of one organisation/API-key set. Needed: an admin call or CLI with a dry-run count, idempotent, and a result the platform can record.
+Requested by a downstream deployment. Small commits per step.
+
+2026-11-07 08:54 Also needed: a retention period for the usage tables Skeid writes (usage_events, usage_billed): how long rows are kept and a purge run, so a deployment's retention register can point to it.
+
+2026-11-12 05:20 Done in 109458c (pushed). POST /skeid/usage/purge {api_key_ids, before, dry_run} and 'skeid usage-purge [--api-key-id ...] [--before|--retention] [--dry-run]' -> {ok, matched, deleted, dry_run, api_key_ids (count), before, backend, purged_at}; idempotent; 400 bad request, 503 store failed (CLI exit 2). sqlite/postgresql: one DELETE; refused while spool_dir holds events (they would bring rows back). jsonlog dir: unlink files; file: rewrite under the append lock + rename, appends re-check the inode after the lock. usage_store.retention_days (every backend) + 'skeid usage-purge --retention' for a cron job; no in-process purge (ADR 0005). Anonymise not offered, only delete. usage_billed is not a Skeid table (platform's) - not covered. t/94-usage-purge.t (sqlite, jsonlog dir+file, admin route, CLI, spool). prove -lr t/ 110 files 6406 tests PASS.
+
+2026-11-12 05:54 Review fixes in cae8ba0 (pushed): see commit message (node files: alias/size/depth bound, no client credentials to keyless node-file nodes, health kept on node-file-only change; rate: unlisted keys share one bucket without client_auth; jsonlog purge: lock re-check, permissions kept).
