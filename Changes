@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Usage purge: POST /skeid/usage/purge and skeid usage-purge delete the usage events
+      of a set of customer key ids (an organisation's, on an erasure request) and/or those
+      created before a time, with a dry-run count; idempotent, answered with what matched
+      and was deleted, by which store and when. Both built-in stores purge; a DBI store
+      refuses while its spool holds events. usage_store.retention_days sets a retention,
+      and skeid usage-purge --retention deletes what is past it, run on a schedule.
     - Usage contract: every usage event records finish_reason (stop, length,
       content_filter, tool_calls, error, other), ttft_ms for streamed answers and
       correlation_id from the header routing.correlation_header names (8-64 of

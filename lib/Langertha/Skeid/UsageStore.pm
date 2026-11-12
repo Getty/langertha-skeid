@@ -54,7 +54,15 @@ returns
                     cached_tokens, cache_write_tokens, tool_calls, cost_total_usd }, ... ],
   }
 
-or C<< { ok => 0, enabled => 0, error => $message } >>. The breakdowns are ordered by cost,
+or C<< { ok => 0, enabled => 0, error => $message } >>.
+
+A store that can delete events (skeid k122) also answers C<purge(\%request)>, the request
+checked by L</purge_request>: it deletes the events matching it, or with C<dry_run> only counts
+them, and answers C<< { ok => 1, matched => N, deleted => N } >> (C<deleted> 0 on a dry run) or
+C<< { ok => 0, error => $message } >>. A second purge of the same request matches nothing, so
+it can be repeated until it answered C<ok>. Both built-in stores do.
+
+The breakdowns are ordered by cost,
 highest first; C<recent> is newest first. C<audio_seconds> sums what the events of the audio
 routes carry, C<documents> what those of the rerank and documents routes carry and C<pages> what
 those of the documents routes read off their answers
@@ -132,6 +140,7 @@ sub normalize_config {
       auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
       flush_interval_ms => $class->_flush_interval_ms($cfg),
       spool_dir    => $class->_spool_dir($cfg),
+      $class->_retention($cfg),
     };
   }
 
@@ -157,6 +166,7 @@ sub normalize_config {
       auto_migrate => exists($cfg->{auto_migrate}) ? ($cfg->{auto_migrate} ? 1 : 0) : 1,
       flush_interval_ms => $class->_flush_interval_ms($cfg),
       spool_dir    => $class->_spool_dir($cfg),
+      $class->_retention($cfg),
     };
   }
 
@@ -172,6 +182,7 @@ sub normalize_config {
       path    => $path,
       mode    => $mode,
       fsync   => ($cfg->{fsync} ? 1 : 0),
+      $class->_retention($cfg),
     };
   }
 
@@ -187,6 +198,54 @@ sub _flush_interval_ms {
   croak 'usage_store.flush_interval_ms must be a whole number of milliseconds (0 = write each event at once)'
     unless $ms =~ /\A\d+\z/;
   return 0 + $ms;
+}
+
+# How long usage events are kept (skeid k122): whole days, or absent for "until deleted". Read by
+# `skeid usage-purge --retention`, never on the request path.
+sub _retention {
+  my ($class, $cfg) = @_;
+  my $days = $cfg->{retention_days};
+  return () unless defined $days;
+  croak 'usage_store.retention_days must be a whole number of days, at least 1'
+    unless !ref($days) && $days =~ /\A[0-9]+\z/ && $days >= 1;
+  return (retention_days => 0 + $days);
+}
+
+=method purge_request
+
+  my ($request, $error) = Langertha::Skeid::UsageStore->purge_request(\%args);
+
+Checks what a purge (L</The store contract>) was asked to delete: C<api_key_ids> (a list of
+customer key ids), C<before> (an ISO 8601 UTC timestamp, C<YYYY-MM-DDTHH:MM:SSZ>: events created
+before it), or both, which must both match; and C<dry_run>. At least one of the two filters is
+required -- a purge of everything is not a request this takes. Returns the request, or undef
+and why not.
+
+=cut
+
+sub purge_request {
+  my ($class, $args) = @_;
+  return (undef, 'a purge needs arguments') unless ref($args) eq 'HASH';
+  my ($ids, $before);
+  if (defined $args->{api_key_ids}) {
+    my $list = $args->{api_key_ids};
+    return (undef, 'api_key_ids must be a non-empty list of key ids')
+      unless ref($list) eq 'ARRAY' && @$list
+        && !grep { !defined($_) || ref($_) || !length($_) || length($_) > 256 } @$list;
+    my %seen;
+    $ids = [ grep { !$seen{$_}++ } map { "$_" } @$list ];
+  }
+  if (defined $args->{before}) {
+    $before = $args->{before};
+    return (undef, 'before must be an ISO 8601 UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)')
+      if ref($before) || $before !~ /\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z\z/;
+  }
+  return (undef, 'a purge needs api_key_ids, before, or both') unless $ids || defined $before;
+  return ({
+    ($ids ? (api_key_ids => $ids) : ()),
+    (defined($before) ? (before => "$before") : ()),
+    dry_run => ($args->{dry_run} ? 1 : 0),
+  });
 }
 
 # The usage spool of the DBI backends (skeid k110, ADR 0027). Empty -- the default -- keeps the

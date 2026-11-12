@@ -376,6 +376,8 @@ C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
   GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
   GET  /skeid/metrics/keys         {metrics}: per customer key id, requests refused for its rate
   GET  /skeid/usage                ?since=&api_key_id=&model=&limit= (default 50) -> the report
+  POST /skeid/usage/purge          body: {api_key_ids: [...], before: ISO, dry_run: bool} ->
+                                   {ok, matched, deleted, ...}; 400 bad request, 503 store failed
   GET  /skeid/openapi.json         OpenAPI 3.1 description of the admin routes
 
 Changes made here live in this process only: a changed C<nodes> section in the config replaces
@@ -981,6 +983,23 @@ sub _build_route_table {
     handler => sub {
       my ($c) = @_;
       $c->render(json => { metrics => $c->skeid->key_metrics });
+    });
+
+  # Erasure and retention (skeid k122): delete the usage events of a set of key ids, or before a
+  # time. Synchronous like the usage report: it is an operator call, not a request path.
+  $add->(id => 'admin_usage_purge', group => 'admin', methods => ['POST'], paths => ['/skeid/usage/purge'],
+    document => 'admin', tag => 'Admin', summary => 'Delete usage events of key ids, or before a time',
+    handler => sub {
+      my ($c) = @_;
+      my $body = $c->req->json;
+      $body = {} unless ref($body) eq 'HASH';
+      my ($request, $error) = Langertha::Skeid::UsageStore->purge_request($body);
+      unless ($request) {
+        $c->render(json => { ok => 0, error => $error }, status => 400);
+        return;
+      }
+      my $result = $c->skeid->purge_usage(%$request);
+      $c->render(json => $result, status => ($result->{ok} ? 200 : 503));
     });
 
   $add->(id => 'admin_usage', group => 'admin', paths => ['/skeid/usage'], document => 'admin',

@@ -1004,6 +1004,51 @@ every event recorded before it was asked for.
 
 =cut
 
+=method purge
+
+  my $result = $store->purge({ api_key_ids => [ 'k_...' ], before => '2026-01-01T00:00:00Z', dry_run => 1 });
+
+Deletes the usage events a request from L<Langertha::Skeid::UsageStore/purge_request> matches,
+in one statement, after writing out what write-behind holds; see
+L<Langertha::Skeid::UsageStore/The store contract> for the answer. Refused while the spool holds
+events: they would be written after the purge and bring the deleted rows back. Replay them
+first (they replay on their own once the database is reachable), then purge again.
+
+=cut
+
+sub purge {
+  my ($self, $request) = @_;
+  $self->flush;
+  if (length($self->spool_dir)) {
+    my @waiting = grep { -s File::Spec->catfile($self->spool_dir, $_) } $self->_spool_files('any');
+    return { ok => 0, error => 'the usage spool holds ' . scalar(@waiting) . ' file(s) of events '
+      . 'not yet in the database; purge again once they are replayed' } if @waiting;
+  }
+
+  my (@where, @bind);
+  if (my $ids = $request->{api_key_ids}) {
+    push @where, 'api_key_id IN (' . join(', ', ('?') x @$ids) . ')';
+    push @bind, @$ids;
+  }
+  if (defined $request->{before}) {
+    push @where, 'created_at < ?';
+    push @bind, $request->{before};
+  }
+  return { ok => 0, error => 'a purge needs api_key_ids, before, or both' } unless @where;
+  my $where = join ' AND ', @where;
+
+  return $self->_with_handle(sub {
+    my ($dbh) = @_;
+    my ($matched) = $dbh->selectrow_array("SELECT COUNT(*) FROM usage_events WHERE $where", undef, @bind);
+    my $deleted = 0;
+    unless ($request->{dry_run}) {
+      $deleted = $dbh->do("DELETE FROM usage_events WHERE $where", undef, @bind);
+      $deleted = 0 if !defined($deleted) || $deleted eq '0E0';
+    }
+    return { ok => 1, matched => 0 + ($matched // 0), deleted => 0 + $deleted };
+  });
+}
+
 sub report {
   my ($self, $filters) = @_;
   $filters ||= {};

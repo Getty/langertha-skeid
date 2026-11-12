@@ -199,16 +199,102 @@ sub store {
   my $id = _event_id();
   my $json = encode_json({ %$event, id => $id });
   my $path = $self->path;
-  open my $fh, '>>', $path or return { ok => 0, error => "Cannot append $path: $!" };
-  unless (flock($fh, LOCK_EX)) {
-    my $error = _io_error('lock', $path, "$!");
+  my $fh;
+  # A purge replaces the file by renaming a rewritten copy over it, under this same lock. An
+  # append that opened the old file and waited for the lock would write into the replaced file
+  # and be lost, so after the lock it checks that it still holds the file at $path.
+  for (1 .. $CREATE_ATTEMPTS) {
+    open $fh, '>>', $path or return { ok => 0, error => "Cannot append $path: $!" };
+    unless (flock($fh, LOCK_EX)) {
+      my $error = _io_error('lock', $path, "$!");
+      close $fh;
+      return { ok => 0, error => $error };
+    }
+    my @held = stat $fh;
+    my @now  = stat $path;
+    last if @now && $held[0] == $now[0] && $held[1] == $now[1];
     close $fh;
-    return { ok => 0, error => $error };
+    undef $fh;
   }
+  return { ok => 0, error => "Cannot append $path: it was replaced while waiting for the lock" } unless $fh;
   my $error = _write_and_close($self, $fh, $path, $json, 'append');
   return { ok => 0, error => $error } if $error;
 
   return { ok => 1, id => $id };
+}
+
+=method purge
+
+  my $result = $store->purge({ api_key_ids => [ 'k_...' ], dry_run => 1 });
+
+Deletes the events a request from L<Langertha::Skeid::UsageStore/purge_request> matches; see
+L<Langertha::Skeid::UsageStore/The store contract> for the answer. In directory mode each
+matching event's file is removed. In file mode the file is rewritten without them under the
+same lock appends take, to a temporary file renamed over it, so no event appended meanwhile is
+lost and a crash leaves either the old file or the new one. An unreadable line is kept.
+
+=cut
+
+sub purge {
+  my ($self, $request) = @_;
+  my $matches = sub {
+    my ($ev) = @_;
+    return 0 unless ref($ev) eq 'HASH';
+    if (my $ids = $request->{api_key_ids}) {
+      my $id = $ev->{api_key_id} // '';
+      return 0 unless grep { $_ eq $id } @$ids;
+    }
+    return 0 if defined($request->{before}) && !(($ev->{created_at} // '') lt $request->{before});
+    return 1;
+  };
+
+  if ($self->mode eq 'dir') {
+    my ($matched, $deleted) = (0, 0);
+    for my $file (sort glob(File::Spec->catfile($self->path, '*.json'))) {
+      my $text = eval { Langertha::Skeid::UsageStore::read_text_file($file) };
+      next unless defined $text;
+      my $ev = eval { decode_json($text) };
+      next unless $matches->($ev);
+      $matched++;
+      next if $request->{dry_run};
+      unlink($file) or return { ok => 0, error => "Cannot remove $file: $!", matched => $matched, deleted => $deleted };
+      $deleted++;
+    }
+    return { ok => 1, matched => $matched, deleted => $deleted };
+  }
+
+  my $path = $self->path;
+  return { ok => 1, matched => 0, deleted => 0 } unless -e $path;
+  open my $lock, '>>', $path or return { ok => 0, error => "Cannot open $path: $!" };
+  flock($lock, LOCK_EX) or return { ok => 0, error => _io_error('lock', $path, "$!") };
+  open my $in, '<', $path or return { ok => 0, error => "Cannot read $path: $!" };
+  my ($matched, @keep) = (0);
+  while (my $line = <$in>) {
+    my $text = $line;
+    chomp $text;
+    my $ev = length($text) ? eval { decode_json($text) } : undef;
+    if ($matches->($ev)) { $matched++; next }
+    push @keep, $line;
+  }
+  close $in;
+  return { ok => 1, matched => $matched, deleted => 0 } if $request->{dry_run} || !$matched;
+
+  my $tmp = "$path.purge-$$";
+  open my $out, '>', $tmp or return { ok => 0, error => "Cannot write $tmp: $!" };
+  my $error;
+  print {$out} @keep or $error = _io_error('write', $tmp, "$!");
+  if (!$error && $self->fsync) {
+    ($out->flush && $out->sync) or $error = _io_error('sync', $tmp, "$!");
+  }
+  close($out) or $error ||= _io_error('close', $tmp, "$!");
+  if ($error) { unlink $tmp; return { ok => 0, error => $error } }
+  unless (rename $tmp, $path) {
+    my $err = "Cannot replace $path: $!";
+    unlink $tmp;
+    return { ok => 0, error => $err };
+  }
+  close $lock;
+  return { ok => 1, matched => $matched, deleted => $matched };
 }
 
 =method report

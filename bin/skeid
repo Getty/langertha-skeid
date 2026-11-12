@@ -23,6 +23,10 @@ if (@ARGV && defined($ARGV[0]) && $ARGV[0] !~ /^-/) {
 if ($cmd eq 'usage') {
   exit _run_usage(@ARGV);
 }
+if ($cmd eq 'usage-purge') {
+  exit _run_usage_purge(@ARGV);
+}
+
 if ($cmd eq 'keyid') {
   exit _run_keyid(@ARGV);
 }
@@ -301,6 +305,41 @@ sub _config_file {
 
 # Prints the key id a customer key routes and bills under. Needed because a config names
 # customers in keys:, and must be able to do that without holding their keys.
+# skeid usage-purge (skeid k122): delete usage events of key ids, or past the retention, through
+# the config's usage store. Meant for an erasure step and for a cron job; prints the result as
+# JSON so the caller can record it. Exit 0 when it succeeded, 2 when not.
+sub _run_usage_purge {
+  my (@argv) = @_;
+  my ($config, @ids, $before, $retention, $dry_run);
+  GetOptionsFromArray(
+    \@argv,
+    'config|c=s'     => \$config,
+    'api-key-id=s'   => \@ids,
+    'before=s'       => \$before,
+    'retention'      => \$retention,
+    'dry-run'        => \$dry_run,
+  ) or die _usage_text();
+  push @ids, @argv;
+  die "skeid usage-purge: --before and --retention exclude each other\n" if defined($before) && $retention;
+
+  my $config_file = _config_file($config);
+  my $skeid = Langertha::Skeid->new(defined($config_file) ? (config_file => $config_file) : ());
+  if ($retention) {
+    $before = $skeid->usage_retention_before;
+    die "skeid usage-purge: --retention needs usage_store.retention_days in the config\n"
+      unless defined $before;
+  }
+
+  my $result = $skeid->purge_usage(
+    (@ids ? (api_key_ids => \@ids) : ()),
+    (defined($before) ? (before => $before) : ()),
+    dry_run => ($dry_run ? 1 : 0),
+  );
+  $skeid->flush_usage;
+  print JSON::MaybeXS->new(utf8 => 1, canonical => 1, pretty => 1)->encode($result);
+  return $result->{ok} ? 0 : 2;
+}
+
 sub _run_keyid {
   my (@argv) = @_;
 
@@ -328,6 +367,10 @@ Usage:
               [--db /path/to.sqlite] [--dsn dbi:Pg:...]
               [--db-user USER] [--db-pass PASS|--db-pass-env ENV]
               [--api-key-id ID] [--model NAME]
+  skeid usage-purge [--config skeid.yaml] [--api-key-id ID ...] [ID ...]
+              [--before ISO8601 | --retention] [--dry-run]
+                               delete usage events of key ids and/or before a time
+                               (--retention: usage_store.retention_days); prints JSON
   skeid keyid [KEY ...]        the key id to use in the config's keys: section
                                (reads stdin when given no argument)
 USAGE
@@ -341,6 +384,8 @@ USAGE
               [--db /path/to.sqlite] [--dsn dbi:Pg:...]
               [--db-user USER] [--db-pass PASS | --db-pass-env VAR]
               [--api-key-id ID] [--model NAME]
+  skeid usage-purge [--config skeid.yaml] [--api-key-id ID ...] [ID ...]
+              [--before ISO8601 | --retention] [--dry-run]
   skeid keyid [KEY ...]
 
 =head1 DESCRIPTION
@@ -468,6 +513,19 @@ Only events of this customer key id.
 =opt --model
 
 Only events for this served model.
+
+=head2 usage-purge
+
+  skeid usage-purge --config skeid.yaml --dry-run k_5f0e... k_9c8b...
+  skeid usage-purge --config skeid.yaml --retention
+
+Deletes usage events through the config's usage store (L<Langertha::Skeid/purge_usage>): those
+of the customer key ids given (as arguments or C<--api-key-id>) -- an organisation's, for an
+erasure request -- and/or those created before C<--before>, or before the retention cut-off of
+C<usage_store.retention_days> with C<--retention>, the purge run a cron job makes. C<--dry-run>
+only counts. Prints the result as JSON, for the caller to record, and exits 0 when it succeeded,
+2 when not (the spool still holds events, the database is down) -- run it again then, it is
+idempotent.
 
 =head2 keyid
 

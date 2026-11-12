@@ -785,11 +785,19 @@ The provider manifest: C<enabled>, C<public_url>, C<provider_id> (default C<skei
     #             write them in one transaction per interval (write-behind);
     #             spool_dir (default off) -- a local directory, one per instance, that keeps
     #             the events the database cannot take while it is down and replays them
+    # every backend: retention_days (default none) -- how long events are kept; the cut-off
+    #             `skeid usage-purge --retention` deletes before
 
 Where usage events go; see L<Langertha::Skeid::UsageStore/normalize_config> for the inference and
 the defaults. C<usage_db_path>, a top-level key, is the older spelling of a sqlite store and is
 read only when C<usage_store> is absent. A changed store is swapped on reload; a removed one stays
 in force until restart, with a warning -- see L</CONFIGURATION>.
+
+C<retention_days> is the retention a deployment's records can point to: events older than that
+many days are deleted by C<skeid usage-purge --retention>, run on a schedule (a cron job, a
+Kubernetes CronJob). Skeid does not purge on its own: a C<DELETE> over the usage table would run
+on the event loop that serves the requests (ADR 0005). See L</purge_usage> for deleting the
+events of an organisation's keys.
 
 C<flush_interval_ms> moves a database write off the request path: the request is answered at
 once and the queued events are written together once per interval. Queued events are held in
@@ -3692,6 +3700,58 @@ application embedding the proxy should call it before it exits: queued events li
 only. Replacing the store on a reload and destroying this object flush as well.
 
 =cut
+
+=method purge_usage
+
+  my $result = $skeid->purge_usage(api_key_ids => [ 'k_5f0e...', 'k_9c8b...' ], dry_run => 1);
+  # { ok => 1, dry_run => 1, matched => 1234, deleted => 0, backend => 'postgresql',
+  #   api_key_ids => 2, purged_at => '2026-11-12T05:00:00Z' }
+
+Deletes the usage events of a set of customer key ids -- an organisation's, on an erasure
+request -- or those created C<before> a time, or those of the keys before a time (skeid k122).
+C<dry_run> only counts. Idempotent: repeated, it deletes what is left, so a caller retries until
+C<ok>. The answer is meant to be recorded by the caller: what was asked (the number of key ids,
+C<before>), what matched, what was deleted, by which backend and when. Served by
+C<POST /skeid/usage/purge> and C<skeid usage-purge>. A store without a C<purge> (a
+C<store_usage_event> callback) answers C<ok> 0.
+
+=cut
+
+sub purge_usage {
+  my ($self, %args) = @_;
+  my ($request, $error) = Langertha::Skeid::UsageStore->purge_request(\%args);
+  return { ok => 0, error => $error } unless $request;
+  my $store = $self->_usage_store_obj;
+  return { ok => 0, error => 'no usage store is configured' } unless $store;
+  return { ok => 0, error => 'the usage store ' . $store->backend . ' cannot purge' }
+    unless $store->can('purge');
+  my $result = $store->purge($request);
+  $result = { ok => 0, error => 'the usage store answered nothing' } unless ref($result) eq 'HASH';
+  return {
+    %$result,
+    backend   => $store->backend,
+    dry_run   => $request->{dry_run},
+    ($request->{api_key_ids} ? (api_key_ids => scalar @{$request->{api_key_ids}}) : ()),
+    (defined($request->{before}) ? (before => $request->{before}) : ()),
+    purged_at => _iso8601_now(),
+  };
+}
+
+=method usage_retention_before
+
+  my $before = $skeid->usage_retention_before;   # '2026-08-14T05:00:00Z', or undef
+
+The cut-off of C<usage_store.retention_days>: events created before it are past their retention
+and C<skeid usage-purge --retention> deletes them. undef without a retention.
+
+=cut
+
+sub usage_retention_before {
+  my ($self) = @_;
+  my $cfg = ref($self->usage_store) eq 'HASH' ? $self->usage_store : {};
+  my $days = $cfg->{retention_days} or return undef;
+  return strftime('%Y-%m-%dT%H:%M:%SZ', gmtime(time - $days * 86400));
+}
 
 sub flush_usage {
   my ($self) = @_;
