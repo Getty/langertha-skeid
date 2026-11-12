@@ -1,0 +1,19 @@
+---
+class: standard
+completed: 2026-11-12T05:16:22Z
+created: 2026-11-07T03:39:58Z
+id: 121
+priority: medium
+started: 2026-11-12T05:16:22Z
+status: done
+tags:
+- usage
+- downstream
+title: 'Usage contract: finish_reason, ttft_ms and a correlation id per request'
+updated: 2026-11-12T05:16:22Z
+---
+
+Record per request in the usage table the platform reads: finish_reason (stop|length|content_filter|tool_calls|error|other), ttft_ms (time to first token), correlation_id taken from a configurable request header (e.g. X-Correlation-ID) (text, ^[A-Za-z0-9._-]{8,64}$, passed through unchanged). Truncated answers (length) are the main silent quality failure for agents.
+Requested by a downstream deployment. Small commits per step.
+
+2026-11-12 05:16 Done in 82e8f74 (pushed): finish_reason (stop|length|content_filter|tool_calls|error|other; function_call->tool_calls; any failed request -> error; absent where the answer has none), ttft_ms (streams: admission to first content/reasoning/tool-call delta or relayed delta_text), correlation_id (header named by routing.correlation_header / SKEID_CORRELATION_HEADER, ^[A-Za-z0-9._-]{8,64}$, unchanged; otherwise not recorded). DBI: three nullable columns, added to existing tables; JsonLog writes them as event keys. t/93-usage-contract.t (33 tests, all three faces, SQLite migration). prove -lr t/ 109 files 6363 tests PASS. Not done: the usage report (GET /skeid/usage) does not aggregate the new fields.
