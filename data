@@ -1,0 +1,32 @@
+---
+class: standard
+completed: 2026-11-12T05:11:43Z
+created: 2026-11-08T01:45:09Z
+id: 125
+priority: medium
+started: 2026-11-12T05:11:43Z
+status: done
+tags:
+- feature
+- limits
+title: Request rate limit per customer key (from the key's policy)
+updated: 2026-11-12T05:54:10Z
+---
+
+Generic capability: limit how many requests a single customer key may make, so an automated caller that runs away (a loop, a misbehaving agent) is stopped at the proxy before it burns capacity or budget.
+
+Proposal
+- Customer keys already carry a `policy` (customer_keys relation: key_id, name, policy, models). Add an optional rate block there, e.g. `{ rate: { per_s: 2, burst: 10, per_min: 60 } }`. Absent = no limit. A config-wide default may apply to keys without their own block; a key's own block may only be stricter than the default if the operator sets `max` (operator ceiling), never looser.
+- Token bucket per key_id, in memory per Skeid instance (documented as per-instance; a shared store is out of scope for now).
+- Over the limit: answer 429 with `Retry-After` (seconds) and an OpenAI-compatible error body (`type: rate_limit_exceeded`); do not forward upstream. Count the refusal in the usage store (status 429, a stable error_type such as `key_rate_limited`) without request content.
+- Expose the current refusals per key as a Prometheus counter (key id hashed or omitted, operator choice) for alerting.
+- Hot reload with the customer source: a changed policy takes effect on the next refresh; buckets of removed keys are dropped.
+
+Acceptance
+- Key with per_s 1/burst 1: second request within a second gets 429 + Retry-After, third after the wait passes.
+- Key without a rate block: unlimited as today.
+- Refusals appear in the usage store with status 429 and no content; nothing reaches the upstream node.
+
+2026-11-12 05:11 Done in 732321f + 4f485dc (pushed). rate: {per_s, burst (default ceil per_s), per_min} on a policy or keys entry (customer-source rows take their policy's rate); token buckets per key id in memory per process, divided by workers x frontends like max_conns; 429 + Retry-After + OpenAI-shaped {type: rate_limit_exceeded, code: key_rate_limited} (Anthropic/Ollama faces in their shapes) before routing, nothing upstream; usage event status 429, error_type key_rate_limited, no node, no content; buckets reset on rate change and pruned at policy load; GET /skeid/metrics/keys {key_id: {rate_limited}}. t/92-key-rate-limit.t (50 tests); prove -lr t/ 108 files 6330 tests PASS. Open vs. proposal: no Prometheus exposition (Skeid has none; JSON counter instead), no operator ceiling 'max' (keys entries are operator-written; customer-source rows can only name a policy, so cannot loosen).
+
+2026-11-12 05:54 Review fixes in cae8ba0 (pushed): see commit message (node files: alias/size/depth bound, no client credentials to keyless node-file nodes, health kept on node-file-only change; rate: unlisted keys share one bucket without client_auth; jsonlog purge: lock re-check, permissions kept).
