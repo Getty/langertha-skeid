@@ -1,0 +1,19 @@
+---
+class: standard
+completed: 2026-11-12T05:36:13Z
+created: 2026-11-12T05:12:09Z
+id: 126
+priority: medium
+started: 2026-11-12T05:36:13Z
+status: done
+tags:
+- customer-source
+- policy
+- rate
+title: 'Customer source: an optional rate per row, only stricter than its policy''s'
+updated: 2026-11-12T05:36:13Z
+---
+
+Follow-up of k125. Today a customer-source row can only name a policy, so a per-key rate needs one named policy per rate step in the file. Wanted: an optional rate column (JSON {per_s, burst, per_min}) in the relation, read only when the config names it (existing views keep working), applied only when it is stricter than the rate of the row's policy (the operator's policy is the ceiling); a looser or malformed rate rejects the row with a reason, never its value.
+
+2026-11-12 05:36 Done in 53598c1 (pushed): customer_source.rate_column; Rate->within (ceiling = row's policy or default_policy; burst capped; parts only the row has added); reasons without values; t/95-customer-source-rate.t (20). prove -lr t/ PASS.
