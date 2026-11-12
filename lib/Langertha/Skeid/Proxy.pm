@@ -497,7 +497,10 @@ failed. An embedding application that wants its own hook sets it after C<build_a
 
 With both C<OPENBAO_ROLE_ID> and C<OPENBAO_SECRET_ID> set, a
 L<Langertha::Skeid::KeyBroker::OpenBao> at C<OPENBAO_ADDR> (default C<http://127.0.0.1:8200>)
-becomes the key broker; if its login fails the proxy warns and runs without one. A broker that
+becomes the key broker; if its login fails the proxy warns and runs without one. With
+C<OPENBAO_TOKEN_FILE> set instead, the broker takes its token from that file (see
+L<Langertha::Skeid::KeyBroker::OpenBao/token_file>); a missing or empty file, or the AppRole
+variables set as well, stops C<build_app> with an error. A broker that
 can renew its token starts renewing on a timer. The capacity probes of every node are started
 and restarted whenever the probed part of the inventory changes, and the customer source of the
 config, if it has one, starts fetching (L<Langertha::Skeid/start_customer_source>).
@@ -525,9 +528,19 @@ my $UPLOAD_HEAD_ALLOWANCE = 1048576;
 sub build_app {
   my ($class, %opts) = @_;
 
-  # Auto-detect OpenBao KeyBroker if OPENBAO_ROLE_ID is set
+  # Auto-detect OpenBao KeyBroker: a token file (skeid k127), or AppRole credentials.
   my @skeid_opts = ($opts{config_file} ? (config_file => $opts{config_file}) : ());
-  if ($ENV{OPENBAO_ROLE_ID} && $ENV{OPENBAO_SECRET_ID}) {
+  if (defined($ENV{OPENBAO_TOKEN_FILE}) && length($ENV{OPENBAO_TOKEN_FILE})) {
+    # Loud, not a warning: a process told to take its token from a file that does not work must
+    # not start without keys, and must not quietly use AppRole values someone also left set.
+    die "OPENBAO_TOKEN_FILE and OPENBAO_ROLE_ID/OPENBAO_SECRET_ID are both set; set one\n"
+      if $ENV{OPENBAO_ROLE_ID} || $ENV{OPENBAO_SECRET_ID};
+    require Langertha::Skeid::KeyBroker::OpenBao;
+    push @skeid_opts, key_broker => Langertha::Skeid::KeyBroker::OpenBao->new(
+      addr       => $ENV{OPENBAO_ADDR} // 'http://127.0.0.1:8200',
+      token_file => $ENV{OPENBAO_TOKEN_FILE},
+    );
+  } elsif ($ENV{OPENBAO_ROLE_ID} && $ENV{OPENBAO_SECRET_ID}) {
     eval {
       require Langertha::Skeid::KeyBroker::OpenBao;
       push @skeid_opts, key_broker => Langertha::Skeid::KeyBroker::OpenBao->new(

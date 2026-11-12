@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - OpenBao key broker: OPENBAO_TOKEN_FILE instead of AppRole credentials, for many
+      processes behind one starter that keeps a token current in a file (an AppRole
+      secret_id is single use). Read at start -- missing or empty stops it -- and again
+      when it changes and on every renewal tick; the starter renews, Skeid does not. Both
+      modes set at once stop the start.
+    - skeid capabilities (and Langertha::Skeid->capabilities) print what this Skeid can
+      do, one name per line, for a deployment to check before it relies on a feature.
     - Customer source: with rate_column: true a fifth column, rate (JSON), gives a key its
       own request rate. It may only tighten the rate of the row's policy; a row asking for
       more is rejected with a reason. Langertha::Skeid::Rate holds the rate's shape.

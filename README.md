@@ -758,6 +758,7 @@ in the process list; in production, name the variable in the config.
 | `SKEID_CONFIG_RELOAD_INTERVAL` | `1` | seconds between runs of a Perl `config_loader` (not used for files) |
 | `OPENBAO_ADDR` | `http://127.0.0.1:8200` | OpenBao address |
 | `OPENBAO_ROLE_ID`, `OPENBAO_SECRET_ID` | — | AppRole credentials; both set enables the KeyBroker |
+| `OPENBAO_TOKEN_FILE` | — | instead of AppRole: a file holding the token, kept current by a starter of many processes; re-read when it changes; missing/empty, or set together with the AppRole variables, stops the start |
 | `OPENBAO_VERIFY_SSL` | on | `0` disables TLS verification (dev vault only) |
 
 Variables named in the config (`api_key_env`, `password_env`, `admin.api_key_env`,

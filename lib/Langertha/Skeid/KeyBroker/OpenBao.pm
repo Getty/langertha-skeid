@@ -1,9 +1,10 @@
 package Langertha::Skeid::KeyBroker::OpenBao;
 our $VERSION = '0.005';
-# ABSTRACT: OpenBao-backed KeyBroker with AppRole auth and token renewal
+# ABSTRACT: OpenBao-backed KeyBroker with AppRole auth or a token file, and token renewal
 use Moo;
 use HTTP::Tiny;
 use Mojo::IOLoop;
+use Time::HiRes ();
 use Mojo::UserAgent;
 use JSON::MaybeXS qw(decode_json encode_json);
 use POSIX qw(strftime);
@@ -19,6 +20,12 @@ extends 'Langertha::Skeid::KeyBroker';
     role_id     => $ENV{OPENBAO_ROLE_ID},
     secret_id   => $ENV{OPENBAO_SECRET_ID},
     renew_secs  => 300,  # renew token every 5 minutes
+  );
+
+  # Or many processes behind one starter that keeps a token current in a file (skeid k127):
+  my $broker = Langertha::Skeid::KeyBroker::OpenBao->new(
+    addr       => $ENV{OPENBAO_ADDR},
+    token_file => $ENV{OPENBAO_TOKEN_FILE},   # e.g. /run/skeid/openbao-token on a tmpfs
   );
 
   my $api_key = $broker->resolve_key('secret/skeid/remote/openai');   # blocking; CLI and tests
@@ -54,14 +61,36 @@ has addr => (
 );
 
 has role_id => (
-  is       => 'ro',
-  required => 1,
+  is => 'ro',
 );
 
 has secret_id => (
-  is       => 'ro',
-  required => 1,
+  is => 'ro',
 );
+
+=attr token_file
+
+Instead of C<role_id> and C<secret_id>: a file holding the OpenBao token to use
+(C<OPENBAO_TOKEN_FILE>), for many processes behind one starter (skeid k127). An AppRole
+C<secret_id> is single use, so only the first process could log in with it; the starter logs in
+once and keeps a periodic token current in the file, which every process reads.
+
+The file is read at construction -- missing or empty dies, there is no fallback -- and read
+again whenever it changed (its mtime, size or inode; a writer should replace it by rename), checked
+before a key is resolved, and read again on every tick of the L</start_renewal> timer
+(C<renew_secs>) whether or not it looks changed. This broker does not renew a token
+from a file: renewing is the starter's. A file that is missing or empty later warns, naming the
+path, and the last token read stays in use until OpenBao refuses it. The token is never logged.
+Giving both a C<token_file> and C<role_id>/C<secret_id> dies: which one counts is not guessed.
+
+=cut
+
+has token_file => (
+  is => 'ro',
+);
+
+# What the token file was when it was last read: mtime, size, inode.
+has _token_file_seen => (is => 'rw', default => sub { '' });
 
 has renew_secs => (
   is      => 'rw',
@@ -138,8 +167,58 @@ has _renewal_loop => (
 
 sub BUILD {
   my ($self) = @_;
+  if (defined($self->token_file) && length($self->token_file)) {
+    die "OpenBao: token_file and role_id/secret_id exclude each other; give one\n"
+      if length($self->role_id // '') || length($self->secret_id // '');
+    my $error = $self->_read_token_file;
+    die "$error\n" if defined $error;
+    return;
+  }
+  die "OpenBao: role_id and secret_id are required (or token_file)\n"
+    unless length($self->role_id // '') && length($self->secret_id // '');
   # Initial token fetch
   $self->_fetch_token;
+}
+
+sub _uses_token_file { defined($_[0]->token_file) && length($_[0]->token_file) }
+
+sub _token_file_stamp {
+  my ($self) = @_;
+  # Sub-second mtime: a token rewritten in place within the same second is still a change.
+  my @st = Time::HiRes::stat($self->token_file);
+  return @st ? join(':', @st[9, 7, 1]) : 'missing';
+}
+
+# Reads the token file into the token. Undef when it did, else why not (the path, never the
+# token). A file that cannot be read leaves the token as it was.
+sub _read_token_file {
+  my ($self) = @_;
+  my $path = $self->token_file;
+  my $stamp = $self->_token_file_stamp;
+  $self->_token_file_seen($stamp);
+  return "OpenBao token file $path is missing" if $stamp eq 'missing';
+  open(my $fh, '<', $path) or return "OpenBao token file $path cannot be read: $!";
+  my $token = do { local $/; <$fh> };
+  close $fh;
+  $token = '' unless defined $token;
+  $token =~ s/\A\s+//;
+  $token =~ s/\s+\z//;
+  return "OpenBao token file $path is empty" unless length $token;
+  return "OpenBao token file $path holds more than one line" if $token =~ /[\r\n]/;
+  $self->_token($token);
+  $self->_renew_token($token);
+  # The starter renews; this process only notices when the file changes.
+  $self->_token_expire(9**9**9);
+  return undef;
+}
+
+# A changed token file is read again; a failed read warns and keeps the token in use.
+sub _reread_token_file {
+  my ($self) = @_;
+  return unless $self->_token_file_stamp ne $self->_token_file_seen;
+  my $error = $self->_read_token_file;
+  warn "$error; keeping the token read before\n" if defined $error;
+  return;
 }
 
 sub _fetch_token {
@@ -181,6 +260,10 @@ True when there is no client token yet or it expires within the next 60 seconds.
 
 sub needs_refresh {
   my ($self) = @_;
+  if ($self->_uses_token_file) {
+    $self->_reread_token_file;
+    return $self->_token ? 0 : 1;
+  }
   # Refresh if: time is near expiry, OR we have no client_token yet
   return 1 if time >= ($self->_token_expire - 60);
   return 1 unless $self->_token;
@@ -197,6 +280,12 @@ request path renews through L</resolve_key_async> instead.
 
 sub refresh {
   my ($self) = @_;
+  if ($self->_uses_token_file) {
+    my $error = $self->_read_token_file;
+    die "$error\n" if defined($error) && !$self->_token;
+    warn "$error; keeping the token read before\n" if defined $error;
+    return 1;
+  }
   # Token renewal via renew-self endpoint
   # _token holds the RENEW token (from initial AppRole login or previous renew-self)
   # renew-self returns a NEW client_token for API calls AND a new renew token
@@ -341,6 +430,14 @@ sub _refresh_async {
   my ($self, $cb) = @_;
   $cb ||= sub { };
 
+  # A token file is a local read (a tmpfs, a few bytes), not a round trip.
+  if ($self->_uses_token_file) {
+    my $error = $self->_read_token_file;
+    return $cb->(undef, $error) if defined($error) && !$self->_token;
+    warn "$error; keeping the token read before\n" if defined $error;
+    return $cb->($self->_token, undef);
+  }
+
   my $waiters = $self->_refresh_waiters;
   push @$waiters, $cb;
   return if @$waiters > 1;
@@ -387,7 +484,7 @@ request path finds a valid token already there. Called by
 L<Langertha::Skeid::Proxy/build_app>; safe to call twice.
 
 A failed renewal warns while the current token is still valid — a blip is not worth dropping
-in-flight requests for. Once it has actually expired the process dies, because a Skeid that
+in-flight requests for. With a L</token_file> the timer only reads the file again. Once it has actually expired the process dies, because a Skeid that
 cannot resolve keys is not a Skeid that should keep answering: the container restarts and logs
 in again with its AppRole credentials (ADR 0003).
 
@@ -407,6 +504,13 @@ sub start_renewal {
 
   my $id = Mojo::IOLoop->recurring($every => sub {
     my $broker = $weak or return;
+    # With a token file the starter renews; the timer reads the file again whatever its stamp
+    # says, so a change no stamp shows is picked up within one interval.
+    if ($broker->_uses_token_file) {
+      my $error = $broker->_read_token_file;
+      warn "$error; keeping the token read before\n" if defined $error;
+      return;
+    }
     $broker->_refresh_async(sub {
       my ($token, $error) = @_;
       return unless defined $error;

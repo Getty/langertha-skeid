@@ -4450,6 +4450,43 @@ sub _policy_fingerprint {
 
 sub _rate_print { Langertha::Skeid::Rate->print($_[0]) }
 
+=method capabilities
+
+  my @can = Langertha::Skeid->capabilities;   # ('documents', 'node_files', ...)
+
+Names of what this Skeid can do that a deployment may have to check before it relies on it --
+a downstream deployment gates its config on them (C<skeid capabilities> prints them, one per
+line). A name is added when its feature ships and never removed or renamed:
+
+=over 4
+
+=item * C<documents> -- nodes of kind C<documents> and the documents routes (ADR 0028)
+
+=item * C<ollama_embed> -- C</api/embed> and C</api/embeddings>
+
+=item * C<node_files> -- C<node_files>, nodes from less trusted files (ADR 0031)
+
+=item * C<key_rate> -- C<rate> in a policy or C<keys> entry
+
+=item * C<customer_source_rate> -- C<customer_source.rate_column>
+
+=item * C<usage_contract> -- C<finish_reason>, C<ttft_ms>, C<correlation_id> on usage events
+
+=item * C<usage_purge> -- C<POST /skeid/usage/purge>, C<skeid usage-purge>, C<retention_days>
+
+=item * C<openbao_token_file> -- C<OPENBAO_TOKEN_FILE> for the OpenBao key broker
+
+=back
+
+=cut
+
+my @CAPABILITIES = qw(
+  documents ollama_embed node_files key_rate customer_source_rate usage_contract usage_purge
+  openbao_token_file
+);
+
+sub capabilities { return @CAPABILITIES }
+
 =method rate_admit
 
   my $answer = $skeid->rate_admit($api_key_id);

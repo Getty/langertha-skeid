@@ -23,6 +23,11 @@ if (@ARGV && defined($ARGV[0]) && $ARGV[0] !~ /^-/) {
 if ($cmd eq 'usage') {
   exit _run_usage(@ARGV);
 }
+if ($cmd eq 'capabilities') {
+  print "$_\n" for Langertha::Skeid->capabilities;
+  exit 0;
+}
+
 if ($cmd eq 'usage-purge') {
   exit _run_usage_purge(@ARGV);
 }
@@ -371,6 +376,7 @@ Usage:
               [--before ISO8601 | --retention] [--dry-run]
                                delete usage events of key ids and/or before a time
                                (--retention: usage_store.retention_days); prints JSON
+  skeid capabilities           what this Skeid can do, one name per line
   skeid keyid [KEY ...]        the key id to use in the config's keys: section
                                (reads stdin when given no argument)
 USAGE
@@ -386,6 +392,7 @@ USAGE
               [--api-key-id ID] [--model NAME]
   skeid usage-purge [--config skeid.yaml] [--api-key-id ID ...] [ID ...]
               [--before ISO8601 | --retention] [--dry-run]
+  skeid capabilities
   skeid keyid [KEY ...]
 
 =head1 DESCRIPTION
@@ -526,6 +533,13 @@ C<usage_store.retention_days> with C<--retention>, the purge run a cron job make
 only counts. Prints the result as JSON, for the caller to record, and exits 0 when it succeeded,
 2 when not (the spool still holds events, the database is down) -- run it again then, it is
 idempotent.
+
+=head2 capabilities
+
+  skeid capabilities | grep -qx openbao_token_file
+
+Prints what this Skeid can do, one name per line (L<Langertha::Skeid/capabilities>), so a
+deployment can check a feature before it relies on it.
 
 =head2 keyid
 
