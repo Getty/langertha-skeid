@@ -1,0 +1,20 @@
+---
+class: standard
+completed: 2026-11-12T04:58:56Z
+created: 2026-11-05T04:36:39Z
+id: 117
+priority: medium
+started: 2026-11-12T04:58:56Z
+status: done
+tags:
+- routing
+- alias
+- downstream
+title: Alias tier waits only its own wait_ms (default 0) instead of routing.wait_timeout_ms
+updated: 2026-11-12T04:58:56Z
+---
+
+Measured on 2026-11-03 against Skeid 0.004. When nodes are saturated, a request through an alias returns 429 immediately, while the same request with the direct model name waits up to routing.wait_timeout_ms. The cause is that an alias tier waits only its own wait_ms, which defaults to 0. Wanted: either default the tier wait_ms to routing.wait_timeout_ms, or document clearly that alias tiers need an explicit wait_ms. A deployment can set wait_ms on alias tiers in its generated configs in the meantime.
+Requested by a downstream deployment.
+
+2026-11-12 04:58 Done in 1196777 (pushed): the last tier left after the policy filter defaults to routing.wait_timeout_ms when it sets no wait_ms; earlier tiers stay 0; explicit 0 on the last tier still refuses at once. t/25-model-aliases.t covers default, explicit 0, deny filter. prove -lr t/ 105 files PASS.
