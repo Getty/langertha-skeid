@@ -13,6 +13,7 @@ use YAML::PP;
 use Langertha ();
 use Langertha::Skeid::UsageStore;
 use Langertha::Skeid::CustomerSource;
+use Langertha::Skeid::NodeFiles;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Documents;
@@ -365,6 +366,34 @@ Bearer>: C<X-Api-Key> for docling-serve, which takes no Bearer token. The key so
 (C<api_key_ref>, C<api_key_env>) is unchanged and the client's own credentials are dropped in
 every spelling, as for any node with a key. A name that is no RFC 7230 token fails the load;
 C<Authorization> is the default spelled out.
+
+=head2 node_files
+
+  node_files:
+    - path: /etc/skeid/gpm/nodes.yaml                         # required
+      allow_api_key_env: '^SKEID_NODE_GPM_[A-Z0-9_]+_API_KEY$'  # default: no api_key_env
+      allow_api_key_ref: false                                 # default false
+      allow_url_hosts: [ '*.cai-gpm.svc' ]                     # required; * is one DNS label
+      allow_kinds: [ documents, chat ]                         # default [chat]
+
+Nodes from files someone else writes (ADR 0031) -- a GPU manager publishing where its models
+run. Each file is a YAML list of nodes (or a mapping with only C<nodes>) in the form of the
+L</nodes> section, without C<capacity>. Its nodes are appended to the C<nodes> section; a file
+contributes nodes and nothing else.
+
+What a node from such a file may say is set here, in the main config, and checked node by node
+(L<Langertha::Skeid::NodeFiles/check>): its C<url> must go to an allowed host, an
+C<api_key_env> must match C<allow_api_key_env>, an C<api_key_ref> needs C<allow_api_key_ref>, its
+C<kind> must be allowed, and its C<id> must not be taken by the main config or an earlier file.
+A node that breaks a rule is left out and the rest of the file loads. The admin route
+C<GET /skeid/config> lists, per file, the nodes accepted, and each rejected node by position and
+rule -- never the value.
+
+A file is re-read when it changes (its mtime, size or inode: a ConfigMap swaps a symlink), with
+a C<config_file> on the next dispatch, with a C<config_loader> on its next run. It is read whole
+or not at all: a version that does not parse, or a file that is gone, keeps that file's last
+good nodes and is reported on C<GET /skeid/config>. A malformed C<node_files> section fails the
+load like any other section.
 
 =head2 pricing
 
@@ -1360,6 +1389,13 @@ has config_loader => (
   predicate => 'has_config_loader',
 );
 
+# Node files (ADR 0031): per path, what was last read -- seen (mtime, size, inode), the nodes
+# of the last good read, its error, and the last check's accepted count and rejections.
+has _node_files => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
 has _config_mtime => (
   is      => 'rw',
   default => sub { undef },
@@ -2199,7 +2235,129 @@ sub _read_config {
   my $fingerprint = defined($version) && !ref($version)
     ? "version:$version"
     : 'digest:' . _config_digest($cfg);
+
+  # Node files are inputs of their own (ADR 0031): a loader's version does not cover them.
+  if (exists $cfg->{node_files}) {
+    my $contributed;
+    ($cfg, $contributed) = $self->_merge_node_files($cfg);
+    $fingerprint .= ';node_files:' . $contributed;
+  } else {
+    $self->_node_files({});
+  }
   return ($cfg, $fingerprint);
+}
+
+# What a node file is now: its mtime, size and inode, or 'missing'. A ConfigMap update swaps a
+# symlink, so the inode changes even when mtime and size happen not to.
+sub _node_file_seen {
+  my ($path) = @_;
+  my @st = stat $path;
+  return 'missing' unless @st;
+  return join ':', @st[9, 7, 1];
+}
+
+# The config with the nodes of its node files appended, and a digest of what they contributed.
+# A file is read only when it changed; one that cannot be read keeps its last good nodes. Every
+# node is checked on every merge, so a changed main config re-judges them all.
+sub _merge_node_files {
+  my ($self, $cfg) = @_;
+  my $entries = Langertha::Skeid::NodeFiles->normalize_config($cfg->{node_files});
+  my $state = $self->_node_files;
+
+  my @main  = ref($cfg->{nodes}) eq 'ARRAY' ? @{$cfg->{nodes}} : ();
+  my %taken = map { (ref($_) eq 'HASH' && defined($_->{id})) ? ("$_->{id}" => 1) : () } @main;
+  my (@added, %next);
+
+  for my $entry (@$entries) {
+    my $path = $entry->{path};
+    my $file = $state->{$path} || { nodes => [], loaded => 0 };
+    my $seen = _node_file_seen($path);
+    my $fresh = !defined($file->{seen}) || $file->{seen} ne $seen;
+    if ($fresh) {
+      $file->{seen} = $seen;
+      my $nodes;
+      if ($seen eq 'missing') {
+        $file->{error} = "node file $path is missing";
+      } elsif (eval { $nodes = Langertha::Skeid::NodeFiles->read_file($path); 1 }) {
+        $file->{nodes}  = $nodes;
+        $file->{loaded} = 1;
+        delete @{$file}{qw( error error_at )};
+      } else {
+        ($file->{error} = $@ || "node file $path cannot be read") =~ s/\s+\z//;
+      }
+      if (defined $file->{error}) {
+        $file->{error_at} = time;
+        warn 'skeid: ' . $file->{error}
+          . ($file->{loaded} ? ', keeping its last good nodes' : '') . "\n";
+      }
+    }
+
+    my @rejected;
+    my $nodes = $file->{nodes};
+    for my $position (0 .. $#$nodes) {
+      my $node = $nodes->[$position];
+      my $rule = Langertha::Skeid::NodeFiles->check($self, $entry, $node);
+      $rule = 'id_taken' if !defined($rule) && $taken{"$node->{id}"};
+      if (defined $rule) {
+        push @rejected, { position => $position, rule => $rule };
+        next;
+      }
+      $taken{"$node->{id}"} = 1;
+      push @added, $node;
+    }
+    if ($fresh) {
+      warn "skeid: node file $path: node $_->{position} rejected ($_->{rule})\n" for @rejected;
+    }
+    $file->{rejected} = \@rejected;
+    $file->{accepted} = @$nodes - @rejected;
+    $next{$path} = $file;
+  }
+
+  $self->_node_files(\%next);
+  return ({ %$cfg, nodes => [ @main, @added ] }, _config_digest(\@added));
+}
+
+# Whether a node file changed since it was last read; one stat per file.
+sub _node_files_changed {
+  my ($self) = @_;
+  my $state = $self->_node_files;
+  for my $path (keys %$state) {
+    return 1 if _node_file_seen($path) ne ($state->{$path}{seen} // '');
+  }
+  return 0;
+}
+
+=method node_files_status
+
+  my $files = $skeid->node_files_status;
+  # [ { path => '/etc/skeid/gpm/nodes.yaml', ok => 1, accepted => 3,
+  #     rejected => [ { position => 4, rule => 'api_key_env' } ] } ]
+
+Per node file (see L</node_files>): whether its last read succeeded, how many of its nodes were
+accepted, and each rejected node by position and rule, at most 50. A failed read adds C<error>
+and C<failed_at>; the nodes counted are then the last good ones. undef without node files.
+Served by C<GET /skeid/config>.
+
+=cut
+
+sub node_files_status {
+  my ($self) = @_;
+  my $state = $self->_node_files;
+  return undef unless %$state;
+  return [ map {
+    my $file = $state->{$_};
+    my @rejected = @{$file->{rejected} || []};
+    +{
+      path     => $_,
+      ok       => defined($file->{error}) ? 0 : 1,
+      accepted => 0 + ($file->{accepted} // 0),
+      rejected => [ map { +{ %$_ } } @rejected[0 .. _last(49, @rejected)] ],
+      (defined($file->{error}) ? (
+        error     => $file->{error},
+        failed_at => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime($file->{error_at} // time)),
+      ) : ()),
+    };
+  } sort keys %$state ];
 }
 
 # A canonical digest of a loaded config structure: hash keys sorted, so two loads of the same
@@ -2530,6 +2688,7 @@ sub maybe_reload_config {
       && defined($retry) && $self->_now < $retry;
     return $self->_reload_on_request($mtime);
   }
+  return $self->_reload_on_request if $self->_node_files_changed;
   return 0;
 }
 

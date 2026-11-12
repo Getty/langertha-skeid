@@ -372,6 +372,7 @@ C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
                                    {customer_source}: the customer source status, with its message;
                                    {customer_names}: customer key id => name of the source's rows;
                                    {customer_report}: rows accepted, rejected, shadowed (labels, reasons)
+                                   {node_files}: per node file, nodes accepted, rejected (position, rule)
   GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
   GET  /skeid/usage                ?since=&api_key_id=&model=&limit= (default 50) -> the report
   GET  /skeid/openapi.json         OpenAPI 3.1 description of the admin routes
@@ -955,8 +956,10 @@ sub _build_route_table {
       my ($c) = @_;
       my $reload = $c->skeid->call_function('config.status', {});
       my $source = $c->skeid->customer_source_status;
+      my $node_files = $c->skeid->node_files_status;
       $c->render(json => {
         reload => $reload,
+        ($node_files ? (node_files => $node_files) : ()),
         ($source ? (
           customer_source => $source,
           customer_names  => $c->skeid->customer_names,

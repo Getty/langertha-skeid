@@ -16,6 +16,13 @@ One upstream LLM endpoint — url + model + engine id + weight + max_conns + hea
 declared in the YAML config or pushed through the admin API. The unit of routing.
 _Avoid_: server, instance, backend, provider.
 
+**Node file** (`node_files`):
+A second YAML file of **Nodes** that someone other than the config's author writes — a GPU
+manager publishing where its models run (ADR 0031). The main config names it together with its
+constraints (allowed URL hosts, `api_key_env` pattern, `api_key_ref`, kinds); a node that breaks
+one is **rejected** by position and rule, the rest of the file loads. It contributes nodes only.
+_Avoid_: include, overlay, secondary config.
+
 **Engine ID**:
 The Langertha engine that defines a node's *upstream* wire dialect (`openai`, `vllm`,
 `sglang`, `anthropic`, `ollama`, …). A property of the node, never of the client.

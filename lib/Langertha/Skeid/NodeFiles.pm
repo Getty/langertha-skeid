@@ -1,0 +1,197 @@
+package Langertha::Skeid::NodeFiles;
+our $VERSION = '0.005';
+# ABSTRACT: Nodes from a second, less trusted file, under the constraints the main config sets
+use strict;
+use warnings;
+use Carp qw(croak);
+use Mojo::URL;
+use YAML::PP;
+use Langertha::Skeid::Protocol::Documents;
+use Langertha::Skeid::Protocol::Rerank;
+
+=head1 SYNOPSIS
+
+  node_files:
+    - path: /etc/skeid/gpm/nodes.yaml
+      allow_api_key_env: '^SKEID_NODE_GPM_[A-Z0-9_]+_API_KEY$'
+      allow_api_key_ref: false
+      allow_url_hosts: [ '*.cai-gpm.svc' ]
+      allow_kinds: [ documents, chat ]
+
+=head1 DESCRIPTION
+
+A node file is a list of nodes that someone other than the author of the main config writes -- a
+GPU manager publishing where its models run. Whoever can write that file must not be able to
+make Skeid send an environment variable or a broker secret of its choosing, as a node key, to a
+URL of its choosing (ADR 0031). So the main config names each such file together with what a
+node from it may say, and this module holds the checks; L<Langertha::Skeid> reads the files and
+merges what passes into the C<nodes> section.
+
+A node from a node file is checked field by field. Any failing check rejects that node, and only
+that node: the rest of the file still loads. The rule that failed is reported by name with the
+node's position in the file, never with the value that broke it.
+
+=cut
+
+# The fields a node from a node file may carry. `capacity` is left out: a probe makes Skeid poll
+# a URL of the node's choosing, and a custom probe names code.
+my %FIELD = map { $_ => 1 } qw(
+  id url model engine weight max_conns healthy tags metadata
+  api_key_env api_key_ref api_key_header kind rerank_format
+);
+
+=method normalize_config
+
+  my $entries = Langertha::Skeid::NodeFiles->normalize_config($cfg->{node_files});
+
+The C<node_files> section, checked and filled with its defaults. It belongs to the main config,
+so a malformed section fails the load like any other:
+
+=over 4
+
+=item * C<path> -- required, a file path; each path once.
+
+=item * C<allow_api_key_env> -- a regular expression an C<api_key_env> must match whole. Absent:
+no node of this file may name a variable.
+
+=item * C<allow_api_key_ref> -- default false: no node of this file may name a broker reference.
+
+=item * C<allow_url_hosts> -- required, at least one host pattern. A node's C<url> must be
+C<http> or C<https> to a host one of them matches, case-insensitively. C<*> stands for exactly
+one DNS label: C<*.cai-gpm.svc> matches C<gpu-1.cai-gpm.svc>, not C<cai-gpm.svc> and not
+C<a.b.cai-gpm.svc>.
+
+=item * C<allow_kinds> -- default C<[chat]>: the node kinds this file may add (C<chat>,
+C<documents>).
+
+=back
+
+=cut
+
+sub normalize_config {
+  my ($class, $list) = @_;
+  croak 'node_files must be a list' unless ref($list) eq 'ARRAY';
+  my (@entries, %seen);
+  for my $i (0 .. $#$list) {
+    my $raw = $list->[$i];
+    my $at  = "node_files[$i]";
+    croak "$at must be a mapping" unless ref($raw) eq 'HASH';
+    my $path = $raw->{path};
+    croak "$at: path required" unless defined($path) && !ref($path) && length($path);
+    croak "$at: path $path is listed twice" if $seen{$path}++;
+
+    my $env_re;
+    if (defined(my $re = $raw->{allow_api_key_env})) {
+      croak "$at: allow_api_key_env must be a regular expression" if ref $re;
+      $env_re = eval { qr/$re/ } or croak "$at: allow_api_key_env is not a valid regular expression";
+    }
+
+    my $hosts = $raw->{allow_url_hosts};
+    croak "$at: allow_url_hosts must list at least one host pattern"
+      unless ref($hosts) eq 'ARRAY' && @$hosts;
+    my @host_res;
+    for my $pattern (@$hosts) {
+      croak "$at: allow_url_hosts holds a pattern that is no host name"
+        unless defined($pattern) && !ref($pattern) && $pattern =~ /\A[A-Za-z0-9*][A-Za-z0-9*.\-]*\z/;
+      my $re = join '\.', map { $_ eq '*' ? '[^.]+' : quotemeta($_) } split /\./, lc $pattern, -1;
+      push @host_res, qr/\A$re\z/;
+    }
+
+    my $kinds = exists($raw->{allow_kinds}) ? $raw->{allow_kinds} : ['chat'];
+    croak "$at: allow_kinds must be a list" unless ref($kinds) eq 'ARRAY';
+    my %kinds;
+    for my $kind (@$kinds) {
+      my $norm = (defined($kind) && lc($kind) eq 'chat') ? ''
+        : eval { Langertha::Skeid::Protocol::Documents->normalize_kind($kind) };
+      croak "$at: allow_kinds names an unknown kind" unless defined $norm;
+      $kinds{$norm} = 1;
+    }
+
+    push @entries, {
+      path              => "$path",
+      allow_api_key_env => $env_re,
+      allow_api_key_ref => ($raw->{allow_api_key_ref} ? 1 : 0),
+      allow_url_hosts   => \@host_res,
+      allow_kinds       => \%kinds,
+    };
+  }
+  return \@entries;
+}
+
+=method read_file
+
+  my $nodes = Langertha::Skeid::NodeFiles->read_file($path);   # dies when it cannot
+
+The node list of one node file: a YAML list of nodes, or a mapping whose only key is C<nodes>.
+A file that does not parse, or says anything but nodes, dies -- the caller keeps that file's last
+good list. The message names the file and the line, never its content.
+
+=cut
+
+sub read_file {
+  my ($class, $path) = @_;
+  my $data;
+  unless (eval { $data = YAML::PP->new->load_file($path); 1 }) {
+    my ($line) = ($@ =~ /line:?\s*(\d+)/i);
+    die "node file $path is not valid YAML" . (defined $line ? " (line $line)" : '') . "\n";
+  }
+  return [] unless defined $data;
+  if (ref($data) eq 'HASH') {
+    my @other = grep { $_ ne 'nodes' } sort keys %$data;
+    die "node file $path may hold only nodes, not " . join(', ', @other) . "\n" if @other;
+    $data = $data->{nodes} // [];
+  }
+  die "node file $path must be a list of nodes\n" unless ref($data) eq 'ARRAY';
+  return $data;
+}
+
+=method check
+
+  my $rule = Langertha::Skeid::NodeFiles->check($skeid, $entry, $node);
+  # undef: the node may load; else the name of the rule it broke
+
+Checks one node of a node file against its entry from L</normalize_config>. The rules, in the
+order they are checked: C<entry> (not a mapping), C<field> (a field a node file may not set:
+C<capacity> or an unknown one), C<id>, C<url> (missing), C<url_host> (not C<http(s)> to an allowed
+host, or credentials in the URL), C<api_key_env>, C<api_key_ref>, C<kind>, C<invalid> (a value
+the main config would refuse too -- an unknown engine or rerank format, a header that is no
+token), so that a broken node of a less trusted file cannot fail the load of the main config.
+
+=cut
+
+sub check {
+  my ($class, $skeid, $entry, $node) = @_;
+  return 'entry' unless ref($node) eq 'HASH';
+  return 'field' if grep { !$FIELD{$_} } keys %$node;
+  return 'id'    unless defined($node->{id})  && !ref($node->{id})  && length($node->{id});
+  return 'url'   unless defined($node->{url}) && !ref($node->{url}) && length($node->{url});
+
+  my $url = Mojo::URL->new($node->{url});
+  my $scheme = lc($url->scheme // '');
+  my $host   = lc($url->host // '');
+  return 'url_host' unless ($scheme eq 'http' || $scheme eq 'https') && length($host)
+    && !defined($url->userinfo)
+    && grep { $host =~ $_ } @{$entry->{allow_url_hosts}};
+
+  if (defined($node->{api_key_env}) && length($node->{api_key_env})) {
+    my $re = $entry->{allow_api_key_env};
+    return 'api_key_env' if ref($node->{api_key_env}) || !$re || $node->{api_key_env} !~ /\A(?:$re)\z/;
+  }
+  return 'api_key_ref'
+    if defined($node->{api_key_ref}) && length($node->{api_key_ref}) && !$entry->{allow_api_key_ref};
+
+  my $kind = eval { Langertha::Skeid::Protocol::Documents->normalize_kind($node->{kind}) };
+  return 'invalid' unless defined $kind;
+  return 'kind' unless $entry->{allow_kinds}{$kind};
+
+  return 'invalid' unless eval {
+    $skeid->normalize_engine_id((defined($node->{engine}) && length($node->{engine})) ? $node->{engine} : 'OpenAIBase');
+    $skeid->normalize_tags($node->{tags});
+    Langertha::Skeid::Protocol::Rerank->normalize_format($node->{rerank_format});
+    Langertha::Skeid::Protocol::Documents->normalize_key_header($node->{api_key_header});
+    1;
+  };
+  return undef;
+}
+
+1;

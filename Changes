@@ -2,6 +2,13 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Node files: node_files in the main config names further YAML files of nodes that
+      someone else writes (a GPU manager), each with constraints -- allowed URL hosts, an
+      api_key_env pattern, api_key_ref on or off (default off), allowed kinds. A node that
+      breaks one is left out and the rest of the file loads; GET /skeid/config lists per
+      file the nodes accepted and each rejection by position and rule, never the value. A
+      file is re-read when it changes and kept at its last good version when it does not
+      parse or is gone. ADR 0031.
     - Realtime: the client's autoload query parameter is no longer passed to the node. A
       llama.cpp router loads a model on ?autoload=true even when started with
       --no-models-autoload. The HTTP routes never forwarded the client's query.
