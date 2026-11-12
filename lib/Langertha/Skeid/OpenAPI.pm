@@ -169,6 +169,23 @@ my %SCHEMA = (
     },
     required => [ 'model', 'prompt' ],
   },
+  OllamaEmbedRequest => {
+    type       => 'object',
+    properties => {
+      model      => { type => 'string' },
+      input      => { oneOf => [ { type => 'string' }, { type => 'array', items => { type => 'string' } } ] },
+      dimensions => { type => 'integer' },
+    },
+    required => [ 'model', 'input' ],
+  },
+  OllamaEmbeddingsRequest => {
+    type       => 'object',
+    properties => {
+      model  => { type => 'string' },
+      prompt => { type => 'string' },
+    },
+    required => [ 'model', 'prompt' ],
+  },
   NodeList => {
     type       => 'object',
     properties => { nodes => { type => 'array', items => { type => 'object' } } },
@@ -185,6 +202,8 @@ my %EXAMPLE = (
   AnthropicMessagesRequest => sub { +{ model => $_[0], max_tokens => 256, messages => [ { role => 'user', content => 'Hello' } ] } },
   OllamaChatRequest        => sub { +{ model => $_[0], stream => \0, messages => [ { role => 'user', content => 'Hello' } ] } },
   OllamaGenerateRequest    => sub { +{ model => $_[0], stream => \0, prompt => 'Hello' } },
+  OllamaEmbedRequest       => sub { +{ model => $_[0], input => 'The quick brown fox' } },
+  OllamaEmbeddingsRequest  => sub { +{ model => $_[0], prompt => 'The quick brown fox' } },
 );
 
 # --- path templates ---------------------------------------------------------------------------

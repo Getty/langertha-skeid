@@ -8,7 +8,8 @@ use Langertha::ToolCall;
 
 =head1 DESCRIPTION
 
-Serves C<POST /api/chat>, C<POST /api/generate> and C<GET /api/tags>. Ollama-specific field names — C<done_reason>,
+Serves C<POST /api/chat>, C<POST /api/generate>, C<POST /api/embed>, C<POST /api/embeddings>
+and C<GET /api/tags>. Ollama-specific field names — C<done_reason>,
 C<prompt_eval_count>, C<eval_count> — live here and nowhere else in Skeid.
 
 Ollama's messages are already OpenAI-shaped, so the request translation is small — but it is
@@ -275,6 +276,97 @@ sub generate_response_from_openai {
     prompt_eval_count => 0 + ($usage->{prompt_tokens} // 0),
     eval_count        => 0 + ($usage->{completion_tokens} // 0),
   };
+}
+
+=method embed_request_to_openai
+
+  my $openai_body = Langertha::Skeid::Protocol::Ollama->embed_request_to_openai($body);
+
+Turns an Ollama C</api/embed> request into the OpenAI embeddings body: C<model>, C<input> (one
+string or a list of strings, as sent) and C<dimensions> when given. C<truncate>, C<options> and
+C<keep_alive> mean something only to an Ollama server and are not carried. Dies on an C<input>
+that is neither a string nor a list of strings -- the caller answers that C<400>.
+
+=cut
+
+sub embed_request_to_openai {
+  my ($class, $body) = @_;
+  my $input = $body->{input};
+  die "input must be a string or a list of strings\n"
+    unless _embedding_input($input);
+  return {
+    model => ($body->{model} // ''),
+    input => (ref($input) ? [ map { "$_" } @$input ] : "$input"),
+    (defined($body->{dimensions}) && !ref($body->{dimensions}) ? (dimensions => 0 + $body->{dimensions}) : ()),
+  };
+}
+
+=method embed_response_from_openai
+
+  my $ollama = Langertha::Skeid::Protocol::Ollama->embed_response_from_openai($res, $model);
+
+Turns the upstream OpenAI embeddings answer into an Ollama C</api/embed> answer: C<model> (the
+name the client asked for, else the upstream's), C<embeddings> -- one vector per input, in the
+order of the inputs (by C<index>) -- and C<prompt_eval_count> from C<usage.prompt_tokens>. The
+timing durations are not reported; Skeid has none.
+
+=cut
+
+sub embed_response_from_openai {
+  my ($class, $res, $model) = @_;
+  my $usage = ref($res->{usage}) eq 'HASH' ? $res->{usage} : {};
+  return {
+    model             => ((defined($model) && length($model)) ? $model : ($res->{model} // '')),
+    embeddings        => _vectors($res),
+    prompt_eval_count => 0 + ($usage->{prompt_tokens} // 0),
+  };
+}
+
+=method embeddings_request_to_openai
+
+  my $openai_body = Langertha::Skeid::Protocol::Ollama->embeddings_request_to_openai($body);
+
+Turns a request to Ollama's older C</api/embeddings> -- one C<prompt>, one vector -- into the
+OpenAI embeddings body with that prompt as C<input>. Dies on a C<prompt> that is not a string.
+
+=cut
+
+sub embeddings_request_to_openai {
+  my ($class, $body) = @_;
+  my $prompt = $body->{prompt};
+  die "prompt must be a string\n" unless defined($prompt) && !ref($prompt);
+  return { model => ($body->{model} // ''), input => "$prompt" };
+}
+
+=method embeddings_response_from_openai
+
+  my $ollama = Langertha::Skeid::Protocol::Ollama->embeddings_response_from_openai($res);
+
+The answer of C</api/embeddings>: C<< { embedding => [...] } >>, the first vector of the
+upstream answer.
+
+=cut
+
+sub embeddings_response_from_openai {
+  my ($class, $res) = @_;
+  return { embedding => (_vectors($res)->[0] // []) };
+}
+
+sub _embedding_input {
+  my ($input) = @_;
+  return 0 unless defined $input;
+  return 1 unless ref $input;
+  return 0 unless ref($input) eq 'ARRAY' && @$input;
+  return !grep { !defined($_) || ref($_) } @$input;
+}
+
+# The vectors of an OpenAI embeddings answer, in input order. A node may answer data out of
+# order; `index` says where each belongs.
+sub _vectors {
+  my ($res) = @_;
+  my @data = grep { ref($_) eq 'HASH' } @{ ref($res->{data}) eq 'ARRAY' ? $res->{data} : [] };
+  @data = sort { ($a->{index} // 0) <=> ($b->{index} // 0) } @data;
+  return [ map { ref($_->{embedding}) eq 'ARRAY' ? $_->{embedding} : [] } @data ];
 }
 
 =method tags_from_models

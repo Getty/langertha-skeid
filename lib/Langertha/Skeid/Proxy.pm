@@ -75,6 +75,8 @@ The MCP routes exist only with an C<mcp> section and always need a key; see L</M
   POST /v1/messages                Anthropic Messages, streamed or not
   POST /api/chat                   Ollama chat; streams unless "stream": false
   POST /api/generate               Ollama generate; streams unless "stream": false
+  POST /api/embed                  Ollama embeddings, to the node's /v1/embeddings
+  POST /api/embeddings             Ollama's older one-prompt embeddings, the same way
   GET  /api/tags                   Ollama: the same names as /v1/models
   GET  /api/ps                     Ollama: always an empty list
   GET  /openapi.json               OpenAPI 3.1 description of the routes this config enables
@@ -866,6 +868,15 @@ sub _build_route_table {
   $add->(id => 'ollama_generate', group => 'ollama', methods => ['POST'], paths => ['/api/generate'],
     tag => 'Ollama', request => 'OllamaGenerateRequest', stream => 1, summary => 'Ollama generate',
     handler => sub { _handle_ollama($_[0], 'generate') });
+
+  # Ollama embeddings (skeid k116): translated to the node's OpenAI /embeddings, like the chat face.
+  $add->(id => 'ollama_embed', group => 'ollama', methods => ['POST'], paths => ['/api/embed'],
+    tag => 'Ollama', request => 'OllamaEmbedRequest', summary => 'Ollama embeddings',
+    handler => sub { _handle_ollama_embeddings($_[0], 'embed') });
+
+  $add->(id => 'ollama_embeddings', group => 'ollama', methods => ['POST'], paths => ['/api/embeddings'],
+    tag => 'Ollama', request => 'OllamaEmbeddingsRequest', summary => 'Ollama embeddings, one prompt (older route)',
+    handler => sub { _handle_ollama_embeddings($_[0], 'embeddings') });
 
   $add->(id => 'ollama_tags', group => 'ollama', paths => ['/api/tags'], tag => 'Ollama',
     summary => 'The models this key may use, Ollama shaped',
@@ -2028,6 +2039,75 @@ sub _handle_ollama {
       my $response_method = $face->{response};
       return Langertha::Skeid::Protocol::Ollama->$response_method($_[0]);
     }, _schema_relay($c, $openai_body, 'function', 'parameters'));
+  });
+}
+
+# POST /api/embed and /api/embeddings (skeid k116). Both go to the node's OpenAI /embeddings and
+# come back in Ollama's shape; they differ only at the edge, like /api/chat and /api/generate.
+my %OLLAMA_EMBED_FACE = (
+  embed => {
+    endpoint => '/api/embed',
+    request  => 'embed_request_to_openai',
+    response => 'embed_response_from_openai',
+  },
+  embeddings => {
+    endpoint => '/api/embeddings',
+    request  => 'embeddings_request_to_openai',
+    response => 'embeddings_response_from_openai',
+  },
+);
+
+sub _handle_ollama_embeddings {
+  my ($c, $kind) = @_;
+  _extend_client_timeout($c);
+  my $face = $OLLAMA_EMBED_FACE{$kind};
+  my $body = $c->req->json;
+  unless (ref($body) eq 'HASH') {
+    _render_error($c, 400, 'Invalid JSON body', 'invalid_request_error');
+    return;
+  }
+
+  # As on /api/chat: a body the translator cannot read is the client's 400, before anything is
+  # routed or metered, and the exception's text stays out of the answer.
+  my $request_method = $face->{request};
+  my $openai_body = eval { Langertha::Skeid::Protocol::Ollama->$request_method($body) };
+  unless (ref($openai_body) eq 'HASH') {
+    _render_error($c, 400, 'Invalid request', 'invalid_request_error');
+    return;
+  }
+  my $model = $openai_body->{model} // '';
+  my $api_key_id = _request_api_key_id($c);
+
+  _begin_route_async($c, $model, $api_key_id, sub {
+    my ($route, $node_id, $started, $tier) = @_;
+    return unless $route;
+
+    my $served_model = _served_model($tier, $model);
+    $openai_body->{model} = $served_model;
+
+    my $url = _endpoint_url_for_node($route->{url}, '/embeddings');
+    my $meta = {
+      api_format      => 'ollama',
+      endpoint        => $face->{endpoint},
+      api_key_id      => $api_key_id,
+      provider        => 'skeid',
+      engine          => ($route->{engine} // 'openaibase'),
+      model           => $served_model,
+      requested_model => $model,
+      route_url       => ($route->{url} // ''),
+    };
+
+    $c->render_later;
+    _proxy_openai_json_async($c, $url, $openai_body, $node_id, $started, $meta, sub {
+      my ($res, $err, $status, $upstream, $payload) = @_;
+      return if $err;
+      $c->res->code($status || 200);
+      $c->res->headers->header('x-skeid-node' => $node_id);
+      $c->render(json => $payload);
+    }, sub {
+      my $response_method = $face->{response};
+      return Langertha::Skeid::Protocol::Ollama->$response_method($_[0], $model);
+    });
   });
 }
 

@@ -786,6 +786,8 @@ balancer in front of Skeid needs a read timeout at least as long.
 | `POST /v1/messages` | Anthropic | translated to and from OpenAI |
 | `POST /api/chat` | Ollama | translated; streams unless `"stream": false` |
 | `POST /api/generate` | Ollama | translated; streams unless `"stream": false` |
+| `POST /api/embed` | Ollama | embeddings, translated to the node's `/v1/embeddings` |
+| `POST /api/embeddings` | Ollama | the older one-prompt embeddings, the same way |
 | `GET /api/tags` | Ollama | the same names as `/v1/models` (size, digest etc. left empty) |
 | `GET /api/ps` | Ollama | always an empty list |
 | `GET /openapi.json` | - | OpenAPI 3.1 description of the routes above this configuration enables; see [API description](#api-description-and-swagger-ui) |
@@ -908,6 +910,9 @@ into OpenAI's shape, streamed tool calls come back as `message.tool_calls`. `ima
 image parts; `format: "json"` or a JSON schema becomes `response_format`. On `/api/generate`,
 `system`, `prompt` and `images` become one chat conversation; `think`, `suffix`, `template`,
 `raw`, `context` and `keep_alive` are not forwarded and no `context` is returned.
+`/api/embed` (`input`: a string or a list) and `/api/embeddings` (`prompt`) go to the node's
+OpenAI `/v1/embeddings` and come back as `embeddings` resp. `embedding`; `truncate`, `options`
+and `keep_alive` are not forwarded.
 
 ### Provider manifest
 

@@ -144,7 +144,7 @@ The dialect the *client* speaks to Skeid: OpenAI (`/v1/chat/completions`, `/v1/e
 `/v1/models`, and the **Relayed routes** `/v1/audio/transcriptions`, `/v1/audio/translations`
 and `/v1/rerank` with its alias `/rerank`; docling's `/v1/convert/file` and `/v1/convert/source`
 are relayed too, under their own paths, see **Node kind**),
-Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/tags`, `/api/ps`). A property of the request. Code, config (`manifest.faces`) and ADRs call one API
+Anthropic (`/v1/messages`), Ollama (`/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/ps`). A property of the request. Code, config (`manifest.faces`) and ADRs call one API
 format's set of routes a **face** — "the Anthropic face".
 _Avoid_: engine, provider, frontend API.
 

@@ -2,6 +2,10 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Ollama embeddings: POST /api/embed (input as a string or a list) and the older
+      POST /api/embeddings (one prompt) are translated to the node's OpenAI /v1/embeddings
+      and answered in Ollama's shape, routed, admitted and metered like /api/chat. Both
+      answered 404 before.
     - Aliases: the last tier of an alias that sets no wait_ms now waits
       routing.wait_timeout_ms, like a model without an alias, instead of 0. A saturated alias
       answered 429 at once while its raw model name waited; write wait_ms: 0 on the last tier

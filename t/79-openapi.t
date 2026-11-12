@@ -96,7 +96,8 @@ sub all_ops {
   my $ops = all_ops($doc);
   for my $want ('GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/embeddings',
     'POST /v1/audio/transcriptions', 'POST /v1/audio/translations', 'POST /v1/rerank',
-    'POST /rerank', 'POST /v1/messages', 'POST /api/chat', 'POST /api/generate', 'GET /api/tags',
+    'POST /rerank', 'POST /v1/messages', 'POST /api/chat', 'POST /api/generate', 'POST /api/embed',
+    'POST /api/embeddings', 'GET /api/tags',
     'GET /api/ps', 'GET /health', 'GET /openapi.json', 'GET /v1/realtime') {
     ok $ops->{$want}, "$want is documented";
   }
