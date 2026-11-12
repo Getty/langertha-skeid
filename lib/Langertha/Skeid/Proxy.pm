@@ -3089,9 +3089,13 @@ sub _skip_response_header {
 sub _forward_headers {
   my ($c) = @_;
   my %fwd_headers;
+  # The correlation header (skeid k121) is the caller's id for Skeid's usage row; a node --
+  # possibly a cloud provider's -- has no use for it and is not told.
+  my $correlation = lc($c->skeid->correlation_header // '');
   for my $name (@{$c->req->headers->names}) {
     my $lc = lc($name);
     next if $HOP_BY_HOP{$lc};
+    next if length($correlation) && $lc eq $correlation;
     next if $lc eq 'host' || $lc eq 'content-length' || $lc eq 'accept-encoding';
     # The body is in hand, so nothing is expected of the node. A node that answered `Expect:
     # 100-continue` with its `100 Continue` would have the user agent start a fresh response

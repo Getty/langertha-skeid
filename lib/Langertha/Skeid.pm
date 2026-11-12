@@ -1207,7 +1207,8 @@ and sets that header itself: the key id selects both the routing policy and the 
 The request header whose value a usage event records as C<correlation_id> (default none, or
 C<SKEID_CORRELATION_HEADER>; config C<routing.correlation_header>). The value is recorded
 unchanged when it is 8 to 64 characters of C<A-Z a-z 0-9 . _ ->, and not at all otherwise; it is
-the caller's own id, to join Skeid's usage with the caller's records.
+the caller's own id, to join Skeid's usage with the caller's records. The header is not passed
+on to the node: it is for Skeid's records, and a node may be a third party's.
 
 =cut
 

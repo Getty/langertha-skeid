@@ -16,8 +16,10 @@ use Langertha::Skeid::Proxy;
 
 my $upstream = Mojolicious->new;
 $upstream->log->level('fatal');
+my @seen_headers;
 $upstream->routes->post('/v1/chat/completions' => sub {
   my ($c) = @_;
+  push @seen_headers, $c->req->headers->to_hash;
   my $req = decode_json($c->req->body);
   my $reason = $req->{model} eq 'm-tools' ? 'tool_calls' : $req->{model} eq 'm-odd' ? 'eos_token' : 'length';
   return $c->render(status => 500, json => { error => { message => 'boom' } }) if $req->{model} eq 'm-fail';
@@ -67,6 +69,8 @@ my $e = last_event(sub {
 is $e->{finish_reason}, 'length', 'a truncated non-streamed answer records length';
 ok !exists $e->{ttft_ms}, 'a non-streamed answer has no time to first token';
 is $e->{correlation_id}, 'run-1234.abc_X', 'the correlation id is passed through unchanged';
+ok !grep({ my $h = $_; grep { lc($_) eq 'x-correlation-id' } keys %$h } @seen_headers),
+  'and the header is not passed on to the node';
 
 $e = last_event(sub {
   $t->post_ok('/v1/chat/completions' => json => { model => 'm-tools', messages => $msgs, stream => \1 })->status_is(200);
