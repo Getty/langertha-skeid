@@ -1,0 +1,19 @@
+---
+class: standard
+completed: 2026-11-12T05:02:54Z
+created: 2026-11-05T03:16:54Z
+id: 115
+priority: medium
+started: 2026-11-12T05:02:54Z
+status: done
+tags:
+- downstream
+title: 'Check: does Skeid send ?autoload=true (or similar) to a llama.cpp router?
+  That would override --no-models-autoload'
+updated: 2026-11-12T05:02:54Z
+---
+
+A llama.cpp router started with --no-models-autoload can still be told per request (?autoload=true, see llama.cpp tools/server/README.md and server-models.cpp is_autoload) to load a model, and from outside nobody sees it. Question: does Skeid's routing to a llama.cpp router set this (or a similar) parameter? If yes, make it configurable and off by default.
+Requested by a downstream deployment.
+
+2026-11-12 05:02 Checked and fixed in c4fc14d (pushed). llama.cpp (tools/server/server-models.cpp is_autoload) reads autoload only via req.get_param, i.e. the query string, for proxy_get, proxy_post and proxy_ws. Skeid never sets it. HTTP routes (chat, embeddings, rerank, audio, documents, Ollama, Anthropic) build the node URL as base+path without the client's query -> not affected. The realtime WebSocket route passed every client query parameter except model -> a client could send ?autoload=true to a llama.cpp router. Now dropped (case-insensitive) in Protocol::Realtime->upstream_url; t/90-realtime-protocol.t covers it. No config switch: Skeid never sends it, so 'off' is the only state. prove -lr t/ PASS.
