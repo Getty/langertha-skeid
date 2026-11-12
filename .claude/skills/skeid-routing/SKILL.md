@@ -90,6 +90,12 @@ keys:
 - **Identity is derived, never asserted.** The policy hangs off the customer key id, which comes
   from the presented key (`key_id_for_key`), not from `x-skeid-key-id` — unless
   `routing.trust_key_id_header` says a gateway in front authenticated the caller.
+- **Key rate** (k125): a policy or keys entry may carry `rate: { per_s, burst, per_min }`;
+  `rate_admit` (token buckets per key id, in memory per process, divided by
+  `_admission_divisor` like `max_conns`) runs in `_begin_route_async` after the `403` check and
+  before any tier: over it `_refuse_rate_limited` answers `429` + `Retry-After` and records one
+  usage event (`key_rate_limited`, no node, no content). Buckets reset when the rate changes and
+  are pruned at policy load. Counters on `GET /skeid/metrics/keys`. `t/92-key-rate-limit.t`.
 
 ## Customer source
 
