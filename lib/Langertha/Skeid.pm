@@ -3710,7 +3710,9 @@ only. Replacing the store on a reload and destroying this object flush as well.
 Deletes the usage events of a set of customer key ids -- an organisation's, on an erasure
 request -- or those created C<before> a time, or those of the keys before a time (skeid k122).
 C<dry_run> only counts. Idempotent: repeated, it deletes what is left, so a caller retries until
-C<ok>. The answer is meant to be recorded by the caller: what was asked (the number of key ids,
+C<ok>. This process's write-behind queue is written out first; with C<flush_interval_ms> and
+several processes (C<--workers>, frontends) the others may still write queued events of those
+keys for up to one interval, so an erasure runs the purge again after it. The answer is meant to be recorded by the caller: what was asked (the number of key ids,
 C<before>), what matched, what was deleted, by which backend and when. Served by
 C<POST /skeid/usage/purge> and C<skeid usage-purge>. A store without a C<purge> (a
 C<store_usage_event> callback) answers C<ok> 0.

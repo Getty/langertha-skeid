@@ -111,6 +111,17 @@ ok !exists $e->{correlation_id}, 'without routing.correlation_header nothing is 
 ok !eval { Langertha::Skeid->new(config_loader => sub { +{ routing => { correlation_header => "X-A\r\nB" } } }); 1 },
   'a correlation_header that is no header name fails the load';
 
+# --- a client that hangs up is not an error of the answer ---
+{
+  my %args = (ok => 0, status_code => 499, error_type => 'client_abort');
+  is_deeply { Langertha::Skeid::Proxy::_finish_reason_field({ %args }) }, { finish_reason => 'other' },
+    'a client abort before any finish reason is other';
+  is_deeply { Langertha::Skeid::Proxy::_finish_reason_field({ %args, finish_reason => 'length' }) },
+    { finish_reason => 'length' }, 'after one it keeps that reason';
+  is_deeply { Langertha::Skeid::Proxy::_finish_reason_field({ ok => 0, status_code => 502, error_type => 'upstream_error', finish_reason => 'stop' }) },
+    { finish_reason => 'error' }, 'an upstream failure stays error';
+}
+
 # --- the SQLite store keeps the three columns, and an old table gains them ---
 SKIP: {
   eval { require DBI; require DBD::SQLite; 1 } or skip 'DBI/DBD::SQLite not available', 4;

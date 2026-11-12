@@ -3660,7 +3660,9 @@ sub _request_id {
 
 # finish_reason in the usage contract's words (skeid k121): stop, length, content_filter,
 # tool_calls, error or other. A failed request is `error`, whatever came before; a request whose
-# answer has no finish reason (embeddings, audio, rerank, documents) has none.
+# answer has no finish reason (embeddings, audio, rerank, documents) has none. A client that hung
+# up is not a failed answer: it keeps the reason the stream had reached, else `other`, so the
+# error rate counts what went wrong upstream, not callers that left.
 my %FINISH_REASON = (
   stop => 'stop', length => 'length', content_filter => 'content_filter',
   tool_calls => 'tool_calls', function_call => 'tool_calls',
@@ -3668,6 +3670,11 @@ my %FINISH_REASON = (
 
 sub _finish_reason_field {
   my ($args) = @_;
+  if (($args->{error_type} // '') eq 'client_abort') {
+    my $raw = $args->{finish_reason};
+    return (finish_reason => (defined($raw) && !ref($raw) && length($raw)
+      ? ($FINISH_REASON{lc $raw} // 'other') : 'other'));
+  }
   return (finish_reason => 'error')
     if !$args->{ok} && (($args->{status_code} // 0) >= 400 || length($args->{error_type} // ''));
   my $raw = $args->{finish_reason};
