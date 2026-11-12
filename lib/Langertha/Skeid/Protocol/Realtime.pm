@@ -102,7 +102,9 @@ sub query_model {
 
 The WebSocket URL of the node's realtime endpoint: C<http> becomes C<ws>, C<https> C<wss>, the
 C<model> is the one that was served, and every other query parameter of the client goes on as it
-was sent.
+was sent -- except C<autoload>. A llama.cpp router reads C<?autoload=true> as "load this model
+now", even when its operator started it with C<--no-models-autoload>; whether a node loads a
+model is the operator's decision, not the client's, so the parameter never reaches a node.
 
 =cut
 
@@ -115,7 +117,7 @@ sub upstream_url {
   if ($query) {
     my $all = $query->pairs;
     for (my $i = 0; $i < @$all; $i += 2) {
-      next if $all->[$i] eq 'model';
+      next if $all->[$i] eq 'model' || lc($all->[$i]) eq 'autoload';
       push @pairs, $all->[$i], $all->[$i + 1];
     }
   }

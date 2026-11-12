@@ -2,6 +2,9 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Realtime: the client's autoload query parameter is no longer passed to the node. A
+      llama.cpp router loads a model on ?autoload=true even when started with
+      --no-models-autoload. The HTTP routes never forwarded the client's query.
     - Ollama embeddings: POST /api/embed (input as a string or a list) and the older
       POST /api/embeddings (one prompt) are translated to the node's OpenAI /v1/embeddings
       and answered in Ollama's shape, routed, admitted and metered like /api/chat. Both
