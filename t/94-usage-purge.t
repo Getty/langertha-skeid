@@ -164,6 +164,11 @@ SKIP: {
 
   $out = qx{$^X -Ilib $bin usage-purge --config $config 2>&1};
   is $? >> 8, 2, 'without key ids or a time it refuses (exit 2)';
+
+  chmod 0600, $log;
+  seed(Langertha::Skeid->new(config_file => $config));
+  qx{$^X -Ilib $bin usage-purge --config $config $ORG_A 2>&1};
+  is((stat $log)[2] & 07777, 0600, 'a purge keeps the usage log\'s permissions');
 }
 
 done_testing;

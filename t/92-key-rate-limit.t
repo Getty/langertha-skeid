@@ -53,6 +53,15 @@ my $ADMIN = 'sk-admin-test-only';
     'refusals are counted per key id';
 }
 
+# --- without client_auth, made-up keys share one bucket (no bypass, no growth) ---
+{
+  my $skeid = Langertha::Skeid->new(config_loader => sub { +{
+    policies => { std => { rate => { per_s => 1, burst => 1 } } }, default_policy => 'std' } });
+  my $passed = grep { $skeid->rate_admit('k_' . sprintf('%040x', $_))->{ok} } 1 .. 50;
+  is $passed, 1, 'fifty different unlisted keys share the default policy\'s one bucket';
+  is scalar(keys %{ $skeid->_rate_buckets }), 1, 'and hold one bucket';
+}
+
 # --- the rate is divided among the processes, like max_conns ---
 {
   my $skeid = Langertha::Skeid->new(worker_count => 2, config_loader => sub { +{

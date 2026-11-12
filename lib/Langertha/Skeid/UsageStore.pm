@@ -238,7 +238,7 @@ sub purge_request {
   if (defined $args->{before}) {
     $before = $args->{before};
     return (undef, 'before must be an ISO 8601 UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)')
-      if ref($before) || $before !~ /\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z\z/;
+      if ref($before) || $before !~ /\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\z/;
   }
   return (undef, 'a purge needs api_key_ids, before, or both') unless $ids || defined $before;
   return ({

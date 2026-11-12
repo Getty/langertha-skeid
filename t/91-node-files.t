@@ -5,6 +5,7 @@ use Test::More;
 use File::Temp qw(tempdir);
 use Langertha::Skeid;
 use Langertha::Skeid::NodeFiles;
+use Langertha::Skeid::Proxy;
 
 # Node files (ADR 0031): nodes from a second, less trusted file. Whoever writes it -- a GPU
 # manager -- must not be able to make Skeid send an environment variable or a broker secret of
@@ -110,7 +111,7 @@ is_deeply $skeid->reload_status, { ok => 1 }, 'the main config is not failed by 
 
 write_file($gpm, "nodes: []\npolicies: { open: {} }\n");
 $skeid->call_function('nodes.list', {});
-like $skeid->node_files_status->[0]{error}, qr/only nodes, not policies/,
+like $skeid->node_files_status->[0]{error}, qr/may hold only nodes\z/,
   'a node file that says more than nodes is refused whole';
 is_deeply ids($skeid), [qw( trusted gpu-9 )], '...and the last good nodes stay';
 
@@ -156,11 +157,75 @@ is $skeid->node_files_status, undef, 'and no node file status';
   is_deeply ids($loader_skeid), ['b'], 'and a changed file reloads although the loader\'s version did not move';
 }
 
+# --- a less trusted writer cannot make reading the file expensive ---
+{
+  my $bomb = "a0: &a0 [x, x, x, x, x, x, x, x, x, x]\n";
+  $bomb .= "a$_: &a$_ [" . join(', ', ("*a" . ($_ - 1)) x 10) . "]\n" for 1 .. 8;
+  $bomb .= "nodes: [ { id: b, url: 'http://b.cai-gpm.svc/v1', metadata: { x: *a8 } } ]\n";
+  write_file($gpm, $bomb);
+  my $t0 = time;
+  my $s = Langertha::Skeid->new(config_loader => sub {
+    +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] } });
+  ok time - $t0 < 5, 'a file of nested YAML aliases is refused quickly';
+  like $s->node_files_status->[0]{error}, qr/YAML alias|only nodes/, 'and says why';
+  is_deeply ids($s), [], 'and contributes nothing';
+
+  write_file($gpm, "- { id: d, url: 'http://d.cai-gpm.svc/v1', metadata: " . ('[' x 20) . (']' x 20) . " }\n");
+  $s = Langertha::Skeid->new(config_loader => sub {
+    +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] } });
+  like $s->node_files_status->[0]{error}, qr/nests deeper/, 'deep nesting is refused';
+}
+
+# --- a node file change keeps the main nodes' admin-set health ---
+{
+  write_file($gpm, "- { id: g1, url: 'http://g1.cai-gpm.svc/v1' }\n");
+  my $s = Langertha::Skeid->new(config_reload_interval => 0, config_loader => sub { +{
+    nodes => [{ id => 'main', url => 'http://main/v1' }],
+    node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] } });
+  $s->set_node_health('main', 0);
+  write_file($gpm, "- { id: g1, url: 'http://g1.cai-gpm.svc/v1' }\n- { id: g2, url: 'http://g2.cai-gpm.svc/v1' }\n");
+  $s->call_function('nodes.list', {});
+  is_deeply ids($s), [qw( main g1 g2 )], 'the changed node file is applied';
+  my ($m) = grep { $_->{id} eq 'main' } @{ $s->nodes };
+  is $m->{healthy}, 0, 'and the main node keeps the health an admin set';
+}
+
+# --- a keyless node from a node file never gets the client's credentials ---
+{
+  require Mojolicious;
+  require Mojo::Server::Daemon;
+  my @auth;
+  my $up = Mojolicious->new;
+  $up->log->level('fatal');
+  $up->routes->post('/v1/chat/completions' => sub {
+    my ($c) = @_;
+    push @auth, [ $c->req->headers->authorization, $c->req->headers->header('X-Api-Key') ];
+    $c->render(json => { id => 'c', object => 'chat.completion', model => 'm',
+      choices => [{ index => 0, message => { role => 'assistant', content => 'ok' }, finish_reason => 'stop' }] });
+  });
+  my $d = Mojo::Server::Daemon->new(app => $up, listen => ['http://127.0.0.1'], silent => 1);
+  $d->start;
+  my $port = $d->ports->[0];
+  write_file($gpm, "- { id: f1, url: 'http://127.0.0.1:$port/v1', model: from-file }\n");
+  my $s = Langertha::Skeid->new(config_loader => sub { +{
+    nodes      => [{ id => 'trusted', url => "http://127.0.0.1:$port/v1", model => 'from-main' }],
+    node_files => [{ path => $gpm, allow_url_hosts => ['127.0.0.1'] }] } });
+  require Test::Mojo;
+  my $t = Test::Mojo->new(Langertha::Skeid::Proxy->build_app(skeid => $s));
+  $t->app->log->level('fatal');
+  my %h = (Authorization => 'Bearer sk-customer-secret', 'X-Api-Key' => 'sk-customer-secret');
+  $t->post_ok('/v1/chat/completions' => \%h => json => { model => 'from-file', messages => [{ role => 'user', content => 'x' }] })
+    ->status_is(200);
+  is_deeply $auth[-1], [ undef, undef ], 'the node from the node file sees no client credential';
+  $t->post_ok('/v1/chat/completions' => \%h => json => { model => 'from-main', messages => [{ role => 'user', content => 'x' }] })
+    ->status_is(200);
+  is $auth[-1][0], 'Bearer sk-customer-secret', 'a keyless main-config node keeps the documented pass-through';
+}
+
 # --- GET /skeid/config shows the node files, /health does not ---
 {
   require Test::Mojo;
-  require Langertha::Skeid::Proxy;
-  write_file($gpm, "- { id: a, url: 'http://a.cai-gpm.svc/v1' }\n- { id: z, url: 'http://attacker.example/v1' }\n");
+    write_file($gpm, "- { id: a, url: 'http://a.cai-gpm.svc/v1' }\n- { id: z, url: 'http://attacker.example/v1' }\n");
   my $admin = 'sk-admin-test-only';
   my $s = Langertha::Skeid->new(admin_api_key => $admin, config_loader => sub {
     +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] } });

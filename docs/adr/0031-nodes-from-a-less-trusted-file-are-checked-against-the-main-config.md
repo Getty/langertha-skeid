@@ -39,6 +39,12 @@ node_files:
   choosing and a custom probe names code. Values the main config would refuse (unknown engine,
   rerank format, a key header that is no token) reject the node instead of failing the load —
   a less trusted file must not be able to break the trusted config.
+- **No client credential.** A node from a node file that names no key source does not get the
+  documented pass-through of the client's `Authorization` / `X-Api-Key`: its URL was chosen by
+  the less trusted writer, and with `client_auth` that header is the customer's Skeid key.
+- **Reading is bounded.** A node file larger than 1 MiB, nested deeper than 16 levels or using a
+  YAML alias is refused whole: a few hundred bytes of nested aliases expand beyond what the
+  config digest, which walks every node on the event loop, can afford.
 - **The main config wins ids.** A node whose id the main config or an earlier node file already
   uses is rejected (`id_taken`); a node file cannot shadow a trusted node.
 - **Per node, then per file.** A broken node is rejected alone. A file version that does not
@@ -52,7 +58,9 @@ node_files:
   `config_loader` on its next run. What the files contributed is part of the config fingerprint,
   so a loader's version does not hide a node file change.
 - The merged nodes are the `nodes` section: an unchanged contribution keeps the node list (skeid
-  #38), and nodes from the admin API are replaced as by any declared `nodes` section.
+  #38), and nodes from the admin API are replaced as by any declared `nodes` section. When only
+  the node files' contribution changed, every node whose entry is unchanged keeps the health an
+  admin set on it; a changed main `nodes` section is the declared state again, as before.
 
 ## Alternatives
 

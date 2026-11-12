@@ -1554,6 +1554,14 @@ has _nodes_fingerprint => (
   default => sub { undef },
 );
 
+# Per node id, the digest of the config entry it was built from: an unchanged entry keeps the
+# health an admin set when the nodes section is rebuilt.
+has _node_entry_prints => (
+  is      => 'rw',
+  default => sub { {} },
+);
+has _main_nodes_print => (is => 'rw');
+
 has _rr_cursor => (
   is      => 'rw',
   default => sub { {} },
@@ -1862,6 +1870,8 @@ sub add_node {
     # The header the node's key is sent in, raw, instead of `Authorization: Bearer` (docling's
     # `X-Api-Key`). Absent means Authorization.
     (length($key_header) ? (api_key_header => $key_header) : ()),
+    # The node file it came from (ADR 0031): such a node never gets the client's credentials.
+    (defined($node{node_file}) && length($node{node_file}) ? (node_file => "$node{node_file}") : ()),
   };
   $self->_bump_inventory;
   return 1;
@@ -2371,7 +2381,8 @@ sub _merge_node_files {
         next;
       }
       $taken{"$node->{id}"} = 1;
-      push @added, $node;
+      # Marked, so the proxy never hands a node from a node file the client's own credentials.
+      push @added, { %$node, node_file => $path };
     }
     if ($fresh) {
       warn "skeid: node file $path: node $_->{position} rejected ($_->{rule})\n" for @rejected;
@@ -2606,12 +2617,29 @@ sub _apply_config {
     # An unchanged nodes section keeps the node list as it is (skeid #38).
     my $print = _config_digest($nodes);
     if (!defined($nodes_print) || $print ne $nodes_print) {
+      # A changed main nodes section is the declared state again, health included. A change that
+      # came only from node files (ADR 0031) must not reset the main config's nodes: there a node
+      # whose entry did not change keeps the health an admin set on it.
+      my $main_print = _config_digest([ grep { !(ref($_) eq 'HASH' && defined $_->{node_file}) } @$nodes ]);
+      my $files_only = defined($self->_main_nodes_print) && $self->_main_nodes_print eq $main_print;
+      $self->_main_nodes_print($main_print);
+      my $entry_prints = $files_only ? $self->_node_entry_prints : {};
+      my %health = map { (($_->{id} // '') => $_->{healthy}) } @{$self->nodes};
+      my %prints;
       $self->nodes([]);
       for my $n (@$nodes) {
         next unless ref($n) eq 'HASH';
         next unless defined $n->{id} && defined $n->{url};
+        my $entry = _config_digest($n);
+        $prints{$n->{id}} = $entry;
         $self->add_node(%$n);
+        if (defined($entry_prints->{$n->{id}}) && $entry_prints->{$n->{id}} eq $entry
+            && exists $health{$n->{id}}) {
+          my ($added) = grep { $_->{id} eq $n->{id} } @{$self->nodes};
+          $added->{healthy} = $health{$n->{id}} if $added;
+        }
       }
+      $self->_node_entry_prints(\%prints);
       $nodes_print = $print;
     }
   } elsif ($before->{nodes}) {
@@ -3716,7 +3744,9 @@ request -- or those created C<before> a time, or those of the keys before a time
 C<dry_run> only counts. Idempotent: repeated, it deletes what is left, so a caller retries until
 C<ok>. This process's write-behind queue is written out first; with C<flush_interval_ms> and
 several processes (C<--workers>, frontends) the others may still write queued events of those
-keys for up to one interval, so an erasure runs the purge again after it. The answer is meant to be recorded by the caller: what was asked (the number of key ids,
+keys for up to one interval, so an erasure runs the purge again after it. The same holds for the
+spools (C<spool_dir>) of other instances: a purge refuses only while its own spool holds events,
+so an erasure purges again once every instance's spool is replayed. The answer is meant to be recorded by the caller: what was asked (the number of key ids,
 C<before>), what matched, what was deleted, by which backend and when. Served by
 C<POST /skeid/usage/purge> and C<skeid usage-purge>. A store without a C<purge> (a
 C<store_usage_event> callback) answers C<ok> 0.
@@ -4427,7 +4457,9 @@ sub _rate_print { Langertha::Skeid::Rate->print($_[0]) }
 
 Takes one request from the request budget of a customer key (skeid k125): the C<rate> of its
 policy (see L</Per-Key Routing Policy>). A key whose policy has no C<rate> is always admitted.
-Two token buckets, C<per_s> with C<burst> and C<per_min>, both must hold a token. Kept in memory
+Two token buckets, C<per_s> with C<burst> and C<per_min>, both must hold a token. A key is its
+own bucket when C<client_auth> is on or the key has a C<keys> entry; otherwise -- any string
+would be a key -- all such callers share one bucket, keyed C<''>. Kept in memory
 per process; like C<max_conns> the rate is divided among the processes that share the
 deployment (C<worker_count> times C<frontend_count>), with at least one token of burst each.
 C<retry_after> is the whole seconds until a token is back, at least 1.
@@ -4436,8 +4468,13 @@ C<retry_after> is the whole seconds until a token is back, at least 1.
 
 sub rate_admit {
   my ($self, $api_key_id) = @_;
-  my $id     = $api_key_id // '';
   my $policy = $self->policy_for_key($api_key_id);
+  # Without client authentication any string is a key, so a key the config does not list would
+  # get a fresh bucket per made-up key -- no limit, and unbounded memory. Unlisted keys then share
+  # one bucket: the default policy's rate is for everyone it covers together.
+  my $id = $api_key_id // '';
+  $id = '' if length($id) && !$self->client_auth_enabled
+    && !defined($self->_configured_key_id($self->key_policies, $api_key_id));
   my $rate   = $policy ? $policy->{rate} : undef;
   my $buckets = $self->_rate_buckets;
   unless ($rate) {

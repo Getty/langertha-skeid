@@ -3146,8 +3146,13 @@ sub _inject_node_auth_async {
       return $cb->();
     }
 
-    # A node with no key of its own: the documented pass-through.
-    return $cb->() unless defined $reason;
+    # A node with no key of its own: the documented pass-through -- except for a node from a node
+    # file (ADR 0031). Its URL was chosen by a less trusted writer, and the client's credential
+    # (with client_auth, the customer's Skeid key) is not that writer's to collect.
+    unless (defined $reason) {
+      _drop_client_credentials($headers_ref) if length($node->{node_file} // '');
+      return $cb->();
+    }
 
     # A key source was named and produced nothing. Take the client's credentials out of what
     # would go upstream as well, so a caller that ignored the reason still could not leak them.

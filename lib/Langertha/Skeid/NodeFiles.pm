@@ -6,6 +6,7 @@ use warnings;
 use Carp qw(croak);
 use Mojo::URL;
 use YAML::PP;
+use Scalar::Util qw(blessed refaddr);
 use Langertha::Skeid::Protocol::Documents;
 use Langertha::Skeid::Protocol::Rerank;
 
@@ -123,26 +124,55 @@ sub normalize_config {
   my $nodes = Langertha::Skeid::NodeFiles->read_file($path);   # dies when it cannot
 
 The node list of one node file: a YAML list of nodes, or a mapping whose only key is C<nodes>.
-A file that does not parse, or says anything but nodes, dies -- the caller keeps that file's last
-good list. The message names the file and the line, never its content.
+A file that does not parse, says anything but nodes, is larger than 1 MiB, nests deeper than 16
+levels or uses a YAML alias dies -- the caller keeps that file's last good list. The message
+names the file and the line, never its content.
 
 =cut
 
+# A node file is a list of a few hundred nodes at most. Its writer is less trusted, so what it
+# may cost to read is bounded: the bytes, the nesting, and no YAML alias -- an alias shares a
+# structure, and a few hundred bytes of nested aliases expand to more than any walk of it can
+# afford (the config digest walks every node on the event loop).
+my $MAX_BYTES = 1024 * 1024;
+my $MAX_DEPTH = 16;
+
 sub read_file {
   my ($class, $path) = @_;
+  my $size = -s $path;
+  die "node file $path is larger than $MAX_BYTES bytes\n" if defined($size) && $size > $MAX_BYTES;
   my $data;
   unless (eval { $data = YAML::PP->new->load_file($path); 1 }) {
     my ($line) = ($@ =~ /line:?\s*(\d+)/i);
     die "node file $path is not valid YAML" . (defined $line ? " (line $line)" : '') . "\n";
   }
   return [] unless defined $data;
+  my $problem = _shape_problem($data);
+  die "node file $path $problem\n" if $problem;
   if (ref($data) eq 'HASH') {
-    my @other = grep { $_ ne 'nodes' } sort keys %$data;
-    die "node file $path may hold only nodes, not " . join(', ', @other) . "\n" if @other;
+    die "node file $path may hold only nodes\n" if grep { $_ ne 'nodes' } keys %$data;
     $data = $data->{nodes} // [];
   }
   die "node file $path must be a list of nodes\n" unless ref($data) eq 'ARRAY';
   return $data;
+}
+
+# Why a loaded structure is not acceptable from a less trusted writer, or undef: a structure
+# reached twice (a YAML alias), or nesting deeper than $MAX_DEPTH.
+sub _shape_problem {
+  my ($data) = @_;
+  my %seen;
+  my @todo = ([ $data, 0 ]);
+  while (my $item = pop @todo) {
+    my ($node, $depth) = @$item;
+    next unless ref $node;
+    next if blessed($node);
+    return 'uses a YAML alias or anchor' if $seen{refaddr $node}++;
+    return "nests deeper than $MAX_DEPTH levels" if $depth > $MAX_DEPTH;
+    my @children = ref($node) eq 'HASH' ? values %$node : ref($node) eq 'ARRAY' ? @$node : ();
+    push @todo, map { [ $_, $depth + 1 ] } @children;
+  }
+  return undef;
 }
 
 =method check

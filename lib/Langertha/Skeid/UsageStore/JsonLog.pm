@@ -265,8 +265,20 @@ sub purge {
 
   my $path = $self->path;
   return { ok => 1, matched => 0, deleted => 0 } unless -e $path;
-  open my $lock, '>>', $path or return { ok => 0, error => "Cannot open $path: $!" };
-  flock($lock, LOCK_EX) or return { ok => 0, error => _io_error('lock', $path, "$!") };
+  # The lock must be on the file at $path: another purge may have renamed a rewritten copy over
+  # it while this one waited, and a lock on the replaced file guards nothing.
+  my $lock;
+  for (1 .. $CREATE_ATTEMPTS) {
+    open $lock, '>>', $path or return { ok => 0, error => "Cannot open $path: $!" };
+    flock($lock, LOCK_EX) or return { ok => 0, error => _io_error('lock', $path, "$!") };
+    my @held = stat $lock;
+    my @now  = stat $path;
+    last if @now && $held[0] == $now[0] && $held[1] == $now[1];
+    close $lock;
+    undef $lock;
+  }
+  return { ok => 0, error => "Cannot purge $path: it kept being replaced" } unless $lock;
+  my $mode = (stat $lock)[2] & 07777;
   open my $in, '<', $path or return { ok => 0, error => "Cannot read $path: $!" };
   my ($matched, @keep) = (0);
   while (my $line = <$in>) {
@@ -280,7 +292,10 @@ sub purge {
   return { ok => 1, matched => $matched, deleted => 0 } if $request->{dry_run} || !$matched;
 
   my $tmp = "$path.purge-$$";
-  open my $out, '>', $tmp or return { ok => 0, error => "Cannot write $tmp: $!" };
+  # The rewritten file keeps the old one's permissions: a 0600 usage log stays 0600.
+  sysopen(my $out, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600)
+    or return { ok => 0, error => "Cannot write $tmp: $!" };
+  chmod $mode, $tmp;
   my $error;
   print {$out} @keep or $error = _io_error('write', $tmp, "$!");
   if (!$error && $self->fsync) {

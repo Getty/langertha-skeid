@@ -21,14 +21,16 @@ Revision history for Langertha-Skeid
       anything is routed, and the refusal is a usage event with error_type
       key_rate_limited and no content. Token buckets in memory per process, divided like
       max_conns across workers and frontends; a key of a customer source takes its
-      policy's rate. GET /skeid/metrics/keys counts the refusals per key id.
+      policy's rate. Without client_auth, keys the config does not list share one bucket. GET /skeid/metrics/keys counts the refusals per key id.
     - Node files: node_files in the main config names further YAML files of nodes that
       someone else writes (a GPU manager), each with constraints -- allowed URL hosts, an
       api_key_env pattern, api_key_ref on or off (default off), allowed kinds. A node that
       breaks one is left out and the rest of the file loads; GET /skeid/config lists per
       file the nodes accepted and each rejection by position and rule, never the value. A
       file is re-read when it changes and kept at its last good version when it does not
-      parse or is gone. ADR 0031.
+      parse or is gone. A keyless node from a node file never gets the client's
+      credentials; a file over 1 MiB, nested deeper than 16 levels or using YAML aliases is
+      refused. ADR 0031.
     - Realtime: the client's autoload query parameter is no longer passed to the node. A
       llama.cpp router loads a model on ?autoload=true even when started with
       --no-models-autoload. The HTTP routes never forwarded the client's query.
