@@ -1,0 +1,20 @@
+---
+class: standard
+completed: 2026-11-12T05:01:37Z
+created: 2026-11-05T04:36:35Z
+id: 116
+priority: medium
+started: 2026-11-12T05:01:37Z
+status: done
+tags:
+- ollama
+- embeddings
+- downstream
+title: 'Ollama embedding routes: /api/embed and /api/embeddings'
+updated: 2026-11-12T05:01:37Z
+---
+
+Measured on 2026-11-03 against Skeid 0.004 on a test node. Embeddings work only in the OpenAI form: /v1/embeddings works. The Ollama face knows only /api/chat, /api/generate, /api/tags and /api/ps; /api/embed and /api/embeddings answer 404. Wanted: embeddings in every output form, i.e. add the Ollama embed routes and translate them to the node's /v1/embeddings.
+Requested by a downstream deployment.
+
+2026-11-12 05:01 Done in 25a1b25 (pushed): POST /api/embed (input string|list, dimensions) and POST /api/embeddings (prompt) -> node /v1/embeddings, answered as embeddings[]+prompt_eval_count resp. embedding; alias, policy 403, upstream error and 400 Ollama-shaped; OpenAPI schemas. New t/57-ollama-embed.t (33 tests). prove -lr t/ 106 files 6221 tests PASS.
