@@ -14,6 +14,7 @@ use Langertha ();
 use Langertha::Skeid::UsageStore;
 use Langertha::Skeid::CustomerSource;
 use Langertha::Skeid::NodeFiles;
+use Langertha::Skeid::Rate;
 use Langertha::Skeid::Protocol;
 use Langertha::Skeid::Protocol::Anthropic;
 use Langertha::Skeid::Protocol::Documents;
@@ -4254,32 +4255,10 @@ sub resolve_policy {
   };
 }
 
-# A policy's request rate (skeid k125): undef for none, else per_s with its burst and/or per_min.
+# A policy's request rate (skeid k125): undef for none; see Langertha::Skeid::Rate.
 sub _normalize_rate {
   my ($rate, $name) = @_;
-  return undef unless defined $rate;
-  my $at = 'rate' . (defined($name) && length($name) ? " of policy '$name'" : '');
-  croak "$at must be a mapping of per_s, burst, per_min" unless ref($rate) eq 'HASH';
-  my @unknown = grep { !/\A(?:per_s|burst|per_min)\z/ } sort keys %$rate;
-  croak "$at: unknown field " . join(', ', @unknown) if @unknown;
-  for my $field (qw( per_s per_min )) {
-    next unless defined $rate->{$field};
-    croak "$at: $field must be a number above 0"
-      unless looks_like_number($rate->{$field}) && $rate->{$field} > 0;
-  }
-  croak "$at needs per_s or per_min" unless defined($rate->{per_s}) || defined($rate->{per_min});
-  my $burst;
-  if (defined $rate->{per_s}) {
-    $burst = defined($rate->{burst}) ? $rate->{burst} : POSIX::ceil($rate->{per_s});
-    croak "$at: burst must be a whole number of at least 1"
-      unless looks_like_number($burst) && $burst >= 1 && $burst == int($burst);
-  } elsif (defined $rate->{burst}) {
-    croak "$at: burst needs per_s";
-  }
-  return {
-    (defined($rate->{per_s})   ? (per_s => 0 + $rate->{per_s}, burst => 0 + $burst) : ()),
-    (defined($rate->{per_min}) ? (per_min => 0 + $rate->{per_min}) : ()),
-  };
+  return Langertha::Skeid::Rate->normalize($rate, defined($name) && length($name) ? "policy '$name'" : undef);
 }
 
 # Key ids before ADR 0016 were the first 12 hex digits of the same digest, so a short id is
@@ -4376,7 +4355,7 @@ sub _load_policies {
                           ? $self->normalize_tags($overrides->{deny_tags})
                           : ($base->{deny_tags} // [])),
         rate         => (exists($overrides->{rate})
-                          ? _normalize_rate($overrides->{rate}, $label)
+                          ? Langertha::Skeid::Rate->normalize($overrides->{rate}, "key '$label'")
                           : $base->{rate}),
       };
       $key_policies{$key} = $intern->($merged);
@@ -4436,11 +4415,7 @@ sub _policy_fingerprint {
   return join("\0", $models, join(',', @{$policy->{deny_tags}}), _rate_print($policy->{rate}));
 }
 
-sub _rate_print {
-  my ($rate) = @_;
-  return '' unless $rate;
-  return join '/', map { $rate->{$_} // '' } qw( per_s burst per_min );
-}
+sub _rate_print { Langertha::Skeid::Rate->print($_[0]) }
 
 =method rate_admit
 
