@@ -2,6 +2,11 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Aliases: the last tier of an alias that sets no wait_ms now waits
+      routing.wait_timeout_ms, like a model without an alias, instead of 0. A saturated alias
+      answered 429 at once while its raw model name waited; write wait_ms: 0 on the last tier
+      to keep refusing at once. Earlier tiers still default to 0.
+
 0.004     2026-10-24 04:04:43Z
 
   [Status]

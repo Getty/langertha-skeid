@@ -393,7 +393,8 @@ L</set_model_pricing>.
         - { tags: [cloud], model: llama-3.3-70b-versatile }
 
 A client-facing model name as an ordered plan of tiers (ADR 0008). Per tier: C<tags>, C<model>
-(default: the alias name), C<engine> and C<wait_ms> (default 0). C<tiers> may be given as a bare
+(default: the alias name), C<engine> and C<wait_ms> (default 0; the last tier defaults to
+C<routing.wait_timeout_ms>). C<tiers> may be given as a bare
 list. See L</set_model_alias>.
 
 =head2 policies, default_policy, names, keys
@@ -1150,7 +1151,8 @@ sub _build_trust_key_id_header {
 
 How long, in milliseconds, a request for a model without an alias waits for a free node before
 it is answered C<429> (default 2000, or C<SKEID_ROUTE_WAIT_TIMEOUT_MS>; config
-C<routing.wait_timeout_ms>). An alias tier waits its own C<wait_ms> instead.
+C<routing.wait_timeout_ms>). An alias tier waits its own C<wait_ms> instead; the last tier of
+an alias that sets none waits this one.
 
 =cut
 
@@ -3883,9 +3885,12 @@ the alias name itself, for the case where nodes carry that name), C<engine> opti
 constrains the engine, and C<wait_ms> is how long to wait for capacity in this tier before
 falling through to the next.
 
-C<wait_ms> defaults to B<0>. Writing tiers means "try here, then there"; waiting is the
-exception you opt into, and a tier that waits by default would send traffic to a paid cloud
-only after a delay nobody asked for -- or, worse, make a cheap tier look slow.
+C<wait_ms> defaults to B<0> on every tier but the last. Writing tiers means "try here, then
+there"; waiting is the exception you opt into, and a tier that waits by default would send
+traffic to a paid cloud only after a delay nobody asked for -- or, worse, make a cheap tier look
+slow. The last tier has nowhere to fall through to, so without its own C<wait_ms> it waits
+L</route_wait_timeout_ms>, like a model without an alias: a saturated alias then answers C<429>
+no sooner than its raw model name would. Write C<wait_ms: 0> on the last tier to refuse at once.
 
 =cut
 
@@ -3906,7 +3911,9 @@ sub set_model_alias {
       tags    => $self->normalize_tags($tier->{tags}),
       model   => ((defined($tier->{model}) && length($tier->{model})) ? "$tier->{model}" : $name),
       engine  => $self->normalize_engine_id($tier->{engine} // ''),
-      wait_ms => (defined($tier->{wait_ms}) && $tier->{wait_ms} > 0 ? 0 + $tier->{wait_ms} : 0),
+      # undef = not written: route_plan gives the last tier the global wait, the others 0.
+      wait_ms => (!defined($tier->{wait_ms}) || !length($tier->{wait_ms}) ? undef
+                 : $tier->{wait_ms} > 0 ? 0 + $tier->{wait_ms} : 0),
     };
   }
 
@@ -4587,6 +4594,15 @@ sub route_plan {
 
   return { tiers => [], permitted => 0, reason => 'all_tiers_denied' }
     if $before && !@tiers;
+
+  # A tier without its own wait_ms waits 0, except the last one left after the deny filter: it
+  # has nowhere to fall through to and waits like a model without an alias.
+  if ($alias) {
+    for my $i (0 .. $#tiers) {
+      next if defined $tiers[$i]{wait_ms};
+      $tiers[$i]{wait_ms} = $i == $#tiers ? 0 + ($self->route_wait_timeout_ms // 0) : 0;
+    }
+  }
 
   return { tiers => \@tiers, permitted => 1, reason => '' };
 }

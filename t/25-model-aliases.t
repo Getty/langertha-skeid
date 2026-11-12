@@ -35,8 +35,34 @@ use Langertha::Skeid::Proxy;
   is(scalar(@$plan), 2, 'an alias yields its tiers in order');
   is($plan->[0]{model}, 'qwen3-32b', 'first tier serves the local model');
   is($plan->[1]{model}, 'llama-3.3-70b', 'second tier serves the cloud model');
-  is($plan->[1]{wait_ms}, 0,
-    'wait_ms defaults to 0: writing tiers means "try here, then there", waiting is opt-in');
+  is($plan->[0]{wait_ms}, 200, 'a tier keeps its own wait_ms');
+  is($plan->[1]{wait_ms}, 1234,
+    'the last tier without wait_ms waits the global wait, so a saturated alias 429s no sooner than its raw model');
+
+  $skeid->set_model_alias('three', {
+    tiers => [
+      { tags => ['a'], model => 'm-a' },
+      { tags => ['b'], model => 'm-b' },
+      { tags => ['c'], model => 'm-c', wait_ms => 0 },
+    ],
+  });
+  my $three = $skeid->route_plan(model => 'three')->{tiers};
+  is_deeply([map { $_->{wait_ms} } @$three], [0, 0, 0],
+    'wait_ms defaults to 0 on the other tiers, and an explicit 0 on the last tier refuses at once');
+  is($skeid->model_aliases->{three}{tiers}[0]{wait_ms}, undef,
+    'route_plan does not write the default back into the alias');
+
+  $skeid->set_model_alias('local-first', {
+    tiers => [
+      { tags => ['local'], model => 'm-local' },
+      { tags => ['cloud'], model => 'm-cloud' },
+    ],
+  });
+  $skeid->default_policy($skeid->resolve_policy({ deny_tags => ['cloud'] }, 'no-cloud'));
+  my $denied = $skeid->route_plan(model => 'local-first')->{tiers};
+  is_deeply([map { [$_->{model}, $_->{wait_ms}] } @$denied], [['m-local', 1234]],
+    'when the policy drops the cloud tier, the local tier is the last one left and waits');
+  $skeid->default_policy(undef);
 
   $skeid->set_model_alias('shorthand', [{ tags => ['local'] }]);
   is($skeid->route_plan(model => 'shorthand')->{tiers}[0]{model}, 'shorthand',
