@@ -374,6 +374,7 @@ C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
                                    {customer_report}: rows accepted, rejected, shadowed (labels, reasons)
                                    {node_files}: per node file, nodes accepted, rejected (position, rule)
   GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
+  GET  /skeid/metrics/keys         {metrics}: per customer key id, requests refused for its rate
   GET  /skeid/usage                ?since=&api_key_id=&model=&limit= (default 50) -> the report
   GET  /skeid/openapi.json         OpenAPI 3.1 description of the admin routes
 
@@ -973,6 +974,13 @@ sub _build_route_table {
     handler => sub {
       my ($c) = @_;
       $c->render(json => { metrics => $c->skeid->node_metrics });
+    });
+
+  $add->(id => 'admin_metrics_keys', group => 'admin', paths => ['/skeid/metrics/keys'],
+    document => 'admin', tag => 'Admin', summary => 'Per-key counters: requests refused for the key\'s rate',
+    handler => sub {
+      my ($c) = @_;
+      $c->render(json => { metrics => $c->skeid->key_metrics });
     });
 
   $add->(id => 'admin_usage', group => 'admin', paths => ['/skeid/usage'], document => 'admin',
@@ -2149,6 +2157,14 @@ sub _begin_route_async {
     return;
   }
 
+  # The key's request rate (skeid k125): over it, refused before anything is routed or admitted.
+  my $rate = $c->skeid->rate_admit($api_key_id);
+  unless ($rate->{ok}) {
+    _refuse_rate_limited($c, $model, $api_key_id, $rate->{retry_after});
+    $cb->();
+    return;
+  }
+
   my $plan = $decision->{tiers} || [];
   my $started = time;
   my $saw_eligible = 0;
@@ -3188,6 +3204,32 @@ sub _refuse_unkeyed_node {
   });
   _render_error($c, 503, 'The upstream key for this model is not available',
     'upstream_key_unavailable');
+  return;
+}
+
+# A request over its key's rate (skeid k125): 429 with Retry-After in the face's shape, and one
+# usage event without content, so the refusals of a runaway caller show where its usage does.
+# No node was picked, so there is no slot to give back.
+sub _refuse_rate_limited {
+  my ($c, $model, $api_key_id, $retry_after) = @_;
+  my $format = $c->stash('skeid.error_format') // '';
+  _record_usage_event($c, {
+    api_format      => (length($format) ? $format : 'openai'),
+    endpoint        => $c->req->url->path->to_string,
+    api_key_id      => $api_key_id,
+    provider        => 'skeid',
+    model           => ($model // ''),
+    requested_model => ($model // ''),
+    status_code     => 429,
+    ok              => 0,
+    duration_ms     => 0,
+    error_type      => 'key_rate_limited',
+    error_message   => 'Request rate of the key exceeded',
+    metrics         => {},
+  });
+  $c->res->headers->header('Retry-After' => $retry_after);
+  _render_error($c, 429, "Request rate limit of this key exceeded; retry after ${retry_after}s",
+    'rate_limit_exceeded', 'key_rate_limited');
   return;
 }
 

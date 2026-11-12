@@ -138,6 +138,14 @@ rate_limit_error`. Distinct from *no eligible node* in any tier, which is an imm
 model_not_found`.
 _Avoid_: overload, backpressure, queueing.
 
+**Key rate** (`rate` of a policy):
+A request budget per customer key — `per_s` with `burst` and/or `per_min`, token buckets in
+memory per process, divided like `max_conns`. Over it a request is refused `429` with
+`Retry-After` before **Routing**, and recorded as a **Usage event** with `error_type`
+`key_rate_limited`. Not **Admission**: admission is about a node's slots, the key rate about one
+caller's pace.
+_Avoid_: throttle, quota (a quota is an amount over a period, billed).
+
 **Health**:
 An operator-set flag on a node (`set_node_health`, admin API), not a probe result. A **capacity
 probe** may poll a node, but only ever for **Admission**; an unreachable node stays "healthy"

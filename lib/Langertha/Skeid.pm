@@ -193,6 +193,22 @@ points at, and every policy line that named the customer follows. Its values are
 C<skeid keyid>, never customer keys, so the config still holds no secret; it is read only at
 config load and never on the request path.
 
+A policy may carry a request C<rate> (skeid k125), so a caller that runs away -- a loop, an
+agent gone wrong -- is stopped before it burns capacity or budget:
+
+  policies:
+    agents: { rate: { per_s: 2, burst: 10, per_min: 60 } }
+  keys:
+    bigcorp: { policy: standard, rate: { per_s: 5 } }   # a keys entry may set its own
+
+C<per_s> refills a bucket of C<burst> tokens (default: C<per_s> rounded up), C<per_min> a bucket
+of that many; either may be left out, and a request needs a token from each. Without C<rate> a
+key is unlimited. Over it, the request is answered C<429> with C<Retry-After> before it is routed
+-- nothing reaches a node -- and recorded as a usage event with C<error_type> C<key_rate_limited>.
+The buckets are in memory per process and the rate is divided like C<max_conns>
+(L</worker_count>, L</frontend_count>); a key of a customer source takes the rate of the
+policy its row names. See L</rate_admit>.
+
 Identity comes from the API key the caller presented — see L</key_id_for_key>. See also ADR
 0008 in the distribution repository.
 
@@ -909,6 +925,11 @@ has key_policies => (
   is      => 'rw',
   default => sub { {} },
 );
+
+# Per customer key id: the token buckets of its policy's rate, and how often it was refused
+# (skeid k125). In memory, per process.
+has _rate_buckets  => (is => 'rw', default => sub { {} });
+has _rate_refusals => (is => 'rw', default => sub { {} });
 
 =attr key_names
 
@@ -4125,6 +4146,35 @@ sub resolve_policy {
     name         => ($name // $spec->{name} // ''),
     allow_models => $allow_models,
     deny_tags    => $self->normalize_tags($spec->{deny_tags}),
+    rate         => _normalize_rate($spec->{rate}, $name),
+  };
+}
+
+# A policy's request rate (skeid k125): undef for none, else per_s with its burst and/or per_min.
+sub _normalize_rate {
+  my ($rate, $name) = @_;
+  return undef unless defined $rate;
+  my $at = 'rate' . (defined($name) && length($name) ? " of policy '$name'" : '');
+  croak "$at must be a mapping of per_s, burst, per_min" unless ref($rate) eq 'HASH';
+  my @unknown = grep { !/\A(?:per_s|burst|per_min)\z/ } sort keys %$rate;
+  croak "$at: unknown field " . join(', ', @unknown) if @unknown;
+  for my $field (qw( per_s per_min )) {
+    next unless defined $rate->{$field};
+    croak "$at: $field must be a number above 0"
+      unless looks_like_number($rate->{$field}) && $rate->{$field} > 0;
+  }
+  croak "$at needs per_s or per_min" unless defined($rate->{per_s}) || defined($rate->{per_min});
+  my $burst;
+  if (defined $rate->{per_s}) {
+    $burst = defined($rate->{burst}) ? $rate->{burst} : POSIX::ceil($rate->{per_s});
+    croak "$at: burst must be a whole number of at least 1"
+      unless looks_like_number($burst) && $burst >= 1 && $burst == int($burst);
+  } elsif (defined $rate->{burst}) {
+    croak "$at: burst needs per_s";
+  }
+  return {
+    (defined($rate->{per_s})   ? (per_s => 0 + $rate->{per_s}, burst => 0 + $burst) : ()),
+    (defined($rate->{per_min}) ? (per_min => 0 + $rate->{per_min}) : ()),
   };
 }
 
@@ -4221,6 +4271,9 @@ sub _load_policies {
         deny_tags    => (exists($overrides->{deny_tags})
                           ? $self->normalize_tags($overrides->{deny_tags})
                           : ($base->{deny_tags} // [])),
+        rate         => (exists($overrides->{rate})
+                          ? _normalize_rate($overrides->{rate}, $label)
+                          : $base->{rate}),
       };
       $key_policies{$key} = $intern->($merged);
     }
@@ -4243,6 +4296,7 @@ sub _load_policies {
   $self->default_policy($default);
   $self->key_policies(\%key_policies);
   $self->key_names(\%key_names);
+  $self->_prune_rate_buckets;
   return 1;
 }
 
@@ -4275,7 +4329,102 @@ sub _configured_key_id {
 sub _policy_fingerprint {
   my ($self, $policy) = @_;
   my $models = defined($policy->{allow_models}) ? join(',', sort keys %{$policy->{allow_models}}) : '*';
-  return join("\0", $models, join(',', @{$policy->{deny_tags}}));
+  return join("\0", $models, join(',', @{$policy->{deny_tags}}), _rate_print($policy->{rate}));
+}
+
+sub _rate_print {
+  my ($rate) = @_;
+  return '' unless $rate;
+  return join '/', map { $rate->{$_} // '' } qw( per_s burst per_min );
+}
+
+=method rate_admit
+
+  my $answer = $skeid->rate_admit($api_key_id);
+  # { ok => 1 }  or  { ok => 0, retry_after => 2 }
+
+Takes one request from the request budget of a customer key (skeid k125): the C<rate> of its
+policy (see L</Per-Key Routing Policy>). A key whose policy has no C<rate> is always admitted.
+Two token buckets, C<per_s> with C<burst> and C<per_min>, both must hold a token. Kept in memory
+per process; like C<max_conns> the rate is divided among the processes that share the
+deployment (C<worker_count> times C<frontend_count>), with at least one token of burst each.
+C<retry_after> is the whole seconds until a token is back, at least 1.
+
+=cut
+
+sub rate_admit {
+  my ($self, $api_key_id) = @_;
+  my $id     = $api_key_id // '';
+  my $policy = $self->policy_for_key($api_key_id);
+  my $rate   = $policy ? $policy->{rate} : undef;
+  my $buckets = $self->_rate_buckets;
+  unless ($rate) {
+    delete $buckets->{$id};
+    return { ok => 1 };
+  }
+
+  my $div   = $self->_admission_divisor;
+  my $now   = $self->_now;
+  my $print = _rate_print($rate) . "/$div";
+  my $b = $buckets->{$id};
+  if (!$b || $b->{print} ne $print) {
+    my @limits;
+    push @limits, { refill => $rate->{per_s} / $div, cap => _at_least_one($rate->{burst} / $div) }
+      if defined $rate->{per_s};
+    push @limits, { refill => $rate->{per_min} / 60 / $div, cap => _at_least_one($rate->{per_min} / $div) }
+      if defined $rate->{per_min};
+    $_->{tokens} = $_->{cap} for @limits;
+    $b = $buckets->{$id} = { print => $print, at => $now, limits => \@limits };
+  }
+
+  my $elapsed = $now - $b->{at};
+  $elapsed = 0 if $elapsed < 0;
+  $b->{at} = $now;
+  my $wait = 0;
+  for my $limit (@{$b->{limits}}) {
+    $limit->{tokens} += $elapsed * $limit->{refill};
+    $limit->{tokens} = $limit->{cap} if $limit->{tokens} > $limit->{cap};
+    if ($limit->{tokens} < 1) {
+      my $need = (1 - $limit->{tokens}) / $limit->{refill};
+      $wait = $need if $need > $wait;
+    }
+  }
+  if ($wait > 0) {
+    $self->_rate_refusals->{$id}++;
+    my $after = POSIX::ceil($wait);
+    return { ok => 0, retry_after => ($after < 1 ? 1 : $after) };
+  }
+  $_->{tokens} -= 1 for @{$b->{limits}};
+  return { ok => 1 };
+}
+
+sub _at_least_one { $_[0] < 1 ? 1 : $_[0] }
+
+# Buckets of keys whose policy no longer has a rate, or that are gone, after a policy load.
+sub _prune_rate_buckets {
+  my ($self) = @_;
+  my $buckets = $self->_rate_buckets;
+  for my $id (keys %$buckets) {
+    my $policy = $self->policy_for_key(length($id) ? $id : undef);
+    delete $buckets->{$id} unless $policy && $policy->{rate};
+  }
+  return;
+}
+
+=method key_metrics
+
+  my $keys = $skeid->key_metrics;
+  # { 'k_5f0e...' => { rate_limited => 3 } }
+
+Per customer key id, the requests this process refused for the key's C<rate> since it started
+(C<''> is a request without a key). Served by C<GET /skeid/metrics/keys>.
+
+=cut
+
+sub key_metrics {
+  my ($self) = @_;
+  my $refusals = $self->_rate_refusals;
+  return { map { ($_ => { rate_limited => 0 + $refusals->{$_} }) } keys %$refusals };
 }
 
 =method key_id_for_key

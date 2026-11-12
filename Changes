@@ -2,6 +2,12 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Key rate: a policy (or a keys entry) may carry rate: { per_s, burst, per_min }. A
+      customer key over it is answered 429 with Retry-After in its face's shape before
+      anything is routed, and the refusal is a usage event with error_type
+      key_rate_limited and no content. Token buckets in memory per process, divided like
+      max_conns across workers and frontends; a key of a customer source takes its
+      policy's rate. GET /skeid/metrics/keys counts the refusals per key id.
     - Node files: node_files in the main config names further YAML files of nodes that
       someone else writes (a GPU manager), each with constraints -- allowed URL hosts, an
       api_key_env pattern, api_key_ref on or off (default off), allowed kinds. A node that

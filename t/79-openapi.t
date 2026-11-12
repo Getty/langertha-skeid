@@ -195,7 +195,8 @@ SKIP: {
   is_deeply [ structural_problems($doc) ], [], 'the admin document is valid in shape';
   my $ops = all_ops($doc);
   ok $ops->{'GET /skeid/nodes'} && $ops->{'POST /skeid/nodes'} && $ops->{'POST /skeid/nodes/{id}/health'}
-    && $ops->{'GET /skeid/usage'} && $ops->{'GET /skeid/config'} && $ops->{'GET /skeid/metrics/nodes'},
+    && $ops->{'GET /skeid/usage'} && $ops->{'GET /skeid/config'} && $ops->{'GET /skeid/metrics/nodes'}
+    && $ops->{'GET /skeid/metrics/keys'},
     'the admin routes are in it';
   ok !grep({ m{/v1/|/api/} } keys %$ops), 'no client route is';
   ok !$ops->{'GET /skeid/registry/snapshot'}, 'the registry snapshot is not there while the registry is off';
