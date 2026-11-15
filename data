@@ -1,0 +1,38 @@
+---
+claimed_at: 2026-11-15T00:51:25Z
+claimed_by: skeid-k128
+class: standard
+completed: 2026-11-15T00:51:25Z
+created: 2026-11-15T00:24:45Z
+id: 128
+priority: high
+started: 2026-11-15T00:25:32Z
+status: done
+tags:
+- privacy
+- proxy
+- node-files
+title: 'Trust zone per node: header allowlist for external nodes, own key required,
+  trust in node files'
+updated: 2026-11-15T00:51:25Z
+---
+
+Why: Skeid forwards nearly every client header to the node (_forward_headers only drops hop-by-hop, host, content-length, accept-encoding, expect and the correlation header). For a cloud provider that leaks client IP, cookies, trace and key ids (data minimisation). A deployment's nodes also come from a node file (ADR 0031) whose writer marks them as its own infrastructure.
+
+Decide in an ADR (short), then build:
+1. Node field trust: internal | external. Default external.
+2. external: allowlist only — Content-Type, Accept, the provider protocol headers anthropic-version, anthropic-beta, OpenAI-Beta, the key Skeid itself sets for the node, and a fixed Skeid User-Agent. Everything else is dropped, explicitly X-Forwarded-*, Forwarded, X-Real-IP, Cookie, x-skeid-*, x-api-key-id, X-Request-Id, traceparent, tracestate, baggage and any deployment-prefixed headers.
+3. internal: today's exclusion list stays, plus X-Forwarded-*, Forwarded, X-Real-IP and Cookie are dropped. The correlation header rule stays as it is.
+4. An external node with no key source (api_key_env / api_key_ref) is a config error: Skeid refuses to start or reload (otherwise the client's credential travels to the provider). Note the incompatible change in Changes.
+5. Node files: the node_files entry in the main config sets trust for its nodes (default external). A node in the file may carry trust only if it equals the entry's value; otherwise it is rejected with rule trust. trust joins the allowed fields on that condition.
+6. Same rule on every route that relays to a node (chat, JSON, stream, relayed routes: audio, rerank, uploads, documents, realtime, MCP).
+Test (regression): a stub provider with trust external receives none of the forbidden headers although the caller sets all of them; an internal node gets the correlation header but no IP/cookie headers; external without key fails the load; node file with trust: internal under an entry trust: internal is accepted, under default external rejected.
+Done: ADR, code, tests, Changes, prove -lr t/ green.
+
+2026-11-15 00:39 skeid-worker: code done in worktree skeid-k128 (uncommitted). Node trust validated in add_node (default external; external without api_key_env/api_key_ref croaks -> start/reload/admin POST fail); _forward_headers(c, node_id) trust-aware on chat/JSON/stream/audio/rerank/documents/realtime; pass-through only for internal non-node-file nodes; node_files entry trust + rules trust/key_required; /skeid/config lists nodes {id, trust}. Existing tests fixed with trust internal; prove -lr t/ green. Open: k128 regression test (test writer), Changes entry, README.md node examples (keyless, need trust: internal).
+
+ADR 0032: the MCP gateway relays to MCP servers, not nodes, and already sends an allowlist (Content-Type, Accept, Last-Event-ID, Mcp-*); it is unchanged. The test line 'internal node gets the correlation header' contradicts rule 3; followed rule 3 (k121): the correlation header reaches no node.
+
+Done on branch worktree-skeid-k128: 2977ffd ADR 0032, 47ff406 code+Changes, dd0213a t/97-node-trust-zone.t; prove -lr t/ PASS (113 files, 6472 tests). Not pushed.
+
+Accepted: diff read, prove -lr t/ 113 files 6472 tests PASS on a clean export of dd0213a; node file with a GPU manager's node accepted under trust: internal, rejected (trust) under the default. Fast-forwarded to main and pushed.
