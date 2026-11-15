@@ -23,6 +23,14 @@ constraints (allowed URL hosts, `api_key_env` pattern, `api_key_ref`, kinds); a 
 one is **rejected** by position and rule, the rest of the file loads. It contributes nodes only.
 _Avoid_: include, overlay, secondary config.
 
+**Trust** (`trust: internal | external`):
+Whether a **Node** is the deployment's own infrastructure (internal) or someone else's, a
+provider's (external, the default) — ADR 0032. An external node gets an allowlist of client
+headers and must have its own key; an internal node gets the client's headers minus address and
+cookies and may take the client's credential through. For a **Node file** the main config's
+entry sets it.
+_Avoid_: trust zone, private/public node, local node.
+
 **Engine ID**:
 The Langertha engine that defines a node's *upstream* wire dialect (`openai`, `vllm`,
 `sglang`, `anthropic`, `ollama`, …). A property of the node, never of the client.
