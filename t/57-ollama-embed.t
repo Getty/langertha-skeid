@@ -49,7 +49,7 @@ my $skeid = Langertha::Skeid->new(
       policies => { narrow => { models => ['something-else'] } },
       keys     => { $NARROW_ID => 'narrow' },
       aliases  => { 'house-embed' => { tiers => [{ tags => ['emb'], model => 'm1' }] } },
-      nodes    => [ map { +{ id => "n-$_", url => $UP_URL, model => $_, tags => ['emb'], healthy => 1, max_conns => 4 } } qw(m1 m401) ],
+      nodes    => [ map { +{ id => "n-$_", trust => 'internal', url => $UP_URL, model => $_, tags => ['emb'], healthy => 1, max_conns => 4 } } qw(m1 m401) ],
     };
   },
 );

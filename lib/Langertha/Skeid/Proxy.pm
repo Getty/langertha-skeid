@@ -372,6 +372,7 @@ C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
                                    {customer_source}: the customer source status, with its message;
                                    {customer_names}: customer key id => name of the source's rows;
                                    {customer_report}: rows accepted, rejected, shadowed (labels, reasons)
+                                   {nodes}: per node, its id and trust (internal, external)
                                    {node_files}: per node file, nodes accepted, rejected (position, rule)
   GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
   GET  /skeid/metrics/keys         {metrics}: per customer key id, requests refused for its rate
@@ -410,11 +411,17 @@ The node URL gets C</v1> added unless it ends in it, then C</chat/completions> o
 C</embeddings> (an audio route: C</audio/transcriptions> or C</audio/translations>, see
 L</Audio routes>; rerank: C</rerank>, for a TEI node without the C</v1>, see L</Rerank route>);
 the body carries the served model (an alias tier's C<model>), everything else
-as the client sent it or as translated. The client's headers go upstream except the hop-by-hop
-ones, C<Host>, C<Content-Length> and C<Accept-Encoding>. When the node has a key of its own --
+as the client sent it or as translated. Which of the client's headers go upstream depends on
+the node's C<trust> (ADR 0032, L<Langertha::Skeid/nodes>), on every route that calls a node: an
+external node gets C<Content-Type>, C<Accept>, C<anthropic-version>, C<anthropic-beta> and
+C<OpenAI-Beta> and nothing else, and C<User-Agent: Langertha-Skeid>; an internal node gets them
+all except the hop-by-hop ones, C<Host>, C<Content-Length>, C<Accept-Encoding>, C<Expect>,
+C<X-Forwarded-*>, C<Forwarded>, C<X-Real-IP> and C<Cookie>. The correlation header goes to
+neither. When the node has a key of its own --
 C<api_key_ref> through the key broker, else C<api_key_env> -- it replaces C<Authorization> and
-the client's C<Authorization> and C<x-api-key> are dropped, however the client spelled them. A
-node that names neither forwards the client's own key. A node that names one and gets no key
+the client's C<Authorization> and C<x-api-key> are dropped, however the client spelled them. An
+internal node that names neither forwards the client's own key (unless it came from a node
+file); an external node must name one. A node that names one and gets no key
 from it -- the broker fails or is not running, the variable is unset or empty -- is not called
 at all, and neither is one that left the inventory after it was selected: the request is
 refused with C<503> (see L</Errors>), so the client's key never stands in for the node's. An answer that came from a node carries
@@ -975,6 +982,9 @@ sub _build_route_table {
       my $node_files = $c->skeid->node_files_status;
       $c->render(json => {
         reload => $reload,
+        # Each node's trust zone (ADR 0032): which nodes hear the client's headers.
+        nodes  => [ map { +{ id => $_->{id}, trust => ($_->{trust} // 'external') } }
+          @{$c->skeid->nodes} ],
         ($node_files ? (node_files => $node_files) : ()),
         ($source ? (
           customer_source => $source,
@@ -1707,7 +1717,7 @@ sub _handle_openai_realtime {
     # What the client sent for the handshake of its own connection is not the node's: its
     # Sec-WebSocket-* headers (the subprotocol list may carry the browser's key -- never passed
     # on, ADR 0003), its Origin and its cookies stay here. The user agent makes the node's own.
-    my %fwd_headers = _forward_headers($c);
+    my %fwd_headers = _forward_headers($c, $node_id);
     delete @fwd_headers{ grep { /\A(?:sec-websocket-|origin\z|cookie\z)/i } keys %fwd_headers };
 
     _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
@@ -2382,7 +2392,7 @@ sub _proxy_openai_json_async {
   $cb ||= sub { };
   $relay ||= {};
 
-  my %fwd_headers = _forward_headers($c);
+  my %fwd_headers = _forward_headers($c, $node_id);
   _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
   my ($no_key) = @_;
 
@@ -2548,7 +2558,7 @@ sub _proxy_openai_stream {
   $meta ||= {};
   $relay ||= {};
 
-  my %fwd_headers = _forward_headers($c);
+  my %fwd_headers = _forward_headers($c, $node_id);
 
   # render_later before the key resolution, not after: a cold cache means the callback runs on
   # a later tick, and Mojolicious would have rendered an empty response by then.
@@ -3099,31 +3109,69 @@ sub _skip_response_header {
   return $HOP_BY_HOP{$lc} || $lc eq 'content-length' || $lc eq 'content-encoding' ? 1 : 0;
 }
 
+# The client headers an external node is sent (skeid k128, ADR 0032): how the body is framed,
+# what answer is wanted, and the provider protocol headers that change what the provider does.
+# An allowlist, because the headers a deployment adds in front of Skeid are not known here.
+my %EXTERNAL_HEADER = map { $_ => 1 } qw(
+  content-type
+  accept
+  anthropic-version
+  anthropic-beta
+  openai-beta
+);
+
+# What an external node is told about the software calling it -- and nothing about the client's.
+my $EXTERNAL_USER_AGENT = 'Langertha-Skeid';
+
+# The client headers that go to the node $node_id, by the node's trust (ADR 0032). The node's
+# own key is not here: _inject_node_auth_async sets it on what this returns. A node that left
+# the inventory is treated as external -- what it was cannot be known, and the narrower set is
+# the one that leaks nothing (its key resolution refuses the request anyway).
 sub _forward_headers {
-  my ($c) = @_;
+  my ($c, $node_id) = @_;
+  my $node = _node_by_id($c->skeid, $node_id);
+  my $internal = $node && ($node->{trust} // '') eq 'internal';
   my %fwd_headers;
   # The correlation header (skeid k121) is the caller's id for Skeid's usage row; a node --
   # possibly a cloud provider's -- has no use for it and is not told.
   my $correlation = lc($c->skeid->correlation_header // '');
   for my $name (@{$c->req->headers->names}) {
     my $lc = lc($name);
-    next if $HOP_BY_HOP{$lc};
     next if length($correlation) && $lc eq $correlation;
-    next if $lc eq 'host' || $lc eq 'content-length' || $lc eq 'accept-encoding';
-    # The body is in hand, so nothing is expected of the node. A node that answered `Expect:
-    # 100-continue` with its `100 Continue` would have the user agent start a fresh response
-    # object, one the stream relay is not listening on (skeid k96).
-    next if $lc eq 'expect';
+    if ($internal) {
+      next if $HOP_BY_HOP{$lc};
+      next if $lc eq 'host' || $lc eq 'content-length' || $lc eq 'accept-encoding';
+      # The body is in hand, so nothing is expected of the node. A node that answered `Expect:
+      # 100-continue` with its `100 Continue` would have the user agent start a fresh response
+      # object, one the stream relay is not listening on (skeid k96).
+      next if $lc eq 'expect';
+      # Who the client is and where it called from is not the node's to know, even an internal
+      # one's: its address in any spelling, and its cookies.
+      next if $lc =~ /\Ax-forwarded-/ || $lc eq 'forwarded' || $lc eq 'x-real-ip' || $lc eq 'cookie';
+    }
+    else {
+      next unless $EXTERNAL_HEADER{$lc};
+    }
     $fwd_headers{$name} = $c->req->headers->header($name);
   }
+  # Without a User-Agent Mojo::UserAgent names itself; an external node gets Skeid's name instead.
+  $fwd_headers{'User-Agent'} = $EXTERNAL_USER_AGENT unless $internal;
   return %fwd_headers;
+}
+
+# The node of the inventory with this id, or undef.
+sub _node_by_id {
+  my ($skeid, $node_id) = @_;
+  return unless defined $node_id;
+  my ($node) = grep { ($_->{id} // '') eq $node_id } @{$skeid->nodes};
+  return $node;
 }
 
 # Sets the upstream Authorization header for the selected node, from the KeyBroker
 # (api_key_ref) or from the environment (api_key_env), overriding whatever the client sent.
 # The callback runs exactly once, and always. It is called with nothing when the request may go
-# upstream: the node's key is in place, or the node names no key source and forwards the
-# client's header untouched. It is called with a reason when the node names a key source and
+# upstream: the node's key is in place, or the node names no key source -- an internal node then
+# forwards the client's header untouched, any other goes without one. It is called with a reason when the node names a key source and
 # none produced a key, or when the node is no longer in the inventory and what it named cannot
 # be known -- the caller must then refuse the request (_refuse_unkeyed_node) rather than call
 # the node, because the only credential left in the headers is the customer's own, and the
@@ -3141,7 +3189,7 @@ sub _inject_node_auth_async {
   my ($headers_ref, $skeid, $node_id, $cb) = @_;
   $cb ||= sub { };
 
-  my ($node) = grep { ($_->{id} // '') eq $node_id } @{$skeid->nodes};
+  my $node = _node_by_id($skeid, $node_id);
   unless ($node) {
     _drop_client_credentials($headers_ref);
     return $cb->("node '$node_id' is no longer in the inventory, its key source is unknown");
@@ -3159,11 +3207,14 @@ sub _inject_node_auth_async {
       return $cb->();
     }
 
-    # A node with no key of its own: the documented pass-through -- except for a node from a node
-    # file (ADR 0031). Its URL was chosen by a less trusted writer, and the client's credential
-    # (with client_auth, the customer's Skeid key) is not that writer's to collect.
+    # A node with no key of its own: the documented pass-through, for an internal node only
+    # (ADR 0032) -- an external one cannot load without a key source, and one put into the
+    # inventory past that check still never gets the client's credential. Nor does a node from a
+    # node file (ADR 0031): its URL was chosen by a less trusted writer, and the client's
+    # credential (with client_auth, the customer's Skeid key) is not that writer's to collect.
     unless (defined $reason) {
-      _drop_client_credentials($headers_ref) if length($node->{node_file} // '');
+      _drop_client_credentials($headers_ref)
+        if length($node->{node_file} // '') || ($node->{trust} // '') ne 'internal';
       return $cb->();
     }
 

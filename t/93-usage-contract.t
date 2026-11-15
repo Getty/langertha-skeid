@@ -53,7 +53,7 @@ my $skeid = Langertha::Skeid->new(
   store_usage_event => sub { push @events, $_[1]; return { ok => 1 } },
   config_loader     => sub { +{
     ($header ? (routing => { correlation_header => $header }) : ()),
-    nodes => [ map { +{ id => "n-$_", url => $UP, model => $_ } } qw( m m-tools m-odd m-fail e ) ],
+    nodes => [ map { +{ id => "n-$_", trust => 'internal', url => $UP, model => $_ } } qw( m m-tools m-odd m-fail e ) ],
   } },
 );
 my $t = Test::Mojo->new(Langertha::Skeid::Proxy->build_app(skeid => $skeid));

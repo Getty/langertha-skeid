@@ -31,7 +31,7 @@ sub config {
   return {
     nodes => [
       { id => 'gpu01', url => 'http://10.0.0.5:8000/v1', model => 'qwen3-32b', api_key_env => 'SKEID_T79_UP' },
-      { id => 'gpu02', url => 'http://10.0.0.6:8000/v1', model => 'llama-3.3-70b' },
+      { id => 'gpu02', trust => 'internal', url => 'http://10.0.0.6:8000/v1', model => 'llama-3.3-70b' },
     ],
     aliases => { 'house-model' => { tiers => [ { model => 'qwen3-32b' } ] } },
     %extra,

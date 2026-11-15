@@ -10,7 +10,7 @@ extends 'Langertha::Skeid::CapacityProbe';
 =head1 SYNOPSIS
 
   $skeid->add_node(
-    id => 'weird-1', url => 'http://weird-1/v1', model => 'm',
+    id => 'weird-1', url => 'http://weird-1/v1', model => 'm', trust => 'internal',
     capacity => {
       probe       => 'custom',
       interval_ms => 1000,

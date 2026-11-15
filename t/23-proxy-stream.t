@@ -55,6 +55,7 @@ my $skeid = Langertha::Skeid->new(
 );
 $skeid->add_node(
   id        => 'stream-1',
+  trust     => 'internal',
   url       => "http://127.0.0.1:$up_port/v1",
   model     => 'stream-model',
   engine    => 'openai',

@@ -123,7 +123,7 @@ for my $case (
     config_loader     => sub { +{
       policies => { slow => { rate => { per_s => 1, burst => 1 } } },
       keys     => { $SLOW_ID => 'slow' },
-      nodes    => [{ id => 'n1', url => $up_url, model => 'm1' }],
+      nodes    => [{ id => 'n1', trust => 'internal', url => $up_url, model => 'm1' }],
     } },
   );
   my $t = Test::Mojo->new(Langertha::Skeid::Proxy->build_app(skeid => $skeid));

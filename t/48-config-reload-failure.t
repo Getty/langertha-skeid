@@ -35,7 +35,7 @@ sub good_cfg {
   return {
     admin    => { api_key => 'adm' },
     policies => { std => { models => ['m'] } },
-    nodes    => [ { id => 'n1', url => ($extra{url} // 'http://n1/v1'), model => 'm' } ],
+    nodes    => [ { id => 'n1', trust => 'internal', url => ($extra{url} // 'http://n1/v1'), model => 'm' } ],
   };
 }
 

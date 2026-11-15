@@ -37,6 +37,7 @@ node_files:
     allow_api_key_env: '^SKEID_NODE_GPM_[A-Z0-9_]+_API_KEY$'
     allow_url_hosts: [ '*.cai-gpm.svc' ]
     allow_kinds: [ chat, documents ]
+    trust: internal
 YAML
 (my $main_yaml = $MAIN) =~ s/GPM/$gpm/;
 
@@ -137,7 +138,7 @@ is $skeid->node_files_status->[0]{ok}, 1, 'and is fine';
 }
 
 # --- removing the section drops the file's nodes ---
-write_file($main, "nodes:\n  - { id: trusted, url: 'http://trusted/v1' }\n");
+write_file($main, "nodes:\n  - { id: trusted, url: 'http://trusted/v1', trust: internal }\n");
 $skeid->call_function('nodes.list', {});
 is_deeply ids($skeid), [qw( trusted )], 'without node_files only the main nodes';
 is $skeid->node_files_status, undef, 'and no node file status';
@@ -148,7 +149,7 @@ is $skeid->node_files_status, undef, 'and no node file status';
   my $loader_skeid = Langertha::Skeid->new(
     config_reload_interval => 0,
     config_loader => sub {
-      return ({ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] }, 'v1');
+      return ({ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'], trust => 'internal' }] }, 'v1');
     },
   );
   is_deeply ids($loader_skeid), ['a'], 'a loader config takes nodes from a node file';
@@ -165,14 +166,14 @@ is $skeid->node_files_status, undef, 'and no node file status';
   write_file($gpm, $bomb);
   my $t0 = time;
   my $s = Langertha::Skeid->new(config_loader => sub {
-    +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] } });
+    +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'], trust => 'internal' }] } });
   ok time - $t0 < 5, 'a file of nested YAML aliases is refused quickly';
   like $s->node_files_status->[0]{error}, qr/YAML alias|only nodes/, 'and says why';
   is_deeply ids($s), [], 'and contributes nothing';
 
   write_file($gpm, "- { id: d, url: 'http://d.cai-gpm.svc/v1', metadata: " . ('[' x 20) . (']' x 20) . " }\n");
   $s = Langertha::Skeid->new(config_loader => sub {
-    +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] } });
+    +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'], trust => 'internal' }] } });
   like $s->node_files_status->[0]{error}, qr/nests deeper/, 'deep nesting is refused';
 }
 
@@ -180,8 +181,8 @@ is $skeid->node_files_status, undef, 'and no node file status';
 {
   write_file($gpm, "- { id: g1, url: 'http://g1.cai-gpm.svc/v1' }\n");
   my $s = Langertha::Skeid->new(config_reload_interval => 0, config_loader => sub { +{
-    nodes => [{ id => 'main', url => 'http://main/v1' }],
-    node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] } });
+    nodes => [{ id => 'main', url => 'http://main/v1', trust => 'internal' }],
+    node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'], trust => 'internal' }] } });
   $s->set_node_health('main', 0);
   write_file($gpm, "- { id: g1, url: 'http://g1.cai-gpm.svc/v1' }\n- { id: g2, url: 'http://g2.cai-gpm.svc/v1' }\n");
   $s->call_function('nodes.list', {});
@@ -208,8 +209,8 @@ is $skeid->node_files_status, undef, 'and no node file status';
   my $port = $d->ports->[0];
   write_file($gpm, "- { id: f1, url: 'http://127.0.0.1:$port/v1', model: from-file }\n");
   my $s = Langertha::Skeid->new(config_loader => sub { +{
-    nodes      => [{ id => 'trusted', url => "http://127.0.0.1:$port/v1", model => 'from-main' }],
-    node_files => [{ path => $gpm, allow_url_hosts => ['127.0.0.1'] }] } });
+    nodes      => [{ id => 'trusted', url => "http://127.0.0.1:$port/v1", model => 'from-main', trust => 'internal' }],
+    node_files => [{ path => $gpm, allow_url_hosts => ['127.0.0.1'], trust => 'internal' }] } });
   require Test::Mojo;
   my $t = Test::Mojo->new(Langertha::Skeid::Proxy->build_app(skeid => $s));
   $t->app->log->level('fatal');
@@ -228,7 +229,7 @@ is $skeid->node_files_status, undef, 'and no node file status';
     write_file($gpm, "- { id: a, url: 'http://a.cai-gpm.svc/v1' }\n- { id: z, url: 'http://attacker.example/v1' }\n");
   my $admin = 'sk-admin-test-only';
   my $s = Langertha::Skeid->new(admin_api_key => $admin, config_loader => sub {
-    +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'] }] } });
+    +{ node_files => [{ path => $gpm, allow_url_hosts => ['*.cai-gpm.svc'], trust => 'internal' }] } });
   my $t = Test::Mojo->new(Langertha::Skeid::Proxy->build_app(skeid => $s));
   $t->get_ok('/skeid/config' => { Authorization => "Bearer $admin" })->status_is(200)
     ->json_is('/node_files/0/path', $gpm)
@@ -258,7 +259,7 @@ for my $case (
 # --- host patterns ---
 {
   my ($entry) = @{ Langertha::Skeid::NodeFiles->normalize_config(
-    [{ path => 'x', allow_url_hosts => [ '*.cai-gpm.svc', 'exact.example' ] }]) };
+    [{ path => 'x', allow_url_hosts => [ '*.cai-gpm.svc', 'exact.example' ], trust => 'internal' }]) };
   my $check = sub { Langertha::Skeid::NodeFiles->check($skeid, $entry, { id => 'n', url => $_[0] }) };
   is $check->('http://gpu-1.CAI-GPM.svc:8000/v1'), undef, 'a host matches case-insensitively, any port';
   is $check->('https://exact.example/v1'), undef, 'an exact pattern matches';

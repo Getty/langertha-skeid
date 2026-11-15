@@ -9,6 +9,8 @@ use YAML::PP;
 use Scalar::Util qw(blessed refaddr);
 use Langertha::Skeid::Protocol::Documents;
 use Langertha::Skeid::Protocol::Rerank;
+# The node vocabulary (trust) is the control plane's; it loads this module too, so no import.
+use Langertha::Skeid ();
 
 =head1 SYNOPSIS
 
@@ -38,7 +40,7 @@ node's position in the file, never with the value that broke it.
 # a URL of the node's choosing, and a custom probe names code.
 my %FIELD = map { $_ => 1 } qw(
   id url model engine weight max_conns healthy tags metadata
-  api_key_env api_key_ref api_key_header kind rerank_format
+  api_key_env api_key_ref api_key_header kind rerank_format trust
 );
 
 =method normalize_config
@@ -64,6 +66,9 @@ C<a.b.cai-gpm.svc>.
 
 =item * C<allow_kinds> -- default C<[chat]>: the node kinds this file may add (C<chat>,
 C<documents>).
+
+=item * C<trust> -- default C<external>: the trust zone of every node of this file, C<internal>
+or C<external> (ADR 0032). The file's writer cannot change it; see L</check>.
 
 =back
 
@@ -108,8 +113,12 @@ sub normalize_config {
       $kinds{$norm} = 1;
     }
 
+    my $trust = eval { Langertha::Skeid->normalize_trust($raw->{trust}) }
+      // croak "$at: trust must be internal or external";
+
     push @entries, {
       path              => "$path",
+      trust             => $trust,
       allow_api_key_env => $env_re,
       allow_api_key_ref => ($raw->{allow_api_key_ref} ? 1 : 0),
       allow_url_hosts   => \@host_res,
@@ -183,7 +192,9 @@ sub _shape_problem {
 Checks one node of a node file against its entry from L</normalize_config>. The rules, in the
 order they are checked: C<entry> (not a mapping), C<field> (a field a node file may not set:
 C<capacity> or an unknown one), C<id>, C<url> (missing), C<url_host> (not C<http(s)> to an allowed
-host, or credentials in the URL), C<api_key_env>, C<api_key_ref>, C<kind>, C<invalid> (a value
+host, or credentials in the URL), C<api_key_env>, C<api_key_ref>, C<trust> (the node names a
+C<trust> other than its entry's), C<key_required> (the entry is external and the node names no
+C<api_key_env> or C<api_key_ref>), C<kind>, C<invalid> (a value
 the main config would refuse too -- an unknown engine or rerank format, a header that is no
 token), so that a broken node of a less trusted file cannot fail the load of the main config.
 
@@ -209,6 +220,17 @@ sub check {
   }
   return 'api_key_ref'
     if defined($node->{api_key_ref}) && length($node->{api_key_ref}) && !$entry->{allow_api_key_ref};
+
+  # The zone is the main config's to grant (ADR 0032): a node may repeat its entry's trust, and
+  # anything else -- a wider zone, a narrower one, a value that is none -- rejects it. An
+  # external node without a key of its own is what the main config refuses to load; here it is
+  # this node that is left out, not the load that fails.
+  my $trust = $entry->{trust} // 'external';
+  if (exists $node->{trust}) {
+    my $named = eval { $skeid->normalize_trust($node->{trust}) };
+    return 'trust' unless defined($named) && $named eq $trust;
+  }
+  return 'key_required' if $trust eq 'external' && !$skeid->node_has_key_source($node);
 
   my $kind = eval { Langertha::Skeid::Protocol::Documents->normalize_kind($node->{kind}) };
   return 'invalid' unless defined $kind;

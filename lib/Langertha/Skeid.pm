@@ -353,12 +353,23 @@ set by C<skeid serve --workers>).
       rerank_format: tei               # default none; a reranker that speaks TEI's dialect, see below
       kind: documents                  # default chat; a docling-serve node, see below
       api_key_header: X-Api-Key        # default none: the key goes in Authorization: Bearer
+      trust: internal                  # default external; see below
 
-An entry without C<id> or C<url> is skipped; one with an unknown C<engine>, C<rerank_format> or
-C<kind>, or an C<api_key_header> that is no header name, fails the load. When
-a node has a key of its own it replaces the client's C<Authorization> upstream (see
-L<Langertha::Skeid::Proxy>); otherwise the client's headers go through. Key references and
-variable names are the only key material a config holds (ADR 0003).
+An entry without C<id> or C<url> is skipped; one with an unknown C<engine>, C<rerank_format>,
+C<kind> or C<trust>, an C<api_key_header> that is no header name, or an external node without a
+key source fails the load. When a node has a key of its own it replaces the client's
+C<Authorization> upstream (see L<Langertha::Skeid::Proxy>). Key references and variable names
+are the only key material a config holds (ADR 0003).
+
+C<trust> says whose infrastructure a node is (ADR 0032). C<external>, the default, is a provider:
+of the client's headers it is sent C<Content-Type>, C<Accept>, C<anthropic-version>,
+C<anthropic-beta> and C<OpenAI-Beta> only, plus its key and C<User-Agent: Langertha-Skeid>, and it
+must name C<api_key_env> or C<api_key_ref>. C<internal> is the deployment's own: it gets the
+client's headers except the hop-by-hop ones, C<X-Forwarded-*>, C<Forwarded>, C<X-Real-IP>,
+C<Cookie> and the correlation header, and only an internal node without a key source is handed
+the client's own C<Authorization> / C<X-Api-Key> (the pass-through). B<Incompatible:> a keyless
+node with no C<trust> stops loading until it gets a key or C<trust: internal>. The admin route
+C<GET /skeid/config> lists each node's C<trust>.
 
 The section replaces the whole inventory when it changed -- nodes added through the admin API are
 lost then -- and keeps the node list as it is when it did not: its inventory generation, its
@@ -400,6 +411,7 @@ C<Authorization> is the default spelled out.
       allow_api_key_ref: false                                 # default false
       allow_url_hosts: [ '*.cai-gpm.svc' ]                     # required; * is one DNS label
       allow_kinds: [ documents, chat ]                         # default [chat]
+      trust: internal                                          # default external
 
 Nodes from files someone else writes (ADR 0031) -- a GPU manager publishing where its models
 run. Each file is a YAML list of nodes (or a mapping with only C<nodes>) in the form of the
@@ -410,7 +422,10 @@ What a node from such a file may say is set here, in the main config, and checke
 (L<Langertha::Skeid::NodeFiles/check>): its C<url> must go to an allowed host, an
 C<api_key_env> must match C<allow_api_key_env>, an C<api_key_ref> needs C<allow_api_key_ref>, its
 C<kind> must be allowed, and its C<id> must not be taken by the main config or an earlier file.
-A node that breaks a rule is left out and the rest of the file loads. The admin route
+C<trust> (ADR 0032) is the entry's to set, for every node of the file: a node may name it only
+with the entry's value, and a node of an external entry needs a key source of its own (rule
+C<key_required>). A node from a node file is never handed the client's credentials, whatever
+its trust. A node that breaks a rule is left out and the rest of the file loads. The admin route
 C<GET /skeid/config> lists, per file, the nodes accepted, and each rejected node by position and
 rule -- never the value.
 
@@ -1806,7 +1821,8 @@ sub BUILD {
 
 Adds a node, replacing any node with the same id. Takes the fields of a config C<nodes> entry
 and fills in their defaults (see L</nodes>). Returns 1. Croaks without C<id> or C<url>, on an
-unknown C<engine>, C<rerank_format> or C<kind>, on an C<api_key_header> that is no header name, and on a C<registry> capacity block that
+unknown C<engine>, C<rerank_format>, C<kind> or C<trust>, on an C<api_key_header> that is no header name, on an external node
+that names no key source, and on a C<registry> capacity block that
 L<Langertha::Skeid::CapacityProbe::Registry/validate_config> rejects. The C<nodes.add> function
 and C<POST /skeid/nodes> call it.
 
@@ -1835,6 +1851,14 @@ sub add_node {
   my $kind    = Langertha::Skeid::Protocol::Documents->normalize_kind($node{kind});
   my $key_header = Langertha::Skeid::Protocol::Documents->normalize_key_header($node{api_key_header});
 
+  # Whose infrastructure the node is (skeid k128, ADR 0032). An external node is sent no client
+  # header beyond an allowlist and never the client's credential: without a key of its own, the
+  # only credential left to send it would be the customer's.
+  my $trust = $self->normalize_trust($node{trust});
+  croak "node '$id' is external and names no key source: "
+    . 'set api_key_env or api_key_ref, or trust: internal'
+    if $trust eq 'external' && !$self->node_has_key_source(\%node);
+
   # Every check that can croak runs before the removal: a bad re-add must leave the working
   # node in the inventory (skeid k98).
   my $engine = $self->normalize_engine_id((defined($node{engine}) && length($node{engine})) ? $node{engine} : 'OpenAIBase');
@@ -1849,6 +1873,7 @@ sub add_node {
     weight      => (defined $node{weight} ? 0 + $node{weight} : 1),
     max_conns   => (defined $node{max_conns} ? 0 + $node{max_conns} : 0),
     healthy     => (exists $node{healthy} ? ($node{healthy} ? 1 : 0) : 1),
+    trust       => $trust,
     tags        => $tags,
     metadata    => (ref($node{metadata}) eq 'HASH' ? $node{metadata} : {}),
     (defined($node{api_key_env}) && length($node{api_key_env})
@@ -1875,6 +1900,43 @@ sub add_node {
   };
   $self->_bump_inventory;
   return 1;
+}
+
+=method normalize_trust
+
+  my $trust = $skeid->normalize_trust($node{trust});   # 'internal' or 'external'
+
+A node's trust zone (ADR 0032), lowercased and trimmed; absent or empty is C<external>. Croaks
+on any other value. Callable on the class.
+
+=cut
+
+sub normalize_trust {
+  my ($self, $value) = @_;
+  return 'external' unless defined $value;
+  croak 'node trust must be internal or external' if ref $value;
+  (my $trust = lc "$value") =~ s/\A\s+|\s+\z//g;
+  return 'external' unless length $trust;
+  return $trust if $trust eq 'internal' || $trust eq 'external';
+  croak "unknown node trust '$value': internal or external";
+}
+
+=method node_has_key_source
+
+  my $keyed = $skeid->node_has_key_source(\%node);
+
+True when a node names where its key comes from: a non-empty C<api_key_ref> or C<api_key_env>.
+Whether that source yields a key is decided per request, not here. Callable on the class.
+
+=cut
+
+sub node_has_key_source {
+  my ($self, $node) = @_;
+  for my $field (qw( api_key_ref api_key_env )) {
+    my $value = $node->{$field};
+    return 1 if defined($value) && !ref($value) && length($value);
+  }
+  return 0;
 }
 
 =method remove_node
@@ -2382,7 +2444,8 @@ sub _merge_node_files {
       }
       $taken{"$node->{id}"} = 1;
       # Marked, so the proxy never hands a node from a node file the client's own credentials.
-      push @added, { %$node, node_file => $path };
+      # Its trust is the entry's, never the file's to grant (ADR 0032).
+      push @added, { %$node, node_file => $path, trust => $entry->{trust} };
     }
     if ($fresh) {
       warn "skeid: node file $path: node $_->{position} rejected ($_->{rule})\n" for @rejected;

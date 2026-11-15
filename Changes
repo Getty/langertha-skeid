@@ -2,6 +2,16 @@ Revision history for Langertha-Skeid
 
 {{$NEXT}}
 
+    - Nodes take trust: internal | external, default external (ADR 0032). An external
+      node gets only Content-Type, Accept, anthropic-version, anthropic-beta and
+      OpenAI-Beta of the client's headers, plus its own key and User-Agent:
+      Langertha-Skeid; an internal node no longer gets X-Forwarded-*, Forwarded,
+      X-Real-IP or Cookie. Only an internal node passes the client's credential
+      through. A node_files entry sets trust for its nodes (rejection rules trust and
+      key_required). GET /skeid/config lists each node's trust.
+      INCOMPATIBLE: a node with neither api_key_env nor api_key_ref and no
+      trust: internal now fails the config load, and a reload keeps the old config;
+      add a key or trust: internal before upgrading.
     - OpenBao key broker: OPENBAO_TOKEN_FILE instead of AppRole credentials, for many
       processes behind one starter that keeps a token current in a file (an AppRole
       secret_id is single use). Read at start -- missing or empty stops it -- and again

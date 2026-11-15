@@ -184,6 +184,7 @@ $app->routes->post('/fake/v1/chat/completions' => sub {
 $app->ua->server->app($app);
 $skeid->add_node(
   id        => 'n1',
+  trust     => 'internal',
   url       => '/fake/v1',
   model     => 'm1',
   max_conns => 4,

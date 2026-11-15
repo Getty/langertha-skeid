@@ -15,6 +15,7 @@ nodes:
     weight: 1
     max_conns: 256
     healthy: 1
+    trust: internal
 
 routing:
   wait_timeout_ms: 5000

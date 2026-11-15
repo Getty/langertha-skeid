@@ -77,7 +77,7 @@ use Langertha::Skeid::Proxy;
   my $skeid = Langertha::Skeid->new(config_loader => sub {
     return {
       aliases => { fast => { tiers => [{ tags => ['local'], model => 'm-local' }] } },
-      nodes   => [{ id => 'n1', url => 'http://x/v1', model => 'm-local', tags => ['local'] }],
+      nodes   => [{ id => 'n1', trust => 'internal', url => 'http://x/v1', model => 'm-local', tags => ['local'] }],
     };
   });
   is($skeid->route_plan(model => 'fast')->{tiers}[0]{model}, 'm-local', 'aliases load from config');
@@ -115,9 +115,9 @@ my $skeid = Langertha::Skeid->new(
   route_wait_poll_ms => 5,
   store_usage_event  => sub { push @events, $_[1]; return { ok => 1 } },
 );
-$skeid->add_node(id => 'local-1', url => "http://127.0.0.1:$local_port/v1",
+$skeid->add_node(id => 'local-1', trust => 'internal', url => "http://127.0.0.1:$local_port/v1",
   model => 'qwen3-32b', tags => ['local'], max_conns => 1);
-$skeid->add_node(id => 'cloud-1', url => "http://127.0.0.1:$cloud_port/v1",
+$skeid->add_node(id => 'cloud-1', trust => 'internal', url => "http://127.0.0.1:$cloud_port/v1",
   model => 'llama-3.3-70b', tags => ['cloud'], max_conns => 4);
 
 my $proxy = Langertha::Skeid::Proxy->build_app(skeid => $skeid);

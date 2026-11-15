@@ -48,6 +48,7 @@ A minimal config, `skeid.yaml`:
 nodes:
   - id: vllm-a
     url: http://127.0.0.1:8000/v1
+    trust: internal                  # our own server, no key of its own (default: external)
     model: qwen2.5-7b-instruct
     engine: vllm
     max_conns: 32
@@ -90,6 +91,7 @@ cat > skeid-config/skeid.yaml <<'YAML'
 nodes:
   - id: vllm-a
     url: http://host.docker.internal:8000/v1
+    trust: internal                  # our own server, no key of its own (default: external)
     model: qwen2.5-7b-instruct
     engine: vllm
 usage_store:
@@ -155,6 +157,7 @@ nodes:
     max_conns: 32                    # admission limit; 0 or absent: unlimited
     healthy: true                    # operator flag (default true)
     tags: [local, gb10]              # or "local, gb10"
+    trust: external                  # or internal: which client headers it gets, see below
     api_key_ref: secret/skeid/remote/gpu   # upstream key via the KeyBroker, or
     # api_key_env: GPU_API_KEY             # upstream key from this environment variable
     # capacity: { probe: prometheus, path: /metrics }   # see "Capacity"
@@ -183,11 +186,21 @@ perl -Ilib -MLangertha::Skeid -E 'say for @{ Langertha::Skeid->supported_engine_
 `Authorization: Bearer <key>` and any client `x-api-key` is dropped, in any spelling.
 `api_key_ref` needs the OpenBao KeyBroker (see
 [Service stack](#service-stack-openbao--postgresql)); when it resolves nothing, `api_key_env`
-is the fallback. A node with neither forwards the client's own
-`Authorization` / `x-api-key` header unchanged. A node that names a key source and gets no key
+is the fallback. An external node must have one: a
+node with neither and without `trust: internal` fails the load. An internal node with neither
+forwards the client's own `Authorization` / `x-api-key` header unchanged. A node that names a key source and gets no key
 from it (the broker fails or is not running, the variable is unset or empty) is never called:
 the request is answered `503` (`upstream_key_unavailable`) in the error shape of the face that
 was called, the log names the key reference, and the client's key stays with Skeid. Hop-by-hop headers are never forwarded.
+
+**Trust.** `trust` (default `external`) decides which client headers reach the node
+([ADR 0032](docs/adr/0032-a-node-is-internal-or-external-and-an-external-node-hears-only-what-it-needs.md)).
+An external node -- a provider -- gets only `Content-Type`, `Accept`, `anthropic-version`,
+`anthropic-beta` and `OpenAI-Beta` from the client, its own key and `User-Agent: Langertha-Skeid`;
+forwarding, cookie, trace and id headers stay with Skeid. An internal node gets the client's
+headers except hop-by-hop ones, `X-Forwarded-*`, `Forwarded`, `X-Real-IP`, `Cookie` and the
+correlation header. A `node_files` entry sets `trust` for all nodes of its file; a node there
+may only repeat that value.
 
 `healthy` is only ever changed by an operator (config or admin API). Skeid does not poll
 nodes, and neither errors nor rate limits mark a node unhealthy.
@@ -199,11 +212,13 @@ client asks for. vLLM serves one model per process, speaches loads models on dem
 nodes:
   - id: whisper-vllm                 # vllm serve openai/whisper-large-v3
     url: http://gpu-2:8000/v1
+    trust: internal
     model: openai/whisper-large-v3
     engine: vllm
     max_conns: 4
   - id: whisper-speaches             # speaches (faster-whisper)
     url: http://gpu-3:8000/v1
+    trust: internal
     model: Systran/faster-whisper-large-v3
     engine: openaibase
     max_conns: 2
@@ -224,15 +239,18 @@ server speaks its own and needs `rerank_format: tei`:
 nodes:
   - id: rerank-vllm                  # vllm serve BAAI/bge-reranker-v2-m3
     url: http://gpu-4:8000/v1        # serves /v1/rerank
+    trust: internal
     model: BAAI/bge-reranker-v2-m3
     engine: vllm
     max_conns: 16
   - id: rerank-infinity              # infinity, started with --url-prefix /v1
     url: http://gpu-5:7997/v1        # without the prefix infinity serves /rerank at its root
+    trust: internal
     model: BAAI/bge-reranker-v2-m3
     max_conns: 16
   - id: rerank-tei                   # Hugging Face text-embeddings-inference
     url: http://gpu-6:8080           # called at /rerank, with or without a /v1 here
+    trust: internal
     model: BAAI/bge-reranker-v2-m3
     rerank_format: tei               # translated: documents -> texts, the bare array -> results
     max_conns: 16
@@ -278,15 +296,18 @@ untouched:
 nodes:
   - id: embed-vllm                   # vllm serve BAAI/bge-m3 --task embed
     url: http://gpu-7:8000/v1
+    trust: internal
     model: BAAI/bge-m3
     engine: vllm
     max_conns: 16
   - id: embed-tei                    # Hugging Face text-embeddings-inference
     url: http://gpu-8:8080           # TEI serves /v1/embeddings (OpenAI-compatible)
+    trust: internal
     model: BAAI/bge-m3
     max_conns: 16
   - id: embed-infinity               # infinity, started with --url-prefix /v1
     url: http://gpu-9:7997/v1        # without the prefix infinity serves /embeddings at its root
+    trust: internal
     model: BAAI/bge-m3
     max_conns: 16
 ```
@@ -525,6 +546,7 @@ Behind a reverse proxy, its own body limit applies first (nginx: `client_max_bod
 nodes:
   - id: whisper-live
     url: http://speaches:8000/v1     # Skeid opens ws://speaches:8000/v1/realtime
+    trust: internal
     model: whisper-live
     engine: openaibase
     max_conns: 8                      # concurrent sessions
@@ -1226,6 +1248,7 @@ may only narrow what `max_conns` allows, never widen it
 nodes:
   - id: gpu-1
     url: http://gpu-1:8000/v1
+    trust: internal
     max_conns: 32
     capacity:
       probe: prometheus            # prometheus | registry | custom | inflight (default)
@@ -1276,6 +1299,7 @@ Fronting tier (one node per downstream):
 nodes:
   - id: skeid-b
     url: http://skeid-b:8090/v1
+    trust: internal
     model: qwen3-32b
     max_conns: 64                     # still this process's guardrail; the reading only narrows it
     capacity:

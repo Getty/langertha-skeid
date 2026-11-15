@@ -120,6 +120,7 @@ sub build_stack {
 
   $skeid->add_node(
     id        => 'the-node',
+    trust     => 'internal',
     url       => "$upstream",
     model     => $MODEL,
     engine    => 'openai',

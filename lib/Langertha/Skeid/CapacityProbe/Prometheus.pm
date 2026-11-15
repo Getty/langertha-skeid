@@ -14,6 +14,7 @@ extends 'Langertha::Skeid::CapacityProbe';
       url: http://gpu-1:8000/v1
       model: qwen3-32b
       max_conns: 32
+      trust: internal
       capacity:
         probe: prometheus
         url: http://gpu-1:8000/metrics

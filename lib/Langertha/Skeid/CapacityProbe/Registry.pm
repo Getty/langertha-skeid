@@ -20,6 +20,7 @@ extends 'Langertha::Skeid::CapacityProbe';
       url: http://skeid-b:8090/v1
       model: qwen3-32b
       max_conns: 64
+      trust: internal
       capacity:
         probe: registry                  # or type: registry
         read_key_env: SKEID_B_READ_KEY   # the downstream's registry read key (preferred)

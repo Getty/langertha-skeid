@@ -103,6 +103,7 @@ sub proxy_on {
   );
   $skeid->add_node(
     id        => 'slow-1',
+    trust     => 'internal',
     url       => 'http://127.0.0.1:'.$up_port.'/v1',
     model     => 'slow-model',
     engine    => 'openai',
