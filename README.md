@@ -524,6 +524,33 @@ keys:
   A deployment that does not authenticate callers in front of Skeid must leave it off, and a
   gateway that sets it must strip the header from what clients send.
 
+### Request rate per key
+
+A policy, or a `keys:` entry, may carry a request `rate`, so a caller that runs away -- a loop,
+an agent gone wrong -- is stopped before it burns capacity or budget:
+
+```yaml
+policies:
+  agents: { rate: { per_s: 2, burst: 10, per_min: 60 } }
+keys:
+  bigcorp: { policy: agents, rate: { per_s: 5 } }   # a keys entry may set its own
+```
+
+- `per_s` refills a bucket of `burst` tokens (default: `per_s` rounded up), `per_min` a bucket of
+  that many; either may be left out, and a request needs a token from each. Without `rate` a key
+  is unlimited. An unknown field, a number not above 0, neither of the two rates or a `burst`
+  without `per_s` fails the load.
+- Over it, the request is answered `429` with `Retry-After`, in the error shape of the face that
+  was called, before anything is routed: nothing reaches a node. The refusal is a usage event
+  with `error_type: key_rate_limited` and no content.
+- The buckets are in memory per process, and the rate is divided like `max_conns` across
+  `--workers` and `routing.frontend_count`. Without `client_auth`, keys the config does not list
+  share one bucket.
+- A key of a [customer source](#customer-keys-from-a-database-view) takes the rate of the policy
+  its row names; with `rate_column: true` the row may carry a rate of its own, which can only
+  tighten the policy's.
+- `GET /skeid/metrics/keys` counts the refusals per customer key id (see [Admin API](#admin-api)).
+
 ### What the node receives
 
 Skeid changes one thing in a request on the OpenAI face: `model`, when an alias serves another
@@ -587,6 +614,7 @@ customer_source:
   listen: skeid_customer_keys            # optional NOTIFY channel: a change is fetched at once
   max_stale_s: 0                         # default 0: keep the last good keys while the DB is down
   connect_timeout_s: 5                   # default 5; also bounds each query
+  rate_column: false                     # default false; true reads a fifth column, rate
 ```
 
 - Skeid runs `SELECT key_id, name, policy, models FROM "skeid"."customer_keys"` and nothing
@@ -595,6 +623,10 @@ customer_source:
   `default_policy`), `models` (`text[]`, overrides the profile's list; `NULL` keeps it). A row
   present means the key is active; revoke by making the row disappear, e.g. a view filtered on
   `revoked_at IS NULL`.
+- With `rate_column: true` Skeid runs `SELECT key_id, name, policy, models, rate FROM ...`.
+  `rate` (`jsonb`, `json` or text holding JSON; `NULL` keeps the policy's) is the key's own
+  [request rate](#request-rate-per-key) in the shape of a policy's `rate`. It may only tighten the
+  rate of the row's policy: a row asking for more is rejected, with the reason.
 - The file wins: a key id the file's `keys:` names (directly, via `names:`, or by short id)
   ignores the row's policy. Profiles, `deny_tags`, aliases and nodes stay in the file.
 - The ids join `client_auth` beside the file's own; the database cannot revoke an id the file
@@ -1463,8 +1495,10 @@ configured they answer `404`, with a wrong one `401`.
 | `POST /skeid/nodes` | add or replace a node (JSON body with the node fields) |
 | `POST /skeid/nodes/:id/health` | `{"healthy": false}` takes a node out of rotation |
 | `GET /skeid/metrics/nodes` | per-node `inflight`, `started`, `ok`, `error`, `duration_ms_total` and any current capacity reading; volatile, not billing data |
+| `GET /skeid/metrics/keys` | per customer key id, the requests refused for its [rate](#request-rate-per-key); volatile, not billing data |
 | `GET /skeid/usage` | usage report: `since`, `api_key_id`, `model`, `limit` |
-| `GET /skeid/config` | last reload result: error, `failed_at`, consecutive failures; with a `customer_source`, its fetch state and row counts |
+| `POST /skeid/usage/purge` | delete usage events by key ids and/or time, see [Purging usage events](#purging-usage-events) |
+| `GET /skeid/config` | last reload result: error, `failed_at`, consecutive failures; each node's `id` and `trust`; per `node_files` entry the nodes accepted and rejected (position and rule); the `routing.catch_all` in effect; with a `customer_source`, its fetch state and row counts |
 | `GET /skeid/openapi.json` | OpenAPI 3.1 description of the admin routes (and the registry snapshot when enabled) |
 | `GET /skeid/registry/snapshot` | the signed registry snapshot; also takes the registry read key |
 
