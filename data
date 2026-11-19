@@ -1,0 +1,20 @@
+---
+class: standard
+completed: 2026-11-19T06:21:40Z
+created: 2026-11-19T05:37:00Z
+id: 132
+priority: high
+started: 2026-11-19T05:37:11Z
+status: done
+tags:
+- docs
+- release
+title: 'Docs review before 0.005: README and POD against the code'
+updated: 2026-11-19T06:21:40Z
+---
+
+Before releasing 0.005: review README.md and the POD of lib/**/*.pm and bin/skeid. Every config key, route, CLI command and capability documented, nothing stale (0.005: trust, node_files, /api/embed, key and customer-source rates, usage purge/retention, usage contract fields, OPENBAO_TOKEN_FILE, skeid capabilities, routing.catch_all ADR 0033). README YAML examples load with Langertha::Skeid->new. POD consistent with README, podchecker clean, L<> resolve. INCOMPATIBLE trust note prominent. Done: prove -lr t/ green, DZIL_DOCKER_API_SKIP=1 dzil test --release green.
+
+DONE: README audited and fixed (052d435 0d663ad 1303902 0c788cf 493347b df23f9e 3af3316); POD of lib/** and bin/skeid fixed (9dd255d ea5717a 24a952c 55294ae 4e5fa0a c9c95b7). POD commits change no code (checked: identical with POD stripped, 12 files). VERIFIED: all 27 README YAML examples load with Langertha::Skeid->new; podchecker clean on the built POD (34 files); every L<> resolves; prove -lr t/ PASS (114 files, 6495 tests); DZIL_DOCKER_API_SKIP=1 dzil test --release PASS incl. xt pod-syntax and changes_has_content. Skipped (env unset): t/90-customer-source-postgresql.t, t/950-live-docling.t, t/951-live-speaches.t. Pod coverage not run (Pod::Coverage::TrustPod missing). OPEN: k133 (DOCKER_API_SKIP still builds the image locally), k134 (usage-purge exit code), node trust has no capability name (maintainer to decide). Nothing pushed.
+
+Abgenommen von cai-admin am 2026-11-19: Diff geprüft (nur Doku und POD), DZIL_DOCKER_API_SKIP=1 dzil test --release selbst gefahren (116 Dateien, 6531 Tests, PASS); gepusht. Folgen: k133, k134; capability-Name für trust liegt beim Maintainer.
