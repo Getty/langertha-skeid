@@ -1,6 +1,6 @@
 Revision history for Langertha-Skeid
 
-{{$NEXT}}
+0.005     2026-11-19 18:38:03Z
 
     - routing.catch_all { chat, embeddings }: a model name that is neither an alias nor a
       node model goes to the configured target of the route's kind instead of a 503
