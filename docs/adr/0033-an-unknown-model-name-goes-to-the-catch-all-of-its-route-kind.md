@@ -1,6 +1,6 @@
 # ADR 0033 — An unknown model name goes to the catch-all of its route's kind
 
-- Status: accepted — not yet implemented (skeid k129)
+- Status: accepted — implemented (skeid k129)
 - Date: 2026-11-19
 - Tags: routing, config, aliases, policy, usage
 

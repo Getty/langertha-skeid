@@ -97,6 +97,12 @@ OpenAI answer whatever face the client spoke; C<length> is the truncated answer 
 on silently. C<ttft_ms> -- milliseconds from admission to the first token of a streamed answer.
 C<correlation_id> -- the value of the header L</correlation_header> names, unchanged.
 
+The event of a request the catch-all bent (C<routing.catch_all>, ADR 0033) carries
+C<routed_model>: the catch-all target it was routed under, beside C<requested_model> -- the name
+the client sent -- and C<model>, the served model. Only a bent request has the key, which is what
+tells it from an alias request. The DBI stores keep it in a nullable C<routed_model> column;
+C<jsonlog> writes the key only when it is set.
+
 B<Constructor callbacks> (custom backend, no subclassing):
 
   my $skeid = Langertha::Skeid->new(
@@ -752,8 +758,28 @@ repeats a URL, a header value or a C<keys> entry.
     trust_key_id_header: false   # default false; see key_id_for_key
     frontend_count: 1            # default 1, at least 1; see frontend_count
     correlation_header: X-Correlation-ID   # default none; see correlation_header
+    catch_all:                   # default none; see below
+      chat: qwen3.8-flash
+      embeddings: qwen3-embedding-4b
 
 The defaults come from L</ENVIRONMENT> when set there.
+
+C<catch_all> names, per kind of route, the model an unknown model name is routed to (ADR 0033).
+The kind comes from the route, never from the name: C<chat> is C</v1/chat/completions>,
+C</v1/messages>, C</api/chat> and C</api/generate>; C<embeddings> is C</v1/embeddings>,
+C</api/embed> and C</api/embeddings>. No other route is bent. A name is unknown when it is
+neither an alias nor the C<model> of a chat-kind node -- healthy or not, reachable for the key
+or not -- and a request without a model name carries an unknown one. A chat-kind node without a
+C<model> serves every name, so with such a node the catch-all never applies. A bent request is
+from there an ordinary request for the target, which is a node model or an alias: its tiers, its
+wait, admission, and the key's policy and rate judge the target, so a key that may not reach the
+target gets the C<403> it would get asking for it by name. The answer and an error name the
+target; the usage event keeps the name the client sent as C<requested_model> and carries the
+target as C<routed_model>. The target is not checked at load: until a node serves it, a bent
+request ends as the target's C<503>. C<chat> and C<embeddings> are the only keys; any other key,
+a C<catch_all> that is not a mapping and a target that is not a non-empty string fail the config
+load. The catch-all is not a name, so no model list shows it; C<GET /skeid/config> does. See
+L</catch_all_target>.
 
 =head2 admin
 
@@ -1237,6 +1263,18 @@ sub _build_correlation_header {
   return (defined($name) && length($name)) ? _normalize_correlation_header($name) : undef;
 }
 
+=attr catch_all
+
+Kind of route (C<chat>, C<embeddings>) to the model an unknown model name is routed to (default
+empty; config C<routing.catch_all>, ADR 0033). Read through L</catch_all_target>.
+
+=cut
+
+has catch_all => (
+  is      => 'rw',
+  default => sub { {} },
+);
+
 # Whether x-skeid-key-id / x-api-key-id from the client may name the customer. Off by default:
 # once a policy hangs off the key id, believing that header lets any client pick its own
 # permissions in one line. Turn it on only when something in front of Skeid authenticates the
@@ -1592,6 +1630,12 @@ has _route_cache => (
   default => sub { { generation => -1, entries => {}, order => [] } },
 );
 
+# The model names of the chat-kind nodes as of one inventory generation (see _known_node_models).
+has _known_models_cache => (
+  is      => 'rw',
+  default => sub { { generation => -1 } },
+);
+
 # The probe key (see _probe_inventory_key) as of one inventory generation.
 has _probe_key_cache => (
   is      => 'rw',
@@ -1782,7 +1826,27 @@ my %ROUTING_SETTINGS = (
   # to nothing.
   frontend_count      => [ frontend_count        => sub { my $n = int(0 + $_[0]); $n < 1 ? 1 : $n } ],
   correlation_header  => [ correlation_header    => \&_normalize_correlation_header ],
+  catch_all           => [ catch_all             => \&_normalize_catch_all ],
 );
+
+# The kinds of route a catch-all can be set for (ADR 0033). The kind is the route's, not a
+# node kind: both are served by chat-kind nodes.
+my %CATCH_ALL_KIND = map { $_ => 1 } qw( chat embeddings );
+
+sub _normalize_catch_all {
+  my ($catch_all) = @_;
+  croak 'routing.catch_all must be a mapping of chat and embeddings' unless ref($catch_all) eq 'HASH';
+  my %targets;
+  for my $kind (sort keys %$catch_all) {
+    croak "routing.catch_all: unknown key '$kind' (expected chat, embeddings)"
+      unless $CATCH_ALL_KIND{$kind};
+    my $target = $catch_all->{$kind};
+    croak "routing.catch_all.$kind must be a model name"
+      if !defined($target) || ref($target) || !length($target);
+    $targets{$kind} = "$target";
+  }
+  return \%targets;
+}
 
 sub _normalize_correlation_header {
   my ($name) = @_;
@@ -2193,7 +2257,7 @@ sub pricing_for_model {
 # from an emptied manifest map while routing already ran on the new policies.
 my @CONFIG_STATE = qw(
   model_aliases policies default_policy key_policies key_names nodes
-  route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
+  route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count catch_all
   admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
   documents_max_bytes documents_allow_remote_sources
@@ -2249,8 +2313,9 @@ sub reload_config {
 
   my %before = map { $_ => $self->$_ } @CONFIG_STATE;
   my %pricing = %{$self->model_pricing || {}};
-  my ($generation, $route_cache, $probe_key_cache, $rr_cursor)
-    = ($self->_inventory_generation, $self->_route_cache, $self->_probe_key_cache, $self->_rr_cursor);
+  my ($generation, $route_cache, $probe_key_cache, $rr_cursor, $known_models_cache)
+    = ($self->_inventory_generation, $self->_route_cache, $self->_probe_key_cache, $self->_rr_cursor,
+       $self->_known_models_cache);
 
   my ($nodes_print, $declared, $notices, $source);
   if (eval { ($nodes_print, $declared, $notices, $source) = $self->_apply_config($cfg); 1 }) {
@@ -2281,6 +2346,7 @@ sub reload_config {
     $self->_route_cache($route_cache);
     $self->_probe_key_cache($probe_key_cache);
     $self->_rr_cursor($rr_cursor);
+    $self->_known_models_cache($known_models_cache);
   }
   die $err;
 }
@@ -3657,7 +3723,8 @@ C<< { ok => 0, enabled => 0, error => 'usage_store not configured' } >> without 
 event when there is no sink.
 
 The event carries C<created_at>, C<request_id>, C<api_format>, C<endpoint>, C<api_key_id>,
-C<provider>, C<engine>, C<model> (served), C<requested_model> (default C<model>), C<node_id>,
+C<provider>, C<engine>, C<model> (served), C<requested_model> (default C<model>),
+C<routed_model> (only when given: the catch-all target of a bent request), C<node_id>,
 C<route_url>, C<status_code>, C<ok>, C<duration_ms>, C<error_type>, C<error_message>, and from
 C<metrics> the token counts (C<input_tokens>, C<output_tokens>, C<total_tokens>,
 C<cached_tokens>, C<cache_write_tokens>), C<tool_calls> and the costs (C<cost_input_usd>,
@@ -3757,6 +3824,10 @@ sub record_usage {
     $event{$field} = "$args{$field}" if defined($args{$field}) && !ref($args{$field});
   }
   $event{ttft_ms} = _num($args{ttft_ms}) if defined $args{ttft_ms};
+  # The catch-all target a bent request was routed under (skeid k129, ADR 0033). Only a bent
+  # request has it: an event without the key was not bent.
+  $event{routed_model} = "$args{routed_model}"
+    if defined($args{routed_model}) && !ref($args{routed_model}) && length($args{routed_model});
 
   return $self->_store_usage_event(\%event);
 }
@@ -4539,13 +4610,15 @@ line). A name is added when its feature ships and never removed or renamed:
 
 =item * C<openbao_token_file> -- C<OPENBAO_TOKEN_FILE> for the OpenBao key broker
 
+=item * C<catch_all> -- C<routing.catch_all> and C<routed_model> on usage events (ADR 0033)
+
 =back
 
 =cut
 
 my @CAPABILITIES = qw(
   documents ollama_embed node_files key_rate customer_source_rate usage_contract usage_purge
-  openbao_token_file
+  openbao_token_file catch_all
 );
 
 sub capabilities { return @CAPABILITIES }
@@ -5057,6 +5130,52 @@ sub mcp_servers_for_key {
     grep { defined $self->_configured_key_id($_->{keys}, $api_key_id) }
     map  { $servers->{$_} } sort keys %$servers
   ];
+}
+
+=method catch_all_target
+
+  my $target = $skeid->catch_all_target($requested_model, 'chat');
+
+The catch-all target (C<routing.catch_all>, ADR 0033) an unknown model name is routed to on a
+route of that kind -- C<chat> or C<embeddings>, the kind of the B<route>, not a node kind -- or
+nothing when the request is not bent: no catch-all is set for the kind, or the name is known. A
+name is known when it is an alias or the C<model> of a chat-kind node, whatever the node's health
+and whatever a key may reach; a chat-kind node without a C<model> makes every name known. An
+empty or missing name is unknown. The target is returned as configured and is not looked up
+again: a caller routes it like a name the client sent.
+
+=cut
+
+sub catch_all_target {
+  my ($self, $model, $route_kind) = @_;
+  my $target = $self->catch_all->{$route_kind // ''};
+  return unless defined $target;
+  $model //= '';
+  return if exists $self->model_aliases->{$model};
+  my $known = $self->_known_node_models;
+  return if $known->{any} || $known->{models}{$model};
+  return $target;
+}
+
+# Which model names the chat-kind nodes serve, and whether one of them serves any name (a node
+# without a model). Health is left out on purpose: a model whose nodes are down is still known.
+# Derived once per inventory generation, like the route cache, so the per-request check is an
+# integer compare and a hash lookup.
+sub _known_node_models {
+  my ($self) = @_;
+  my $generation = $self->_inventory_generation;
+  my $cache = $self->_known_models_cache;
+  return $cache if ($cache->{generation} // -1) == $generation;
+
+  my ($any, %models) = (0);
+  for my $node (@{$self->nodes || []}) {
+    next if length($node->{kind} // '');
+    if (defined($node->{model}) && length($node->{model})) { $models{$node->{model}} = 1 }
+    else                                                   { $any = 1 }
+  }
+  $cache = { generation => $generation, any => $any, models => \%models };
+  $self->_known_models_cache($cache);
+  return $cache;
 }
 
 =method route_plan

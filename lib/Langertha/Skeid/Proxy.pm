@@ -93,9 +93,23 @@ node models and the alias names, each once, so a client can discover what it may
 C<model>. The list follows the policy of the key presented (no key: the default policy): a name
 the key's C<models> do not grant, an alias with every tier denied and a model only denied nodes
 serve are left out. Unhealthy nodes are included. A node without a C<model> is not listed -- it matches any
-requested name, so no name reaches it in particular. The manifest route answers C<404> unless
+requested name, so no name reaches it in particular. The catch-all (below) is not a name and is
+not listed. The manifest route answers C<404> unless
 the config enables it, C<401> without a key and C<403> for a key without a grant; see
 L<Langertha::Skeid/Provider Manifest>.
+
+=head2 Catch-all
+
+With C<routing.catch_all> (L<Langertha::Skeid/routing>, ADR 0033) a model name that is neither
+an alias nor the C<model> of a chat-kind node is routed to the target of the route's kind
+instead of ending as C<503>: C<chat> on C</v1/chat/completions>, C</v1/messages>, C</api/chat>
+and C</api/generate>, C<embeddings> on C</v1/embeddings>, C</api/embed> and C</api/embeddings>.
+A request without C<model> is bent as well. The name is replaced once, before the request is
+routed, and from there the request is the request for the target: the key's policy, its rate and
+admission judge the target, the answer's C<model> is the one a request for the target gets, and
+an error names the target. The usage event keeps the name the client sent as C<requested_model>
+and carries the target as C<routed_model>, which only a bent request has. No other route is
+bent: the audio, rerank, documents, realtime and MCP routes answer an unknown name as before.
 
 =head2 Audio routes
 
@@ -374,6 +388,8 @@ C</skeid/*> route answers C<404>; a missing or wrong token answers C<401>.
                                    {customer_report}: rows accepted, rejected, shadowed (labels, reasons)
                                    {nodes}: per node, its id and trust (internal, external)
                                    {node_files}: per node file, nodes accepted, rejected (position, rule)
+                                   {catch_all}: the routing.catch_all in effect, the kinds configured
+                                   only; absent when there is none
   GET  /skeid/metrics/nodes        {metrics}: per-node counters, never billed
   GET  /skeid/metrics/keys         {metrics}: per customer key id, requests refused for its rate
   GET  /skeid/usage                ?since=&api_key_id=&model=&limit= (default 50) -> the report
@@ -980,8 +996,11 @@ sub _build_route_table {
       my $reload = $c->skeid->call_function('config.status', {});
       my $source = $c->skeid->customer_source_status;
       my $node_files = $c->skeid->node_files_status;
+      my $catch_all = $c->skeid->catch_all;
       $c->render(json => {
         reload => $reload,
+        # The catch-all in effect (ADR 0033): the kinds configured, absent when there is none.
+        (%$catch_all ? (catch_all => {%$catch_all}) : ()),
         # Each node's trust zone (ADR 0032): which nodes hear the client's headers.
         nodes  => [ map { +{ id => $_->{id}, trust => ($_->{trust} // 'external') } }
           @{$c->skeid->nodes} ],
@@ -1323,7 +1342,7 @@ sub _handle_openai_chat {
     return;
   }
 
-  my $model = $body->{model} // '';
+  my ($model, %names) = _catch_all($c, $body->{model} // '', 'chat');
   my $api_key_id = _request_api_key_id($c);
   _begin_route_async($c, $model, $api_key_id, sub {
     my ($route, $node_id, $started, $tier) = @_;
@@ -1343,7 +1362,7 @@ sub _handle_openai_chat {
       provider   => 'skeid',
       engine     => ($route->{engine} // 'openaibase'),
       model            => $served_model,
-      requested_model  => $model,
+      %names,
       route_url        => ($route->{url} // ''),
     };
 
@@ -1360,7 +1379,7 @@ sub _handle_openai_chat {
       return if $err;
       _render_upstream_response($c, $res, $node_id);
     }, undef, $relay);
-  });
+  }, %names);
 }
 
 sub _handle_openai_embeddings {
@@ -1372,7 +1391,7 @@ sub _handle_openai_embeddings {
     return;
   }
 
-  my $model = $body->{model} // '';
+  my ($model, %names) = _catch_all($c, $body->{model} // '', 'embeddings');
   my $api_key_id = _request_api_key_id($c);
   _begin_route_async($c, $model, $api_key_id, sub {
     my ($route, $node_id, $started, $tier) = @_;
@@ -1392,7 +1411,7 @@ sub _handle_openai_embeddings {
       provider   => 'skeid',
       engine     => ($route->{engine} // 'openaibase'),
       model            => $served_model,
-      requested_model  => $model,
+      %names,
       route_url        => ($route->{url} // ''),
     };
     $c->render_later;
@@ -1401,7 +1420,7 @@ sub _handle_openai_embeddings {
       return if $err;
       _render_upstream_response($c, $res, $node_id);
     }, undef, _verbatim_relay($c, $served_model));
-  });
+  }, %names);
 }
 
 # Runs once per request, when its head is parsed and its body is still on the wire (the request
@@ -1949,7 +1968,7 @@ sub _handle_anthropic_messages {
     _render_error($c, 400, $msg, 'invalid_request_error');
     return;
   }
-  my $model = $openai_body->{model} // '';
+  my ($model, %names) = _catch_all($c, $openai_body->{model} // '', 'chat');
   my $api_key_id = _request_api_key_id($c);
 
   _begin_route_async($c, $model, $api_key_id, sub {
@@ -1970,7 +1989,7 @@ sub _handle_anthropic_messages {
       provider   => 'skeid',
       engine     => ($route->{engine} // 'openaibase'),
       model            => $served_model,
-      requested_model  => $model,
+      %names,
       route_url        => ($route->{url} // ''),
     };
 
@@ -1999,7 +2018,7 @@ sub _handle_anthropic_messages {
       # raw Mojo $res would read as all-undef and yield a well-formed but empty envelope (karr #26).
       return Langertha::Skeid::Protocol::Anthropic->response_from_openai($_[0], $model);
     }, _schema_relay($c, $openai_body, 'input_schema'));
-  });
+  }, %names);
 }
 
 # Serves both Ollama completion routes. /api/chat and /api/generate differ only at the edge --
@@ -2044,7 +2063,7 @@ sub _handle_ollama {
     _render_error($c, 400, 'Invalid request', 'invalid_request_error');
     return;
   }
-  my $model = $openai_body->{model} // '';
+  my ($model, %names) = _catch_all($c, $openai_body->{model} // '', 'chat');
   my $api_key_id = _request_api_key_id($c);
 
   _begin_route_async($c, $model, $api_key_id, sub {
@@ -2065,7 +2084,7 @@ sub _handle_ollama {
       provider        => 'skeid',
       engine          => ($route->{engine} // 'openaibase'),
       model           => $served_model,
-      requested_model => $model,
+      %names,
       route_url       => ($route->{url} // ''),
     };
 
@@ -2092,7 +2111,7 @@ sub _handle_ollama {
       my $response_method = $face->{response};
       return Langertha::Skeid::Protocol::Ollama->$response_method($_[0]);
     }, _schema_relay($c, $openai_body, 'function', 'parameters'));
-  });
+  }, %names);
 }
 
 # POST /api/embed and /api/embeddings (skeid k116). Both go to the node's OpenAI /embeddings and
@@ -2128,7 +2147,7 @@ sub _handle_ollama_embeddings {
     _render_error($c, 400, 'Invalid request', 'invalid_request_error');
     return;
   }
-  my $model = $openai_body->{model} // '';
+  my ($model, %names) = _catch_all($c, $openai_body->{model} // '', 'embeddings');
   my $api_key_id = _request_api_key_id($c);
 
   _begin_route_async($c, $model, $api_key_id, sub {
@@ -2146,7 +2165,7 @@ sub _handle_ollama_embeddings {
       provider        => 'skeid',
       engine          => ($route->{engine} // 'openaibase'),
       model           => $served_model,
-      requested_model => $model,
+      %names,
       route_url       => ($route->{url} // ''),
     };
 
@@ -2161,7 +2180,20 @@ sub _handle_ollama_embeddings {
       my $response_method = $face->{response};
       return Langertha::Skeid::Protocol::Ollama->$response_method($_[0], $model);
     });
-  });
+  }, %names);
+}
+
+# The catch-all (skeid k129, ADR 0033): on a chat or an embeddings route -- $route_kind, the kind
+# of the route and not a node kind -- an unknown model name is bent to the configured target,
+# once, before anything is planned. Returns the name to route under and the names the usage event
+# carries: requested_model is what the client sent, routed_model the target and only there on a
+# bent request. From here on the request is an ordinary request for the target, so the policy,
+# the rate, admission and the answer all see the target.
+sub _catch_all {
+  my ($c, $requested, $route_kind) = @_;
+  my $target = $c->skeid->catch_all_target($requested, $route_kind);
+  return ($requested, requested_model => $requested) unless defined $target;
+  return ($target, requested_model => $requested, routed_model => $target);
 }
 
 # Walks the tiers of a requested model (ADR 0008) until one admits the request.
@@ -2179,7 +2211,8 @@ sub _begin_route_async {
   my ($c, $model, $api_key_id, $cb, %route) = @_;
   $cb ||= sub { };
   # What the route is over besides a model name: `documents` plans over the nodes of that kind
-  # (ADR 0028). Chat routes pass nothing.
+  # (ADR 0028). Chat routes pass nothing. A route the catch-all can bend passes the names of
+  # its usage event (see _catch_all), for the one event that is written here.
   my @kind = length($route{kind} // '') ? (kind => $route{kind}) : ();
   my $wait_poll_ms = 0 + ($c->skeid->route_wait_poll_ms // 25);
   $wait_poll_ms = 1 if $wait_poll_ms < 1;
@@ -2202,7 +2235,7 @@ sub _begin_route_async {
   # The key's request rate (skeid k125): over it, refused before anything is routed or admitted.
   my $rate = $c->skeid->rate_admit($api_key_id);
   unless ($rate->{ok}) {
-    _refuse_rate_limited($c, $model, $api_key_id, $rate->{retry_after});
+    _refuse_rate_limited($c, $model, $api_key_id, $rate->{retry_after}, \%route);
     $cb->();
     return;
   }
@@ -3322,7 +3355,8 @@ sub _refuse_unkeyed_node {
 # usage event without content, so the refusals of a runaway caller show where its usage does.
 # No node was picked, so there is no slot to give back.
 sub _refuse_rate_limited {
-  my ($c, $model, $api_key_id, $retry_after) = @_;
+  my ($c, $model, $api_key_id, $retry_after, $names) = @_;
+  $names ||= {};
   my $format = $c->stash('skeid.error_format') // '';
   _record_usage_event($c, {
     api_format      => (length($format) ? $format : 'openai'),
@@ -3330,7 +3364,9 @@ sub _refuse_rate_limited {
     api_key_id      => $api_key_id,
     provider        => 'skeid',
     model           => ($model // ''),
-    requested_model => ($model // ''),
+    # A bent request (ADR 0033) keeps the name the client sent and says what it was routed under.
+    requested_model => ($names->{requested_model} // $model // ''),
+    (defined($names->{routed_model}) ? (routed_model => $names->{routed_model}) : ()),
     status_code     => 429,
     ok              => 0,
     duration_ms     => 0,
@@ -3824,6 +3860,8 @@ sub _record_usage_event {
       # The usage contract (skeid k121): how the answer ended, when its first token came (streams
       # only), and the caller's correlation id when the config names its header.
       _finish_reason_field($args),
+      # Only a request the catch-all bent: the target it was routed under (skeid k129, ADR 0033).
+      (defined($args->{routed_model}) ? (routed_model => $args->{routed_model}) : ()),
       (defined($args->{ttft_ms}) ? (ttft_ms => 0 + $args->{ttft_ms}) : ()),
       _correlation_field($c),
       metrics       => $safe_metrics,
