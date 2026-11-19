@@ -65,6 +65,15 @@ involved. Cost is priced on the served model; a customer is billed for the reque
 events carry both, and neither may be dropped in favour of "the model".
 _Avoid_: bare "model" anywhere an alias could be in play.
 
+**Catch-all** (`routing.catch_all`):
+The model an unknown model name is routed to, one per kind of route (`chat`, `embeddings`); the
+kind comes from the route, never from the name (ADR 0033). A name is unknown when it is neither
+an alias nor the model of a chat-kind node. A **bent** request is from there an ordinary request
+for the target: the key's policy judges the target, and the usage event carries the target as
+**routed model** (`routed_model`) beside the requested and the served model. Off unless
+configured; not a name, so no model list shows it.
+_Avoid_: default model, wildcard alias, fallback (that is a tier's job).
+
 **Route key**:
 The `model|engine` tuple — extended by the selector's tags and the key's denied tags when there
 are any — under which one weighted round-robin cursor lives. Two different route keys never
