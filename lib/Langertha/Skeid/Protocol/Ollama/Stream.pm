@@ -153,7 +153,7 @@ sub start {
 
 One decoded OpenAI chunk becomes one Ollama line when it carries text or completed tool calls,
 or nothing for a role-only chunk or the final usage-only one. OpenAI tool-call fragments are
-fed to L<Langertha::Engine::OpenAIBase/parse_stream_chunk> with state private to this stream;
+fed to L<Langertha::Role::OpenAICompatible/parse_stream_chunk> with state private to this stream;
 only its completed L<Langertha::ToolCall> objects are rendered, through C<to_ollama>. Usage and
 finish reason are recorded for the closing line. A top-level OpenAI error object ends the stream
 with L</error_event>; a parser rejection does the same with a generic message rather than

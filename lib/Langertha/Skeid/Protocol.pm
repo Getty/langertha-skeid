@@ -164,7 +164,7 @@ sub image_url_part {
   my $spec = Langertha::Skeid::Protocol->openai_manifest_endpoint;
   # { dialect => 'openai-chat', path => '/v1', capabilities => [ ... ] }
 
-How the OpenAI face (C</v1/chat/completions>) appears in the provider manifest (skeid #29).
+How the OpenAI face (C</v1/chat/completions>) appears in the provider manifest (skeid k29).
 That face is the upstream call shape itself: its body goes to the node untranslated, apart from
 the model name, so it carries every OpenAI-chat request field a model entry may claim.
 C<capabilities> is the list of those flags; a model is published on this face with the

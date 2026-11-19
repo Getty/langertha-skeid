@@ -408,7 +408,7 @@ sub tags_from_models {
   my $spec = Langertha::Skeid::Protocol::Ollama->manifest_endpoint;
   # { dialect => 'ollama', path => '', capabilities => [ ... ] }
 
-How this face appears in the provider manifest (skeid #29): C<ollama> at the public root, and
+How this face appears in the provider manifest (skeid k29): C<ollama> at the public root, and
 the capability flags L</request_to_openai> actually carries to the upstream -- messages
 (a C<system> message included), C<tools>, C<options.temperature>, C<options.num_predict>
 (response size), C<stream>, a message's C<images> (C<image_input>) and C<format> as
@@ -446,7 +446,7 @@ Ollama's error envelope, C<< { error => $message } >> -- the message as a plain 
 object: the Ollama clients decode C<error> as a string (the Go client's C<StatusError>) and fail
 on anything else. Every error Skeid answers on C</api/*> is rendered from this, with the HTTP
 status of the failure, and so is the mid-stream error line (see
-L<Langertha::Skeid::Protocol::Ollama::Stream/error_event>) (skeid #47).
+L<Langertha::Skeid::Protocol::Ollama::Stream/error_event>) (skeid k47).
 
 =cut
 

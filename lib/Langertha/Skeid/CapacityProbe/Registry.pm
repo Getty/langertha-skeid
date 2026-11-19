@@ -57,7 +57,7 @@ body with the secret from C<secret_env>;
 
 The bearer token is the downstream's registry read key from C<read_key_env> when that is
 configured -- it opens the snapshot route and nothing else -- and its admin API key from
-C<admin_key_env> only otherwise (skeid #49). With C<read_key_env> set the admin key is never
+C<admin_key_env> only otherwise (skeid k49). With C<read_key_env> set the admin key is never
 sent, not even when the read key variable is empty.
 
 A missing C<secret_env> value or bearer key value forgets too, and so does a secret shorter

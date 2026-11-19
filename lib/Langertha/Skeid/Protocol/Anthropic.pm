@@ -470,7 +470,7 @@ sub error_body {
   my $spec = Langertha::Skeid::Protocol::Anthropic->manifest_endpoint;
   # { dialect => 'anthropic-compat', path => '', capabilities => [ ... ] }
 
-How this face appears in the provider manifest (skeid #29): C<anthropic-compat> at the public
+How this face appears in the provider manifest (skeid k29): C<anthropic-compat> at the public
 root, and the capability flags L</request_to_openai> actually carries to the upstream --
 C<system>, function C<tools>, C<tool_choice> (auto, any, none, a named tool), C<max_tokens>,
 C<temperature>, C<stream> and C<image> blocks (C<image_input>). A model is published here
