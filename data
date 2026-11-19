@@ -1,0 +1,15 @@
+---
+class: standard
+created: 2026-11-19T03:45:03Z
+id: 130
+priority: low
+status: backlog
+tags:
+- config
+- reload
+title: correlation_header is not rolled back when a config load fails after the routing
+  section
+updated: 2026-11-19T03:45:03Z
+---
+
+Found during k129 (2026-11-19), predates it: routing.correlation_header is not in @CONFIG_STATE in lib/Langertha/Skeid.pm, so a load or reload that croaks after the routing section (registry, manifest) leaves a changed correlation_header in force while the rest of the config is rolled back. Reported by skeid-worker from reading the code; not reproduced with a test yet. Wanted: a failing test in the style of t/48-config-reload-failure.t, then the attribute in the rolled-back state.
