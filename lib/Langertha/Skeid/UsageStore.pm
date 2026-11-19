@@ -105,11 +105,15 @@ and C<dbname> or C<database> (C<skeid>); C<user>; C<password>, or C<password_env
 variable that holds it; C<schema_file>; C<auto_migrate> (default on); C<flush_interval_ms> and
 C<spool_dir>, as for sqlite.
 
+=item * every backend -- C<retention_days> (default none: kept until deleted), a whole number of
+days of at least 1: the cut-off C<skeid usage-purge --retention> deletes before
+(L<Langertha::Skeid/usage_retention_before>). Nothing purges on its own.
+
 =back
 
 Croaks on a config that is not a hashref, a missing path, an unknown backend, a
-C<flush_interval_ms> that is not a whole number of milliseconds, or a C<spool_dir> that is not
-a plain string.
+C<flush_interval_ms> that is not a whole number of milliseconds, a C<spool_dir> that is not
+a plain string, or a C<retention_days> that is not a whole number of at least 1.
 
 =cut
 

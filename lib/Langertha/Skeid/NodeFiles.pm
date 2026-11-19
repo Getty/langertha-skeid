@@ -20,6 +20,7 @@ use Langertha::Skeid ();
       allow_api_key_ref: false
       allow_url_hosts: [ '*.cai-gpm.svc' ]
       allow_kinds: [ documents, chat ]
+      trust: internal                    # default external (ADR 0032)
 
 =head1 DESCRIPTION
 

@@ -209,15 +209,18 @@ sub statement {
 =method check_rows
 
   my $checked = Langertha::Skeid::CustomerSource->check_rows(\@rows, policies => \%policies);
-  # { accepted => [ { key_id, name, policy, models, label }, ... ],
+  # { accepted => [ { key_id, name, policy, models, rate, label }, ... ],
   #   rejected => [ { row => "'alice'" | 'row 3', reason => '...' }, ... ] }
 
 Validates a snapshot on its own, before anything is merged. A row is rejected when it is not a
 hash, when its C<key_id> is not a full key id (C<k_> + 40 lowercase hex: a short id, uppercase,
 or anything else -- a key pasted where its id belongs among them), when another row has the
 same C<key_id> (both are rejected), when C<policy> is not C<NULL> and names no key of
-C<%policies>, or when C<models> is not C<NULL> and not a list of non-empty names. A rejected row
-grants nothing.
+C<%policies>, when C<models> is not C<NULL> and not a list of non-empty names, or -- with a
+C<rate> -- when that is not a rate of C<per_s>, C<burst>, C<per_min> (as a hash or JSON text) or
+is looser than the rate of the row's policy (C<default_policy> passed as C<< default_policy =>
+$name >> stands in for a C<NULL> policy). An accepted row carries its normalized C<rate>. A
+rejected row grants nothing.
 
 A row is labelled by its C<name> when it has one, else by its position in C<@rows> (from 1).
 Neither a label nor a reason carries any other value of the row.
@@ -439,15 +442,19 @@ How long after a notification the fetch runs (default 0.25).
 
 =attr last_success_at
 
+When the last fetch succeeded (epoch seconds).
+
 =attr last_failure_at
+
+When the last fetch failed (epoch seconds).
 
 =attr failures
 
+How many fetches have failed in a row (0 after a success).
+
 =attr last_error
 
-When the last fetch succeeded, when the last one failed (epoch seconds), how many have failed in
-a row, and why the last one did (undef after a success). The error never carries a
-C<password=>.
+Why the last fetch failed (undef after a success). The error never carries a C<password=>.
 
 =attr completed
 
