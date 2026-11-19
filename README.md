@@ -1106,8 +1106,14 @@ An event carries:
 
 - identity and route: `created_at`, `request_id` (from `x-request-id` or generated),
   `api_format`, `endpoint`, `api_key_id`, `provider`, `engine`, `model` (served),
-  `requested_model`, `node_id`, `route_url`
+  `requested_model`, `routed_model`, `node_id`, `route_url`
 - outcome: `status_code`, `ok`, `duration_ms`, `error_type`, `error_message`
+- how the request went for its caller, each absent when not known: `finish_reason` (`stop`,
+  `length`, `content_filter`, `tool_calls`, `error` for any failed request, `other`; read from
+  the upstream's OpenAI answer whatever face the client spoke -- `length` is the truncated answer
+  an agent fails on silently), `ttft_ms` (milliseconds from admission to the first token of a
+  streamed answer) and `correlation_id` (the value of the header
+  [`routing.correlation_header`](#routing) names, unchanged)
 - tokens: `input_tokens`, `output_tokens`, `total_tokens`, `cached_tokens`,
   `cache_write_tokens`, `tool_calls`
 - cost in USD: `cost_input_usd`, `cost_output_usd`, `cost_cache_read_usd`,
@@ -1120,6 +1126,11 @@ An event carries:
   of documents the request carried (files or sources, counted off the request)
 - the documents routes only, and only when the answer carries it: `pages`, the page count of the
   converted document
+
+`requested_model` is the name the client sent and `model` the one served. `routed_model` is
+set only on a request the [catch-all](#routing) bent: the target it was routed under, which is
+what tells such a request from an alias request (both have `requested_model` differing from
+`model`). The jsonlog store writes the key only when it is set.
 
 Streamed requests are priced from the upstream's usage frame exactly like a non-streamed
 answer. A stream cut short is recorded as failed, and billed from its usage frame if one
@@ -1187,6 +1198,7 @@ usage_store:
   path: /var/log/skeid/events/   # a directory: one <id>.json per event
   # mode: file                   # or one JSON line per event in a single file, under flock
   # fsync: true                  # flush each event to disk before returning (slower)
+  # retention_days: 365          # how long events are kept, see "Purging usage events"
 ```
 
 Directory mode is chosen when the path is an existing directory or ends in `/`. It needs no
@@ -1214,6 +1226,8 @@ usage_store:
   password_env: SKEID_USAGE_DB_PASSWORD             # or password: (avoid)
   # auto_migrate: true                              # default
   # schema_file: /path/to/schema.sql
+  # flush_interval_ms: 250                          # default 0; see below
+  # spool_dir: /var/lib/skeid/spool                 # default off; see below
 ```
 
 The backend is inferred when `backend` is absent: a sqlite path key means `sqlite`, a
@@ -1221,6 +1235,15 @@ The backend is inferred when `backend` is absent: a sqlite path key means `sqlit
 `share/sql/usage_events.<backend>.sql` when `auto_migrate` is on, and columns added in later
 versions (`requested_model`, `cached_tokens`, ...) are added to an existing table; nothing is
 ever dropped. SQLite is single-writer: do not use it with `--workers` above 1.
+
+For both: `flush_interval_ms` above 0 moves the database write off the request path -- events
+are queued and written in one transaction per interval (write-behind), so a process that is
+killed rather than stopped loses what is queued. `spool_dir` (a local directory, one per
+instance) keeps the events the database cannot take while it is down, as JSON Lines with key
+ids and nothing else, and replays them when it is back without a second row for an event
+already in the table; with it Skeid also starts while the database is down
+([ADR 0027](docs/adr/0027-usage-events-spool-while-the-database-is-down.md)). A failed connect
+is retried with a back-off (1 second, doubling up to 60).
 
 ### Reports
 
@@ -1237,6 +1260,40 @@ CLI defaults to 20, the admin route to 50). The first three sum `audio_seconds` 
 `documents` beside the tokens; the CLI prints them (`Audio:  seconds=...` and
 `Rerank: documents=...` after the totals, `audio_seconds=...` and `documents=...` on a row)
 only where there are some.
+
+### Purging usage events
+
+An organisation that asks for its data to be erased, or a retention you promised, means deleting
+usage events. Skeid does it on request and never on its own, because a `DELETE` over the usage
+table would run on the event loop that serves requests
+([ADR 0005](docs/adr/0005-the-request-path-is-async-only.md)):
+
+```bash
+bin/skeid usage-purge --config skeid.yaml --api-key-id k_5f0e... --api-key-id k_9c8b... --dry-run
+bin/skeid usage-purge --config skeid.yaml k_5f0e... k_9c8b...     # key ids may also be arguments
+bin/skeid usage-purge --config skeid.yaml --before 2026-01-01T00:00:00Z
+bin/skeid usage-purge --config skeid.yaml --retention            # from a cron job
+curl -s -X POST -H "Authorization: Bearer $SKEID_ADMIN_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"api_key_ids":["k_5f0e..."],"before":"2026-01-01T00:00:00Z","dry_run":true}' \
+  http://127.0.0.1:8090/skeid/usage/purge
+```
+
+- A purge takes key ids (`api_key_ids`, `--api-key-id`), a time (`before`, `--before`, ISO 8601
+  UTC `YYYY-MM-DDTHH:MM:SSZ`), or both: the events of those keys created before it. It needs at
+  least one of them.
+- `usage_store.retention_days` sets a retention for every backend; `--retention` deletes what is
+  older than that many days and fails without the setting. Run it on a schedule (a cron job, a
+  Kubernetes CronJob).
+- `dry_run` only counts. A purge is idempotent: repeat it until it answers `ok`.
+- The answer says what was asked (the number of key ids, `before`), what `matched` and was
+  `deleted`, by which `backend` and when (`purged_at`); keep it as the record of the erasure. The
+  CLI prints it as JSON and exits `0`, or `2` when the purge failed. The route answers `400` for
+  a bad request and `503` when the store failed.
+- The jsonlog and the DBI stores purge. A DBI store refuses while its own spool holds events.
+  With `flush_interval_ms` or several processes (`--workers`, frontends, other instances'
+  spools) another process may still write queued events of those keys for up to one interval, so
+  run an erasure again after it.
+- A store handed to Skeid as a `store_usage_event` callback cannot purge.
 
 ### Your own usage sink
 
