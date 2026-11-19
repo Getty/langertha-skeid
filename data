@@ -1,0 +1,14 @@
+---
+class: standard
+created: 2026-11-19T06:12:38Z
+id: 134
+priority: low
+status: backlog
+tags:
+- cli
+title: 'skeid usage-purge: option errors exit 255 via die, and _run_keyid comment
+  sits above _run_usage_purge'
+updated: 2026-11-19T06:12:38Z
+---
+
+Found in k132 (POD audit): in bin/skeid, usage-purge option conflicts (--before with --retention; --retention without usage_store.retention_days) end through die (exit 255), not a usage error (exit 2) like the other subcommands. The comment block for _run_keyid sits above _run_usage_purge. The POD now only says they "end the command with a message".
