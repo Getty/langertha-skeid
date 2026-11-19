@@ -201,7 +201,7 @@ one policy object, and a key that takes the default is not listed at all. C<deny
 node selection, not just the plan, so a denied node cannot be reached by asking for its own
 model name instead of an alias. A refusal is C<403>, never a capacity error.
 
-The optional C<names:> section maps a readable name to a customer key id (karr #17). It makes
+The optional C<names:> section maps a readable name to a customer key id (skeid k17). It makes
 C<keys:> entries legible and confines key rotation to a single line -- change the id a name
 points at, and every policy line that named the customer follows. Its values are ids from
 C<skeid keyid>, never customer keys, so the config still holds no secret; it is read only at
@@ -373,9 +373,15 @@ C<anthropic-beta> and C<OpenAI-Beta> only, plus its key and C<User-Agent: Langer
 must name C<api_key_env> or C<api_key_ref>. C<internal> is the deployment's own: it gets the
 client's headers except the hop-by-hop ones, C<X-Forwarded-*>, C<Forwarded>, C<X-Real-IP>,
 C<Cookie> and the correlation header, and only an internal node without a key source is handed
-the client's own C<Authorization> / C<X-Api-Key> (the pass-through). B<Incompatible:> a keyless
-node with no C<trust> stops loading until it gets a key or C<trust: internal>. The admin route
+the client's own C<Authorization> / C<X-Api-Key> (the pass-through). The admin route
 C<GET /skeid/config> lists each node's C<trust>.
+
+B<INCOMPATIBLE since 0.005:> a node with neither C<api_key_env> nor C<api_key_ref> and no
+C<trust: internal> fails the config load. At start that stops Skeid; on a reload the running
+config stays in force and the error is reported by L</reload_status>, so the new file never
+takes effect. Before upgrading, give every keyless node a key source or C<trust: internal> --
+typically a local vLLM or llama.cpp node that needs no key. L</add_node> and
+C<POST /skeid/nodes> refuse such a node the same way.
 
 The section replaces the whole inventory when it changed -- nodes added through the admin API are
 lost then -- and keeps the node list as it is when it did not: its inventory generation, its
@@ -539,7 +545,8 @@ key id is what has to be on the list.
 
 Customer keys from a database relation (ADR 0026), for when another application -- a
 self-service console -- issues and revokes them. Skeid runs one statement,
-C<SELECT key_id, name, policy, models FROM "skeid"."customer_keys">, and nothing else; the
+C<SELECT key_id, name, policy, models FROM "skeid"."customer_keys"> (with C<rate_column>, C<rate>
+as a fifth column), and nothing else; the
 owner provides the relation, typically as a view over its own tables, and grants C<SELECT> on it.
 The relation is quoted as written, so its case counts. One row per customer key id:
 
@@ -554,6 +561,12 @@ a C<names:> entry: the file cannot refer to it.
 
 =item * C<models> (C<text[]>): replaces the profile's model list, as a C<keys:> override does;
 C<NULL> keeps it, C<'{}'> is no models.
+
+=item * C<rate> (C<jsonb>, C<json> or text holding JSON), read only with C<rate_column: true>:
+the key's own request rate, in the shape of a policy's C<rate> (L</Per-Key Routing Policy>);
+C<NULL> keeps the policy's. It may only tighten the rate of the row's policy: a row asking for
+more is rejected with a reason. Without C<rate_column> the statement names four columns, so a
+view without C<rate> keeps working.
 
 =back
 
@@ -875,6 +888,11 @@ Default of L</route_wait_poll_ms> (25).
 =env SKEID_TRUST_KEY_ID_HEADER
 
 Default of L</trust_key_id_header>: C<1>, C<true>, C<yes> or C<on> turn it on.
+
+=env SKEID_CORRELATION_HEADER
+
+Default of L</correlation_header> (none): the name of the header a usage event takes its
+C<correlation_id> from.
 
 =env SKEID_FRONTEND_COUNT
 
@@ -1536,7 +1554,7 @@ has _config_file_missing => (
 =attr config_reload_interval
 
 The least time, in seconds, between two runs of a C<config_loader> (default 1; fractions
-allowed; 0 runs it on every dispatch, as before skeid #38).
+allowed; 0 runs it on every dispatch, as before skeid k38).
 
 A loader-based config is re-read from C<call_function>, which every request passes through
 several times. Without a throttle every request would rerun the loader. A config file normally
@@ -1744,7 +1762,7 @@ whose variable is empty or shorter than 32 bytes does not load, because a snapsh
 published unsigned or weakly signed. Neither does one without a credential to read it: an admin
 API key or a registry read key.
 
-C<read_key_env> names the variable holding the B<registry read key> (skeid #49). The snapshot
+C<read_key_env> names the variable holding the B<registry read key> (skeid k49). The snapshot
 route accepts it as a bearer token besides the admin API key; it opens no other route, so a
 fronting tier holding it cannot add nodes or flip health. A named variable that is empty does
 not load. C<registry_secret>, C<registry_read_key>, C<registry_ttl_s>, C<registry_instance_id>
@@ -6045,13 +6063,19 @@ sub _disconnect_usage_store {
 
 =item * L<Langertha::Skeid::Proxy> -- the HTTP application on top of this control plane, and its routes
 
-=item * L<skeid> -- C<serve>, C<usage> and C<keyid>
+=item * L<skeid> -- C<serve>, C<usage>, C<usage-purge>, C<capabilities> and C<keyid>
 
 =item * L<Langertha::Skeid::CapacityProbe> -- node capacity probes
 
 =item * L<Langertha::Skeid::UsageStore> -- where usage events go
 
 =item * L<Langertha::Skeid::KeyBroker> -- resolving a node's C<api_key_ref>
+
+=item * L<Langertha::Skeid::NodeFiles> -- the checks on nodes from C<node_files>
+
+=item * L<Langertha::Skeid::Rate> -- the shape of a key's C<rate>
+
+=item * L<Langertha::Skeid::CustomerSource> -- customer keys from a database relation
 
 =item * L<Langertha::Skeid::Registry> -- the signed Skeid-to-Skeid snapshot
 
