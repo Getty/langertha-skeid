@@ -41,12 +41,13 @@ The OpenBao address (default C<OPENBAO_ADDR>, else C<http://127.0.0.1:8200>).
 
 =attr role_id
 
-Required. The AppRole role id, injected at container start (C<OPENBAO_ROLE_ID>).
+The AppRole role id, injected at container start (C<OPENBAO_ROLE_ID>). Required, with
+L</secret_id>, unless L</token_file> is given.
 
 =attr secret_id
 
-Required. The AppRole secret id, injected at container start (C<OPENBAO_SECRET_ID>). Held in
-memory only.
+The AppRole secret id, injected at container start (C<OPENBAO_SECRET_ID>). Held in
+memory only. Required, with L</role_id>, unless L</token_file> is given.
 
 =attr renew_secs
 
@@ -571,7 +572,11 @@ sub DEMOLISH {
 
 =head1 DESCRIPTION
 
-This KeyBroker implementation fetches API keys from OpenBao KV-v2 secrets. Security model:
+This KeyBroker implementation fetches API keys from OpenBao KV-v2 secrets. It gets its token
+one of two ways: an AppRole login of its own (C<role_id> + C<secret_id>), or a token a starter
+keeps current in a file (L</token_file>, C<OPENBAO_TOKEN_FILE>). With a token file the broker
+neither logs in nor renews -- both are the starter's -- and only reads the file; the file should
+sit on a tmpfs. Security model of the AppRole mode:
 
 =over 4
 
@@ -589,14 +594,15 @@ L</start_renewal> runs.
 =item * If renewal fails after the token expired, the process dies, so the container restarts
 and logs in again.
 
-=item * No secret is ever written to disk. Tokens and resolved keys live only in memory, and are
-dropped when the broker is destroyed.
+=item * Skeid never writes a secret to disk. Tokens and resolved keys live only in memory, and
+are dropped when the broker is destroyed. (A token file is written by the starter, not by
+Skeid.)
 
 =back
 
 =seealso
 
 L<Langertha::Skeid::KeyBroker>, L<Langertha::Skeid::Proxy/build_app> (which builds this broker
-from C<OPENBAO_ROLE_ID>, C<OPENBAO_SECRET_ID> and C<OPENBAO_ADDR>)
+from C<OPENBAO_TOKEN_FILE>, or C<OPENBAO_ROLE_ID> and C<OPENBAO_SECRET_ID>, and C<OPENBAO_ADDR>)
 
 =cut
