@@ -3,13 +3,14 @@ Revision history for Langertha-Skeid
 {{$NEXT}}
 
     - routing.catch_all { chat, embeddings }: a model name that is neither an alias nor a
-      node model goes to the configured target of the route's kind instead of a 404 (ADR
-      0033). chat covers /v1/chat/completions, /v1/messages, /api/chat and /api/generate;
-      embeddings covers /v1/embeddings, /api/embed and /api/embeddings. Off without the
-      key. The key's policy judges the target, so a 403 stays a 403; the answer names the
-      real target. The usage event of a bent request carries routed_model beside
-      requested_model (new nullable column, added on start with auto_migrate; the jsonlog
-      key only when set). Model lists are unchanged. GET /skeid/config shows the catch-all.
+      node model goes to the configured target of the route's kind instead of a 503
+      model_not_found (ADR 0033). chat covers /v1/chat/completions, /v1/messages,
+      /api/chat and /api/generate; embeddings covers /v1/embeddings, /api/embed and
+      /api/embeddings. Off without the key. The key's policy judges the target, so a 403
+      stays a 403; the answer names the real target. The usage event of a bent request
+      carries routed_model beside requested_model (new nullable column, added on start
+      with auto_migrate; the jsonlog key only when set). Model lists are unchanged. GET
+      /skeid/config shows the catch-all.
     - Nodes take trust: internal | external, default external (ADR 0032). An external
       node gets only Content-Type, Accept, anthropic-version, anthropic-beta and
       OpenAI-Beta of the client's headers, plus its own key and User-Agent:
