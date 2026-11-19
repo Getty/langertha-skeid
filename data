@@ -1,0 +1,14 @@
+---
+class: standard
+created: 2026-11-19T06:12:29Z
+id: 133
+priority: medium
+status: backlog
+tags:
+- release
+- docker
+title: DZIL_DOCKER_API_SKIP=1 still builds the Docker image locally
+updated: 2026-11-19T06:12:29Z
+---
+
+Found in k132: DZIL_DOCKER_API_SKIP=1 dzil test --release (and dzil build) runs [@Author::GETTY::Docker/Docker::API] "building image" and tags raudssus/langertha-skeid:0 and :0.005 locally, although the dist.ini comment says the variable means no engine contact. Nothing pushed. Check the bundle (Author::GETTY::Docker / Docker::API) or fix the dist.ini comment.
