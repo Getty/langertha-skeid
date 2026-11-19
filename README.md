@@ -32,8 +32,9 @@ The words used here (node, tier, admission, saturation, customer key id, ...) ar
 provider -- must name a key of its own
 ([ADR 0032](docs/adr/0032-a-node-is-internal-or-external-and-an-external-node-hears-only-what-it-needs.md)).
 A keyless node without `trust: internal` fails the config load; on a reload Skeid keeps the old
-config in force, so the change shows up only in the log and in `GET /health`
-(`config_reload.ok`). Before you upgrade, add a key source to such a node, or `trust: internal`
+config in force, so the change shows up only in the log, in `GET /health`
+(`config_reload.ok`, without the message) and in the admin `GET /skeid/config` (`reload`, with
+the message). Before you upgrade, add a key source to such a node, or `trust: internal`
 if it is your own server that takes no key -- see [Nodes](#nodes). The same change stops Skeid
 from handing the client's `X-Forwarded-*`, `Forwarded`, `X-Real-IP` and `Cookie` headers to an
 internal node, and sends an external node only the few client headers it needs.
