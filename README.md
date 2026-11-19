@@ -399,10 +399,43 @@ routing:
   wait_poll_ms: 25             # how often it re-checks (default 25, minimum 1)
   frontend_count: 1            # separate Skeid hosts sharing these nodes (default 1)
   trust_key_id_header: false   # believe x-skeid-key-id (default false): only behind a front end that authenticates callers
+  correlation_header: X-Correlation-ID   # the caller's own id, recorded on the usage event (default none)
+  catch_all:                   # where an unknown model name goes, per kind of route (default none)
+    chat: qwen3-32b
+    embeddings: BAAI/bge-m3
 ```
 
-See [Capacity, admission and saturation](#capacity-admission-and-saturation) for what these
-do.
+See [Capacity, admission and saturation](#capacity-admission-and-saturation) for what the first
+four do.
+
+**`correlation_header`** names a request header whose value the usage event records as
+`correlation_id`, to join Skeid's usage with the caller's own records. The value is taken
+unchanged when it is 8 to 64 characters of `A-Z a-z 0-9 . _ -` and ignored otherwise. The header
+is never sent on to a node. `SKEID_CORRELATION_HEADER` sets the default.
+
+**`catch_all`** names, per kind of route, the model that a model name matching nothing is routed
+to, for clients that were configured with a model name Skeid has never heard of
+([ADR 0033](docs/adr/0033-an-unknown-model-name-goes-to-the-catch-all-of-its-route-kind.md)). It
+is off without the key, and for a kind it does not name.
+
+- The kind comes from the route, never from the name. `chat` covers `/v1/chat/completions`,
+  `/v1/messages`, `/api/chat` and `/api/generate`; `embeddings` covers `/v1/embeddings`,
+  `/api/embed` and `/api/embeddings`. Audio, rerank, documents, realtime and the MCP gateway are
+  not bent. Any other key under `catch_all`, or a target that is not a non-empty string, fails
+  the load.
+- Only a name that is neither an alias nor the `model` of a chat node (healthy or not) is bent;
+  a request with no model name is bent too. A known name keeps its normal routing: a model whose
+  nodes are down stays `503`. A chat node without a `model` serves every name, so with one the
+  catch-all never applies.
+- The target is a node model or an alias, and from there the request is an ordinary request for
+  it: tiers, wait, admission. The key's policy and rate judge the target, so a key that may not
+  reach it gets the `403` it would get asking for it by name. The answer and its errors name the
+  target, never the name the client made up.
+- The target is not checked at load; until a node serves it, a bent request is answered
+  `503 model_not_found`.
+- The usage event keeps the client's name as `requested_model` and records the target as
+  `routed_model`, set only on a bent request. `/v1/models`, `/api/tags` and the manifest do not
+  list it; `GET /skeid/config` shows it.
 
 ### Model aliases and tiers
 
@@ -421,10 +454,13 @@ aliases:
       - tags: [cloud, groq]       # a node needs every listed tag
         model: llama-3.3-70b-versatile
         # engine: groq            # optional engine constraint
+        # wait_ms: 0              # the last tier defaults to routing.wait_timeout_ms
 ```
 
 - A tier with no eligible node is skipped at once; a tier whose nodes are all busy waits its
-  `wait_ms` and then falls through.
+  `wait_ms` and then falls through. An earlier tier that sets no `wait_ms` waits 0; the **last**
+  tier that sets none waits `routing.wait_timeout_ms`, like a model without an alias. Write
+  `wait_ms: 0` on the last tier to answer `429` at once.
 - A model without an alias is a single implicit tier that waits `routing.wait_timeout_ms`, so
   a config without aliases routes as it always did.
 - The usage event records both the served model (`model`, what is priced) and the
@@ -1296,7 +1332,7 @@ Routing picks a node in two steps
 Weighted round-robin walks the eligible nodes, skipping those that are not admitted. When a
 tier has eligible nodes but none admits, the request waits (non-blocking, polling every
 `wait_poll_ms`) for that tier's `wait_ms`, or `routing.wait_timeout_ms` for a model without an
-alias. Then:
+alias and for the last tier of an alias that sets no `wait_ms`. Then:
 
 | Answer | When |
 | --- | --- |
