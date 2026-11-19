@@ -1,5 +1,5 @@
 package Langertha::Skeid::Proxy;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: Multi-format LLM proxy (OpenAI, Anthropic, Ollama) powered by Langertha::Skeid routing
 use strict;
 use warnings;

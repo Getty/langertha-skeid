@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::MCP;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: The MCP gateway's wire -- relayed headers, upstream URLs and the server listing
 use strict;
 use warnings;

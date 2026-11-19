@@ -1,5 +1,5 @@
 package Langertha::Skeid::Proxy::RelayContent;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: Upstream response content that is always relayed as raw bytes
 use Mojo::Base 'Mojo::Content::Single';
 

@@ -1,5 +1,5 @@
 package Langertha::Skeid::Registry;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: Signed Skeid-to-Skeid capacity snapshots: encoding, signing, verification, mapping
 use strict;
 use warnings;

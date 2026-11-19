@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol::Anthropic;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: Translate between the Anthropic Messages format and the upstream OpenAI call
 use strict;
 use warnings;

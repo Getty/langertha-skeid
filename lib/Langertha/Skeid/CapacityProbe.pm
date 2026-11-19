@@ -1,5 +1,5 @@
 package Langertha::Skeid::CapacityProbe;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: Background probes that report what a node's real capacity is
 use Moo;
 use Carp qw(croak);

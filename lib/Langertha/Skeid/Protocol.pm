@@ -1,5 +1,5 @@
 package Langertha::Skeid::Protocol;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: Shared helpers for Skeid wire-format translation
 use strict;
 use warnings;

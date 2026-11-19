@@ -1,5 +1,5 @@
 package Langertha::Skeid::NodeFiles;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: Nodes from a second, less trusted file, under the constraints the main config sets
 use strict;
 use warnings;

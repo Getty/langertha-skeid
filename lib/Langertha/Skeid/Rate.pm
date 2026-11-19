@@ -1,5 +1,5 @@
 package Langertha::Skeid::Rate;
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 # ABSTRACT: The request rate of a policy: its shape, and whether one rate is within another
 use strict;
 use warnings;
