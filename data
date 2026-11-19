@@ -1,0 +1,38 @@
+---
+claimed_at: 2026-11-19T03:59:46Z
+claimed_by: claude
+class: standard
+completed: 2026-11-19T03:59:46Z
+created: 2026-11-19T03:17:47Z
+id: 129
+priority: high
+started: 2026-11-19T03:20:02Z
+status: done
+tags:
+- routing
+title: 'Catch-all by kind: with one chat and one embedding, any model name routes
+  to the right one'
+updated: 2026-11-19T03:59:46Z
+---
+
+Getty 2026-11-19: "wir sollten noch in skeid einen modus einbauen der erlaubt das wenn man nur einen chat und einen embedding hat, das es dann quasi die model setting ignorieren kann und jedes model immer zu den richtigen führt".
+
+Case: a node Skeid (e.g. synapse) offers exactly one chat model and one embedding model. Clients send whatever model name they were configured with (gpt-4o, qwen3, text-embedding-3-small, nomic-embed, …). Today that is a 404/400 unknown model. Wanted: the request goes to the right one by its kind.
+
+Proposal (to be confirmed in an ADR):
+- Config: `routing.catch_all: { chat: <model or alias>, embeddings: <model or alias> }` (maybe also `rerank`, `audio` later). Without the key nothing changes.
+- The kind comes from the route, not from the name:
+  - chat: /v1/chat/completions, /v1/completions, /v1/responses, /api/chat, /api/generate, Anthropic /v1/messages;
+  - embeddings: /v1/embeddings, /api/embed, /api/embeddings.
+- Only names that match no model and no alias are bent. Known names keep their normal routing, and the catch-all does not override policies: a key that may not use the target model still gets 403.
+- Answer: the `model` field reports the real target. The usage event records both, requested_model and routed_model.
+- /v1/models lists the real models and the aliases, not the catch-all; optionally a note in GET /skeid/config.
+- Tests: chat and embedding routes with an unknown name, an Ollama route, a known name unchanged, policy refusal unchanged, the usage event with both names, and the config without catch_all byte-identical.
+
+First user: synapse (chat → qwen3.8-flash-next-unc-q5, embeddings → qwen3-embedding-4b).
+
+2026-11-19 claude: ADR 0033 + CONTEXT.md term Catch-all committed locally (17c41a4, branch worktree-skeid-k129). No code, no tests yet: the first spawn (skeid-proxy-test-writer, red tests) was refused by the briefing hook. Design is in the ADR.
+
+2026-11-19 claude — DONE: ADR 0033, CONTEXT.md term Catch-all, routing.catch_all {chat, embeddings}, catch_all_target, six handlers bent, routed_model on the usage event (DBI nullable column + both schemas, jsonlog key only when set), GET /skeid/config, capabilities, POD, skills, one Changes entry. Commits on branch worktree-skeid-k129 (local, not pushed): 17c41a4 ADR, 45536a9 routed_model in stores, 9164764 catch-all + t/98-catch-all.t + Changes, c1d5384 skills, 50a6b5d Changes wording. VERIFIED: prove -lr t/ by the main agent on the implementation tree: Files=114, Tests=6495, PASS; skipped themselves: t/90-customer-source-postgresql.t, t/950-live-docling.t, t/951-live-speaches.t (env vars unset). t/98-catch-all.t 23/23 on the final head. OPEN: routed_model on a real PostgreSQL not exercised (sqlite only); the key-rate refusal event of a bent request has no test; bin/skeid usage does not print routed_model; drift, predates k129: correlation_header is not in @CONFIG_STATE, so a load failing after the routing section leaves a changed header in force. Sources karr and langertha were trusted by the cai-admin session to unblock the agent spawns.
+
+Abgenommen von cai-admin am 2026-11-19: ADR 0033 und Diff gelesen, prove -lr t/ selbst gefahren (Files=114, Tests=6495, PASS), auf main gepusht (50a6b5d). Kein Release, das macht Getty. Offen: routed_model gegen ein echtes PostgreSQL, Test für den Weg 'Rate abgelehnt nach Umbiegen', skeid usage zeigt routed_model nicht.
