@@ -1,0 +1,14 @@
+---
+class: standard
+created: 2026-11-19T04:56:58Z
+id: 131
+priority: medium
+status: backlog
+tags:
+- usage
+title: 'jsonlog usage store: one file per event grows without bound — retention or
+  rotation'
+updated: 2026-11-19T04:56:58Z
+---
+
+Measured on synapse 2026-11-19 04:56 UTC (cai-fleet): /var/log/skeid/events/ holds one file per usage event, ~28k files / 113 MB after five days of light traffic; 'ls events/*' fails with 'Argument list too long'. Disk is fine (11 %), but the directory grows without bound. Decide: daily files or rotation, and let usage_store.retention_days / skeid usage-purge --retention cover the jsonlog store with a schedule (Changes says both built-in stores purge — check that jsonlog honours it in this layout). Test with a directory of many files.
