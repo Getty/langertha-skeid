@@ -58,8 +58,9 @@ blocks the loop.
 =head2 Client routes
 
 No Skeid credential is needed on these unless the config has a C<client_auth> section; then
-every one but C</health> answers C<401> to a key not on its list. See L</Customer identity>.
-The MCP routes exist only with an C<mcp> section and always need a key; see L</MCP routes>.
+every one but C</health> and the Swagger UI under C</docs> answers C<401> to a key not on its
+list. See L</Customer identity>. The MCP routes exist only with an C<mcp> section and always
+need a key; see L</MCP routes>.
 
   GET  /health                     {status: ok, proxy: skeid, config_reload: {...},
                                     customer_source: {...} with a customer_source}
@@ -70,8 +71,10 @@ The MCP routes exist only with an C<mcp> section and always need a key; see L</M
   POST /v1/audio/transcriptions    OpenAI audio: multipart upload, relayed as the node answers
   POST /v1/audio/translations      the same, to the node's translations endpoint
   POST /v1/rerank                  rerank: relayed as the node answers, translated for a TEI node
-  GET  /v1/realtime                realtime transcription: a WebSocket relayed as a session
   POST /rerank                     the same route under its other name
+  POST /v1/convert/file            docling-serve document conversion, multipart, relayed
+  POST /v1/convert/source          the same with sources in a JSON body
+  GET  /v1/realtime                realtime transcription: a WebSocket relayed as a session
   POST /v1/messages                Anthropic Messages, streamed or not
   POST /api/chat                   Ollama chat; streams unless "stream": false
   POST /api/generate               Ollama generate; streams unless "stream": false
@@ -411,14 +414,15 @@ instead.
 
 With C<client_auth>, that key id has to be on the section's list. Every client route checks it
 first -- C</v1/models>, C</v1/chat/completions>, C</v1/embeddings>, the C</v1/audio/*> routes,
-C</v1/rerank> and C</rerank>, C</v1/messages>, every C</api/*> route, C</.well-known/langertha.json> and,
-with an C<mcp> section, the MCP routes -- after picking up a
-changed config
+C</v1/rerank> and C</rerank>, the C</v1/convert/*> routes, C</v1/realtime> (at the handshake),
+C</openapi.json>, C</v1/messages>, every C</api/*> route, C</.well-known/langertha.json> and,
+with an C<mcp> section, the MCP routes -- after picking up a changed config
 (L<Langertha::Skeid/maybe_reload_config>), so a list change holds from the next request.
 No key is C<401> C<Missing API key>, a key whose id is not listed C<401> C<Invalid API key>,
 both with C<WWW-Authenticate: Bearer realm="skeid">, and nothing else happens for that request:
 the body is not parsed, no node is admitted or called, no usage event is written, and Skeid logs
-nothing about it. The answer names neither the key nor its id. C</health> and the C</skeid/*> routes are not checked;
+nothing about it. The answer names neither the key nor its id. C</health>, the Swagger UI under
+C</docs> and the C</skeid/*> routes are not checked;
 they have their own rules. Being let in widens nothing: the key's routing policy still applies.
 
 =head2 The upstream call
@@ -469,7 +473,11 @@ code C<invalid_api_key>; Anthropic: C<authentication_error>; see L</Customer ide
 upload over C<uploads.max_bytes> is C<413 invalid_request_error>; an audio request that is not a
 multipart form, or whose form has no usable C<model> field, is C<400 invalid_request_error>, as
 is a rerank request without a C<model>, a string C<query> or C<documents>. A
-request no node may serve for this key is C<403 permission_error>; a model no healthy node
+request no node may serve for this key is C<403 permission_error>; a key over its C<rate>
+(L<Langertha::Skeid/Per-Key Routing Policy>) is C<429> with C<Retry-After> (OpenAI: type
+C<rate_limit_exceeded>, code C<key_rate_limited>) before anything is routed, on every routed
+route but not on the MCP routes, and is recorded as a usage event with C<error_type>
+C<key_rate_limited>; a model no healthy node
 serves is C<503 model_not_found>; eligible nodes that stay full past the wait are
 C<429 rate_limit_error>; an upstream failure is its status (or C<502>) with type
 C<upstream_error>; a node whose own key cannot be resolved is
