@@ -397,8 +397,8 @@ USAGE
 
 =head1 DESCRIPTION
 
-Runs the Skeid proxy (L<Langertha::Skeid::Proxy>), reports recorded usage, and prints the
-customer key id a key routes and bills under. With no command, or when the first argument is an
+Runs the Skeid proxy (L<Langertha::Skeid::Proxy>), reports and purges recorded usage, prints
+what this Skeid can do, and prints the customer key id a key routes and bills under. With no command, or when the first argument is an
 option, the command is C<serve>. An unknown command prints the usage text and exits non-zero.
 
 The config file is described in L<Langertha::Skeid/CONFIGURATION>.
@@ -532,7 +532,32 @@ erasure request -- and/or those created before C<--before>, or before the retent
 C<usage_store.retention_days> with C<--retention>, the purge run a cron job makes. C<--dry-run>
 only counts. Prints the result as JSON, for the caller to record, and exits 0 when it succeeded,
 2 when not (the spool still holds events, the database is down) -- run it again then, it is
-idempotent.
+idempotent. C<--before> together with C<--retention>, and C<--retention> without a
+C<retention_days>, end the command with a message before anything is deleted.
+
+=opt --config, -c
+
+As for C<serve>: a missing file is an error; without the option, F<skeid.yaml> is read when it
+exists. The config's C<usage_store> is the store purged.
+
+=opt --api-key-id
+
+A customer key id whose events are deleted; repeat it for several. Ids given as arguments are
+added to these.
+
+=opt --before
+
+Only events with C<created_at> before this ISO 8601 UTC timestamp; with key ids, only those
+keys' events before it.
+
+=opt --retention
+
+C<--before> the cut-off of C<usage_store.retention_days>
+(L<Langertha::Skeid/usage_retention_before>).
+
+=opt --dry-run
+
+Counts what would be deleted and deletes nothing.
 
 =head2 capabilities
 
@@ -553,15 +578,21 @@ shell history. With no key at all it prints the usage text and exits non-zero.
 
 =head1 ENVIRONMENT
 
-C<serve> and C<usage> build a L<Langertha::Skeid>, which reads C<SKEID_ROUTE_WAIT_TIMEOUT_MS>,
-C<SKEID_ROUTE_WAIT_POLL_MS>, C<SKEID_TRUST_KEY_ID_HEADER>, C<SKEID_FRONTEND_COUNT>,
-C<SKEID_ADMIN_API_KEY>, C<SKEID_USAGE_DB>, C<SKEID_CAPACITY_MAX_AGE_MS> and
-C<SKEID_CONFIG_RELOAD_INTERVAL> (L<Langertha::Skeid/ENVIRONMENT>), and whatever variables the
-config names. C<serve> also reads:
+C<serve>, C<usage> and C<usage-purge> build a L<Langertha::Skeid>, which reads
+C<SKEID_ROUTE_WAIT_TIMEOUT_MS>, C<SKEID_ROUTE_WAIT_POLL_MS>, C<SKEID_TRUST_KEY_ID_HEADER>,
+C<SKEID_CORRELATION_HEADER>, C<SKEID_FRONTEND_COUNT>, C<SKEID_ADMIN_API_KEY>, C<SKEID_USAGE_DB>,
+C<SKEID_CAPACITY_MAX_AGE_MS> and C<SKEID_CONFIG_RELOAD_INTERVAL>
+(L<Langertha::Skeid/ENVIRONMENT>), and whatever variables the config names. C<serve> also reads:
 
 =env OPENBAO_ROLE_ID, OPENBAO_SECRET_ID
 
 Both set: upstream keys (C<api_key_ref>) are resolved from OpenBao through AppRole.
+
+=env OPENBAO_TOKEN_FILE
+
+Instead of AppRole: a file a starter keeps a current OpenBao token in, read at start and again
+when it changes (L<Langertha::Skeid::KeyBroker::OpenBao/token_file>). A missing or empty file,
+or C<OPENBAO_ROLE_ID>/C<OPENBAO_SECRET_ID> set as well, stops C<serve>.
 
 =env OPENBAO_ADDR
 
