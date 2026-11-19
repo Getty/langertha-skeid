@@ -25,6 +25,31 @@ billing. Upstream keys are resolved at request time and live only in memory.
 The words used here (node, tier, admission, saturation, customer key id, ...) are defined in
 [`CONTEXT.md`](CONTEXT.md).
 
+## Upgrading to 0.005
+
+**Incompatible: a node with neither `api_key_env` nor `api_key_ref` now needs
+`trust: internal`.** Nodes take a `trust` (default `external`), and an external node -- a
+provider -- must name a key of its own
+([ADR 0032](docs/adr/0032-a-node-is-internal-or-external-and-an-external-node-hears-only-what-it-needs.md)).
+A keyless node without `trust: internal` fails the config load; on a reload Skeid keeps the old
+config in force, so the change shows up only in the log and in `GET /health`
+(`config_reload.ok`). Before you upgrade, add a key source to such a node, or `trust: internal`
+if it is your own server that takes no key -- see [Nodes](#nodes). The same change stops Skeid
+from handing the client's `X-Forwarded-*`, `Forwarded`, `X-Real-IP` and `Cookie` headers to an
+internal node, and sends an external node only the few client headers it needs.
+
+Other behaviour that differs from 0.004:
+
+- An alias whose last tier sets no `wait_ms` now waits `routing.wait_timeout_ms`, like a model
+  without an alias, instead of answering `429` at once; write `wait_ms: 0` to keep the old
+  behaviour ([Model aliases](#model-aliases-and-tiers)).
+- A realtime session no longer passes the client's `autoload` query parameter to the node.
+- `POST /api/embed` and `POST /api/embeddings` exist; they answered `404` before.
+- New, all off unless configured: [`node_files`](#nodes-from-a-file-someone-else-writes),
+  [`routing.catch_all`](#routing), [key rates](#request-rate-per-key), a
+  [usage purge](#purging-usage-events) and `OPENBAO_TOKEN_FILE`. `skeid capabilities` lists what
+  a Skeid can do.
+
 ## Install
 
 ```bash
@@ -146,6 +171,10 @@ applies a changed file in full or not at all:
   survive reloads of a file without `nodes`.
 
 ### Nodes
+
+> **Incompatible since 0.005:** a node with neither `api_key_env` nor `api_key_ref` and without
+> `trust: internal` fails the config load, and a reload keeps the old config. Add a key or
+> `trust: internal` before upgrading (see Trust below, and [Upgrading](#upgrading-to-0005)).
 
 ```yaml
 nodes:
