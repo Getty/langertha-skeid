@@ -352,7 +352,44 @@ nodes:
 - One request is one slot, whatever its batch size: a request with 1000 inputs weighs like one
   with a single input. Choose `max_conns` with that in mind.
 - A JSON body above Mojolicious' 16 MiB message limit is refused as invalid JSON.
-- There is no Ollama embeddings face (`/api/embed`); only `/v1/embeddings` exists.
+- Ollama clients reach the same nodes through `POST /api/embed` and `POST /api/embeddings`
+  (see [Client protocols](#client-protocols)).
+
+### Nodes from a file someone else writes
+
+A GPU manager that knows where models run can publish them in a file of its own, which Skeid
+reads and reloads on change. Whoever writes that file is less trusted than whoever writes the
+main config, so the main config names each file together with what a node from it may say
+([ADR 0031](docs/adr/0031-nodes-from-a-less-trusted-file-are-checked-against-the-main-config.md)):
+
+```yaml
+node_files:
+  - path: /etc/skeid/gpm/nodes.yaml
+    allow_url_hosts: ['*.cai-gpm.svc']                          # required; * is one DNS label
+    allow_api_key_env: '^SKEID_NODE_GPM_[A-Z0-9_]+_API_KEY$'    # default: no api_key_env at all
+    allow_api_key_ref: false                                    # default false
+    allow_kinds: [chat, documents]                              # default [chat]
+    trust: internal                                             # default external
+```
+
+The file is a YAML list of nodes (or a mapping with only `nodes`) in the form of the `nodes`
+section, without `capacity`; its nodes are appended to the main config's. A file contributes
+nodes and nothing else.
+
+- **Deny by default.** A node's `url` must go to an allowed host (`http(s)`, no credentials in
+  it), its `api_key_env` must match `allow_api_key_env`, `api_key_ref` needs
+  `allow_api_key_ref: true`, its `kind` must be allowed, and its `id` must not be taken by the
+  main config or an earlier file. `trust` is the entry's to set for every node of the file: a
+  node may only repeat that value, and a node of an external entry needs a key source of its own.
+- **A node that breaks a rule is left out; the rest of the file loads.** `GET /skeid/config`
+  lists per file the nodes accepted and each rejection by position and rule, never by value.
+- **No client credential.** A node from a node file never gets the client's `Authorization` /
+  `X-Api-Key`, whatever its trust, because its URL was chosen by someone else.
+- **Read whole or not at all.** A file is re-read when its mtime, size or inode changes (a
+  ConfigMap swaps a symlink). A version that does not parse, or a file that is gone, keeps that
+  file's last good nodes. A file over 1 MiB, nested deeper than 16 levels or using YAML aliases
+  is refused.
+- A malformed `node_files` section fails the load like any other section.
 
 ### Routing
 
