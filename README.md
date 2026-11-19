@@ -8,10 +8,10 @@ OpenAI dialect, translates the answer back, and writes one usage event per reque
 billing. Upstream keys are resolved at request time and live only in memory.
 
 - **Routing**: weighted round-robin over the nodes that serve the requested model, with
-  admission control (`max_conns`), node tags, model aliases with fallback tiers, and a
-  per-key routing policy.
+  admission control (`max_conns`), node tags, model aliases with fallback tiers, a per-key
+  routing policy and request rate, and an optional catch-all for model names nobody knows.
 - **Three client formats**: OpenAI, Anthropic (`/v1/messages`) and Ollama (`/api/chat`,
-  `/api/generate`), all with streaming and tool calls.
+  `/api/generate`), all with streaming and tool calls; Ollama embeddings too.
 - **Metering**: one usage event per forwarded request (or per realtime session), priced at
   record time, including prompt cache reads and writes; stored as JSON files, SQLite or PostgreSQL, or handed to your own
   code.
@@ -106,7 +106,7 @@ bin/skeid usage --config skeid.yaml
 The image `raudssus/langertha-skeid` has `ENTRYPOINT ["perl", "-Ilib", "bin/skeid"]` and by
 default runs `serve --listen 0.0.0.0:8090 --config /etc/skeid/skeid.yaml`. Arguments after the
 image name replace the default command, so they start with the subcommand (`serve`, `usage`,
-`keyid`), not with `bin/skeid`. The default command needs a config mounted at
+`usage-purge`, `capabilities`, `keyid`), not with `bin/skeid`. The default command needs a config mounted at
 `/etc/skeid/skeid.yaml` and exits with `config file not found` without one; to start without a
 config, run `serve --listen 0.0.0.0:8090`.
 
@@ -707,6 +707,10 @@ dialects both go through as sent.
   that can refuse a session is a plain HTTP answer before the upgrade: `401` from
   [client authentication](#client-authentication), `403` from the key's policy, `503`, `429`
   after the route wait, `502` when the node refuses its WebSocket (Skeid opens the node's first).
+- **`autoload` is not forwarded.** The node's WebSocket URL carries the served model and the
+  client's other query parameters as sent, but never `autoload`: a llama.cpp router loads a
+  model on `?autoload=true` even when started with `--no-models-autoload`, and whether a node
+  loads a model is the operator's decision, not the client's.
 - **A key from a browser**: a page cannot set `Authorization` on a WebSocket, so
   `Sec-WebSocket-Protocol: realtime, openai-insecure-api-key.<key>` is read, behind the same
   client gate. It is never echoed (the answer selects `realtime`), logged, or passed to the node.
@@ -906,6 +910,7 @@ in the process list; in production, name the variable in the config.
 | `SKEID_ROUTE_WAIT_POLL_MS` | `25` | default for `routing.wait_poll_ms` |
 | `SKEID_FRONTEND_COUNT` | `1` | default for `routing.frontend_count` |
 | `SKEID_TRUST_KEY_ID_HEADER` | off | default for `routing.trust_key_id_header` (`1`/`true`/`yes`/`on`) |
+| `SKEID_CORRELATION_HEADER` | — | default for `routing.correlation_header` |
 | `SKEID_CAPACITY_MAX_AGE_MS` | `5000` | how long a capacity reading is trusted (`0`: forever) |
 | `SKEID_USAGE_DB` | — | SQLite path used when the config has no `usage_store` |
 | `SKEID_ADMIN_API_KEY` | — | admin key when the config names none (see above) |
@@ -1408,6 +1413,15 @@ token has expired the process exits, so the container restarts and logs in again
 ([ADR 0003](docs/adr/0003-secrets-live-in-memory-only.md)). The TLS certificate is verified
 unless `OPENBAO_VERIFY_SSL=0`. Only key references appear in config, logs and usage events.
 
+**A token from a file.** An AppRole `secret_id` is single use, so with many processes behind one
+starter (`--workers`, several instances) only the first could log in. Set `OPENBAO_TOKEN_FILE`
+instead of the AppRole variables: the starter logs in once and keeps a token current in that
+file, and every Skeid process reads it. Skeid reads the file at start -- missing or empty stops
+the start -- again when it changes (mtime, size or inode, so replace it by rename) and on every
+renewal tick, and never renews the token itself: the starter does. A file that goes missing or
+empty later is warned about and the last token stays in use until OpenBao refuses it. Setting
+both modes stops the start. The token is never logged.
+
 ## Capacity, admission and saturation
 
 Routing picks a node in two steps
@@ -1571,6 +1585,9 @@ skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
             [--db /path/to.sqlite] [--dsn dbi:Pg:...]
             [--db-user USER] [--db-pass PASS | --db-pass-env ENV]
             [--api-key-id ID] [--model NAME]
+skeid usage-purge [--config skeid.yaml] [--api-key-id ID ...] [ID ...]
+            [--before ISO8601 | --retention] [--dry-run]
+skeid capabilities
 skeid keyid [KEY ...]
 ```
 
@@ -1582,6 +1599,15 @@ skeid keyid [KEY ...]
 - `usage` prints a report from the configured usage store; the
   `--backend`/`--log-path`/`--db`/`--dsn` options override it (`--log-path` implies jsonlog,
   `--db` sqlite, `--dsn` postgresql). `--config` behaves as for `serve`.
+- `usage-purge` deletes usage events of customer key ids (`--api-key-id`, repeatable, or as
+  plain arguments) and/or created before `--before`, or past `usage_store.retention_days` with
+  `--retention` (it excludes `--before`); `--dry-run` only counts. It prints the result as JSON
+  and exits `2` when the purge failed. See [Purging usage events](#purging-usage-events).
+- `capabilities` prints what this Skeid can do, one name per line (`documents`, `ollama_embed`,
+  `node_files`, `key_rate`, `customer_source_rate`, `usage_contract`, `usage_purge`,
+  `openbao_token_file`, `catch_all`). A name is added when its feature ships and never removed,
+  so a deployment can check one before it relies on a feature; the same list is
+  `Langertha::Skeid->capabilities`.
 - `keyid` prints the customer key id for each key, or for each line of stdin.
 
 ## Examples and lab recipes
