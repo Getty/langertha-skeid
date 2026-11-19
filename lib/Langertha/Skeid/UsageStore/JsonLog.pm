@@ -419,6 +419,7 @@ sub report {
         id => ($_->{id} // ''), created_at => ($_->{created_at} // ''), api_format => ($_->{api_format} // ''),
         endpoint => ($_->{endpoint} // ''), api_key_id => ($_->{api_key_id} // ''), model => ($_->{model} // ''),
         requested_model => ($_->{requested_model} // $_->{model} // ''),
+        (defined($_->{routed_model}) && length($_->{routed_model}) ? (routed_model => $_->{routed_model}) : ()),
         node_id => ($_->{node_id} // ''), status_code => $num->($_->{status_code}), ok => ($_->{ok} ? 1 : 0),
         input_tokens => $num->($_->{input_tokens}), output_tokens => $num->($_->{output_tokens}),
         total_tokens => $num->($_->{total_tokens}), cached_tokens => $num->($_->{cached_tokens}),

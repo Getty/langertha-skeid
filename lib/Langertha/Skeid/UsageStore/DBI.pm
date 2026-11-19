@@ -268,6 +268,9 @@ my @ADDED_COLUMNS = (
   ['finish_reason', 'TEXT'],
   ['ttft_ms', 'BIGINT'],
   ['correlation_id', 'TEXT'],
+  # The catch-all target a bent request was routed under (skeid k129, ADR 0033). Nullable: only
+  # a bent request has one, and an old row reads NULL.
+  ['routed_model', 'TEXT'],
 );
 
 sub _add_missing_columns {
@@ -701,7 +704,7 @@ my @EVENT_COLUMNS = qw(
   status_code ok duration_ms input_tokens output_tokens total_tokens cached_tokens tool_calls
   cost_input_usd cost_output_usd cost_total_usd error_type error_message requested_model
   content_bytes cost_cache_read_usd cost_cache_write_usd cache_write_tokens audio_seconds
-  documents pages finish_reason ttft_ms correlation_id
+  documents pages finish_reason ttft_ms correlation_id routed_model
 );
 # Nullable, written as NULL when the event has no such key -- "not measured", not a zero:
 #   cached_tokens          an event that carried no cache count
@@ -715,6 +718,7 @@ my @EVENT_COLUMNS = qw(
 #   finish_reason          an event whose answer had none (embeddings, audio, ...) and no error
 #   ttft_ms                only a streamed event that relayed a token
 #   correlation_id         an event whose caller sent none, or the config names no header
+#   routed_model           only an event of a request the catch-all bent (ADR 0033)
 # requested_model falls back to model, then ''.
 my $INSERT_SQL = 'INSERT INTO usage_events (' . join(', ', @EVENT_COLUMNS) . ') VALUES ('
   . join(', ', ('?') x @EVENT_COLUMNS) . ')';
@@ -1138,7 +1142,7 @@ sub _report {
 
   my $recent = $dbh->selectall_arrayref(
     "SELECT
-       id, created_at, api_format, endpoint, api_key_id, model, requested_model, node_id, status_code, ok,
+       id, created_at, api_format, endpoint, api_key_id, model, requested_model, routed_model, node_id, status_code, ok,
        input_tokens, output_tokens, total_tokens, cached_tokens, cache_write_tokens, tool_calls, cost_total_usd
      FROM usage_events
      $where_sql
@@ -1199,6 +1203,8 @@ sub _report {
         api_key_id    => ($_->{api_key_id} // ''),
         model           => ($_->{model} // ''),
         requested_model => ($_->{requested_model} // $_->{model} // ''),
+        # Only a request the catch-all bent (ADR 0033); absent otherwise.
+        (defined($_->{routed_model}) && length($_->{routed_model}) ? (routed_model => $_->{routed_model}) : ()),
         node_id         => ($_->{node_id} // ''),
         status_code   => $num->($_->{status_code}),
         ok            => ($_->{ok} ? 1 : 0),

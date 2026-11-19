@@ -51,7 +51,8 @@ returns
                     total_cost_usd }, ... ],
     recent   => [ { id, created_at, api_format, endpoint, api_key_id, model, requested_model,
                     node_id, status_code, ok, input_tokens, output_tokens, total_tokens,
-                    cached_tokens, cache_write_tokens, tool_calls, cost_total_usd }, ... ],
+                    cached_tokens, cache_write_tokens, tool_calls, cost_total_usd,
+                    routed_model }, ... ],     # routed_model: only a bent request (catch-all)
   }
 
 or C<< { ok => 0, enabled => 0, error => $message } >>.
