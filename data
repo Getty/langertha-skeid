@@ -1,0 +1,21 @@
+---
+class: standard
+completed: 2026-11-20T03:48:00Z
+created: 2026-11-20T02:49:27Z
+id: 135
+priority: medium
+started: 2026-11-20T03:31:28Z
+status: done
+tags:
+- skills
+title: 'Skills entschlacken: skeid-service-stack, skeid-relay-routes, skeid-routing,
+  skeid-protocols je auf ~6k, skeid-core auf ~6,5k'
+updated: 2026-11-20T03:48:00Z
+---
+
+Plan: ~/cai-admin/docs/skills-entschlacken-2026-11.md (cai-admin, 2026-11-20, Getty: zu viel Ballast in Skills). Regeln: skill-compressor (Verhalten erhalten), SKILL.md ≤ ~150 Zeilen bzw. ≤10k, Referenzdateien ≤8k eine Ebene tief, Description trigger-only ≤300 Zeichen, Namen nicht ändern (Briefings).
+Je SKILL.md: Kern und Fallen; Details (env, compose, openbao, image, node, config, Routen) nach references/. Description von skeid-relay-routes unter 300 Zeichen. Sie werden zu dritt oder viert gebrieft (rund 45k je Spawn).
+
+Done on branch worktree-skeid-skills (not pushed). SKILL.md before -> after (bytes): skeid-core 10435 -> 3734 (+2 refs, 7.5k), skeid-routing 14021 -> 2970 (+4 refs, 14.1k), skeid-protocols 13725 -> 3950 (+4 refs, 11.7k), skeid-relay-routes 16437 -> 3401 (+6 refs, 16.7k), skeid-service-stack 14180 -> 3213 (+6 refs, 13.9k). Every reference file is under 5k, one level deep. Descriptions are all under 300 chars (relay-routes 336 -> 260, service-stack rewritten trigger-only 234). Text moved verbatim, checked line by line against HEAD. Names and briefings unchanged. Commits: 31795d0 core, 79b50df routing (also points requested_model at skeid-usage), fad00c7 protocols, 3e8d679 relay-routes, 9ea4fb2 service-stack. prove -lr t/ PASS (114 files, 6495 tests). Fresh-session test per skill (claude -p): every skill found its matching reference and answered correctly. Caveats: (1) the protocols question without the skill named answered from code; the skill did not trigger on its own. (2) In headless -p the Skill tool partly hit a permission prompt, and the session then read the skill files directly. Drift (open): moved text still says skeid #30/#38-#43/#54-#56 instead of kNN; _limit_mcp_request is not in the relay-routes skill.
+
+Abgenommen von cai-admin am 2026-11-20: Diff nur unter .claude/skills, prove laut Bericht grün (nur Doku geändert), Größen 10–16k → 3–4k; gepusht.
