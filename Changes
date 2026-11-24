@@ -4,6 +4,11 @@ Revision history for Langertha-Skeid
     - The jsonlog file mode stores events on Windows with a perl before 5.34;
       there every append was refused as a log replaced while it waited for
       the lock.
+    - A request answered before its body is read (an upload refused with 413,
+      or with 401 before the body) no longer ends in a reset connection: the
+      server ends its side after the answer and reads off what the client
+      still sends, so a client on Windows, Cygwin or Haiku receives the
+      answer.
 
 0.005     2026-11-19 18:38:03Z
 

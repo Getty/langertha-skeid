@@ -6,6 +6,7 @@ use warnings;
 use Carp qw(croak);
 use Mojolicious;
 use Mojo::IOLoop;
+use Mojo::IOLoop::Stream;
 use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
 use Scalar::Util qw(blessed weaken);
@@ -684,6 +685,23 @@ sub build_app {
     my ($tx, $app) = @_;
     weaken $tx;
     $tx->req->content->once(body => sub { _limit_upload($app, $tx) if $tx });
+  });
+
+  # A request the server stops reading -- an upload _limit_upload cuts off, a body past Mojo's
+  # own limit -- is answered while its client may still be sending the body. Closed then, with
+  # that body unread, the connection is reset, and a client on Windows, Cygwin or Haiku drops
+  # the answer it had not read yet: it sees a reset, never the 413. Such a connection is closed
+  # as an HTTP server closes it instead, see _linger_close, in the loop of the server that holds
+  # it -- every server the app is started in, Test::Mojo's two included.
+  $app->hook(before_server_start => sub {
+    my ($server) = @_;
+    $server->on(request => sub {
+      my ($server, $tx) = @_;
+      return unless $tx->req->error;
+      my ($loop, $id) = ($server->ioloop, $tx->connection);
+      weaken $loop;
+      $tx->once(finish => sub { _linger_close($loop, $id) if $loop });
+    });
   });
 
   # Swagger UI assets: fetched on the first request for the UI, only when the config switches
@@ -1483,6 +1501,34 @@ sub _limit_upload {
     1;
   };
   $app->log->error('Setting the upload limit failed: ' . ($@ || 'unknown error')) unless $done;
+  return;
+}
+
+# How long _linger_close reads off a connection: until its client has been quiet for
+# $LINGER_IDLE seconds, and $LINGER_MAX at most.
+my $LINGER_IDLE = 2;
+my $LINGER_MAX  = 10;
+
+# Close a connection whose request was answered before its body was read, without resetting it:
+# end the server's side, so the client reads the answer and then the end of the stream, drop
+# what the client still sends, and close once it has finished, gone quiet or had its time. The
+# handle is taken from the server's stream with the steps a close takes but the closing itself,
+# so the loop and the server let go of the connection as on any close.
+sub _linger_close {
+  my ($loop, $id) = @_;
+  my $stream = $loop->stream($id) or return;
+  return if !$stream->handle || $stream->is_writing;
+  my $handle = $stream->timeout(0)->steal_handle;
+  $stream->emit('close');
+  shutdown $handle, 1;
+
+  my $linger = Mojo::IOLoop::Stream->new($handle);
+  $linger->on(error => sub { });
+  my $lid = $loop->stream($linger);
+  $linger->timeout($LINGER_IDLE);
+  my $timer = $loop->timer($LINGER_MAX => sub { shift->remove($lid) });
+  weaken $loop;
+  $linger->on(close => sub { $loop->remove($timer) if $loop });
   return;
 }
 

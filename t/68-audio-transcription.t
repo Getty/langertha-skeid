@@ -5,6 +5,7 @@ use utf8;
 use Test::More;
 use Test::Mojo;
 use Mojolicious;
+use IO::Socket::INET;
 use Mojo::Asset::File;
 use Mojo::IOLoop;
 use Mojo::IOLoop::Server;
@@ -759,6 +760,47 @@ subtest 'uploads.max_bytes: 413 without touching a node, hot reloaded' => sub {
     ok !$ok, 'a broken uploads section fails the load: ' . encode_json([$bad]);
     like $@, qr/uploads/, 'and the error names the section';
   }
+};
+
+# A refused upload is answered while its client still sends the body. A server that closes then,
+# with that body unread, resets the connection, and a client on Windows, Cygwin or Haiku drops the
+# answer it had not read yet: it sees a reset, never the 413. The server ends its side after the
+# answer and reads off the rest instead. Linux keeps an answer through a reset, so what is seen
+# here is the reset itself: a client that sends on is refused.
+subtest 'a refused upload is drained, not reset' => sub {
+  my ($t, $skeid) = proxy(config => { uploads => { max_bytes => 4096 } });
+  add_node($skeid, 'gpu-1', 'vllm');
+  local $SIG{PIPE} = 'IGNORE';
+  my $sock = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $t->ua->server->nb_url->port)
+    or die "Cannot connect: $!";
+  $sock->blocking(0);
+  syswrite $sock, request_head($T, 'Content-Type' => $FORM_TYPE, 'Content-Length' => 20_000_000)
+    . "--$BOUNDARY\r\n";
+
+  my ($answer, $eof, $reset) = ('');
+  my $read = sub {
+    while (defined(my $n = sysread $sock, my $buf, 65536)) {
+      return $eof = 1 unless $n;
+      $answer .= $buf;
+    }
+    $reset //= "$!" unless $!{EAGAIN} || $!{EWOULDBLOCK} || $!{EINTR};
+  };
+  ok run_until(sub { $read->(); $answer =~ m{\r\n\r\n.*\}}s || $reset }), 'the refusal is answered';
+  like $answer, qr{\AHTTP/1\.1 413 }, 'with 413';
+  ok run_until(sub { $read->(); $eof || $reset }) && $eof, 'and the end of the stream follows it';
+
+  # A client that does not read before it has sent its body sends on.
+  my ($sent, $refused) = (0);
+  run_until(sub {
+    my $n = syswrite $sock, 'a' x 65536;
+    if (defined $n) { $sent += $n }
+    elsif (!$!{EAGAIN} && !$!{EWOULDBLOCK} && !$!{EINTR}) { $refused = "$!" }
+    return $refused || $sent >= 1_048_576;
+  });
+  is $refused, undef, 'a client that sends on after the answer is not refused';
+  cmp_ok $sent, '>=', 1_048_576, 'the server reads off what it sends';
+  is scalar(@UPSTREAM), 0, 'and nothing went upstream';
+  close $sock;
 };
 
 subtest 'the default limit lets through what the server alone would not' => sub {
