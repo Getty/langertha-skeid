@@ -242,7 +242,10 @@ Deletes the events a request from L<Langertha::Skeid::UsageStore/purge_request> 
 L<Langertha::Skeid::UsageStore/The store contract> for the answer. In directory mode each
 matching event's file is removed. In file mode the file is rewritten without them under the
 same lock appends take, to a temporary file renamed over it, so no event appended meanwhile is
-lost and a crash leaves either the old file or the new one. An unreadable line is kept.
+lost and a crash leaves either the old file or the new one. Windows refuses to rename over a
+file held open: there the kept events are written back into the locked file itself once the
+temporary file holds them, and a crash meanwhile leaves that copy, F<PATH.purge-PID>. An
+unreadable line is kept.
 
 =cut
 
@@ -280,7 +283,7 @@ sub purge {
   # it while this one waited, and a lock on the replaced file guards nothing.
   my $lock;
   for (1 .. $CREATE_ATTEMPTS) {
-    open $lock, '>>', $path or return { ok => 0, error => "Cannot open $path: $!" };
+    open $lock, '+>>', $path or return { ok => 0, error => "Cannot open $path: $!" };
     flock($lock, LOCK_EX) or return { ok => 0, error => _io_error('lock', $path, "$!") };
     last if $self->_holds_file_at($lock, $path);
     close $lock;
@@ -288,16 +291,16 @@ sub purge {
   }
   return { ok => 0, error => "Cannot purge $path: it kept being replaced" } unless $lock;
   my $mode = (stat $lock)[2] & 07777;
-  open my $in, '<', $path or return { ok => 0, error => "Cannot read $path: $!" };
+  # Read through the locked handle: on Windows the lock keeps every other handle from reading.
+  seek($lock, 0, 0) or return { ok => 0, error => "Cannot read $path: $!" };
   my ($matched, @keep) = (0);
-  while (my $line = <$in>) {
+  while (my $line = <$lock>) {
     my $text = $line;
     chomp $text;
     my $ev = length($text) ? eval { decode_json($text) } : undef;
     if ($matches->($ev)) { $matched++; next }
     push @keep, $line;
   }
-  close $in;
   return { ok => 1, matched => $matched, deleted => 0 } if $request->{dry_run} || !$matched;
 
   my $tmp = "$path.purge-$$";
@@ -312,6 +315,20 @@ sub purge {
   }
   close($out) or $error ||= _io_error('close', $tmp, "$!");
   if ($error) { unlink $tmp; return { ok => 0, error => $error } }
+  if ($^O eq 'MSWin32') {
+    # Windows refuses to rename over a file held open, and an append would land in the old file
+    # once the lock is let go: the kept lines go back into the locked file. The copy stays until
+    # they are written.
+    (truncate($lock, 0) && seek($lock, 0, 0))
+      or return { ok => 0, error => _io_error('truncate', $path, "$!") };
+    print {$lock} @keep or return { ok => 0, error => _io_error('write', $path, "$!") };
+    if ($self->fsync) {
+      ($lock->flush && $lock->sync) or return { ok => 0, error => _io_error('sync', $path, "$!") };
+    }
+    close($lock) or return { ok => 0, error => _io_error('close', $path, "$!") };
+    unlink $tmp;
+    return { ok => 1, matched => $matched, deleted => $matched };
+  }
   unless (rename $tmp, $path) {
     my $err = "Cannot replace $path: $!";
     unlink $tmp;

@@ -19,6 +19,11 @@ Revision history for Langertha-Skeid
       the database is back. Windows refused to rename or remove a spool file
       the replay still held open, so nothing was ever replayed; with a perl
       before 5.34 no event could be spooled at all.
+    - A purge of a jsonlog store in file mode deletes on Windows. It read the
+      log through a second handle, which the lock it held kept from reading,
+      and so found nothing to delete; now the purge reads through the locked
+      handle and, since Windows refuses to rename over the open log, writes
+      the kept events back into it.
 
 0.005     2026-11-19 18:38:03Z
 
