@@ -228,6 +228,15 @@ my $NODES = [ { id => 'n1', trust => 'internal', url => 'http://127.0.0.1:1/v1',
     'a relative cache_dir is refused';
   is $load->({}), '', 'an empty section loads';
   is $load->({ swagger_ui => 'true', cache_dir => '/var/cache/skeid' }), '', 'true and an absolute path load';
+  {
+    # Windows' paths, under Windows' rules: absolute by the drive, not by a leading slash.
+    require File::Spec::Win32;
+    local @File::Spec::ISA = ('File::Spec::Win32');
+    is $load->({ swagger_ui => 1, cache_dir => 'C:\\ProgramData\\skeid' }), '',
+      'on Windows, a path with its drive is absolute';
+    like $load->({ swagger_ui => 1, cache_dir => 'C:skeid' }), qr/cache_dir must be an absolute path/,
+      'one relative to the working directory of its drive is refused';
+  }
 
   my $cfg = { openapi => { swagger_ui => 1, cache_dir => '/var/cache/skeid' } };
   my $skeid = Langertha::Skeid->new(config_loader => sub { $cfg }, config_reload_interval => 0);

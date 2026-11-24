@@ -7,6 +7,7 @@ use warnings;
 use Carp qw(croak);
 use POSIX qw(strftime);
 use Digest::SHA qw(sha1_hex sha256_hex);
+use File::Spec;
 use Scalar::Util qw(blessed looks_like_number refaddr reftype weaken);
 use Time::HiRes ();
 use YAML::PP;
@@ -5065,9 +5066,10 @@ sub _load_openapi {
     else { croak 'openapi.swagger_ui must be true or false' }
   }
 
+  # Absolute as the platform has it: on Windows by its drive (C:\...), not by a leading slash.
   my $dir = $section->{cache_dir};
   croak 'openapi.cache_dir must be an absolute path'
-    if defined($dir) && (ref($dir) || $dir !~ m{\A/} || $dir =~ /[\0\n]/);
+    if defined($dir) && (ref($dir) || !File::Spec->file_name_is_absolute($dir) || $dir =~ /[\0\n]/);
 
   $self->openapi_swagger_ui($ui);
   $self->openapi_cache_dir($dir);
