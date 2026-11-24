@@ -18,25 +18,30 @@ for my $case (
   [ sqlite  => sub { +{ backend => 'sqlite', sqlite_path => tempdir( CLEANUP => 1 ).'/u.sqlite' } } ]
 ) {
   my ( $name, $cfg ) = @{ $case };
-  my $skeid = Langertha::Skeid->new( usage_store => $cfg->() );
-  for my $i ( 0 .. $#ids ) {
-    $skeid->call_function( 'usage.record', {
-      api_format  => 'openai',
-      api_key_id  => $ids[$i],
-      model       => $models[$i],
-      status_code => 200,
-      ok          => 1,
-      duration_ms => 1,
-      metrics     => { usage => { input => 1, output => 1, total => 2 } }
-    } );
+  # DBD::SQLite is only recommended, so it may be missing.
+  SKIP: {
+    skip "$name: DBI/DBD::SQLite not available", 3
+      if $name eq 'sqlite' && !eval { require DBI; require DBD::SQLite; 1 };
+    my $skeid = Langertha::Skeid->new( usage_store => $cfg->() );
+    for my $i ( 0 .. $#ids ) {
+      $skeid->call_function( 'usage.record', {
+        api_format  => 'openai',
+        api_key_id  => $ids[$i],
+        model       => $models[$i],
+        status_code => 200,
+        ok          => 1,
+        duration_ms => 1,
+        metrics     => { usage => { input => 1, output => 1, total => 2 } }
+      } );
+    }
+    my $r1   = $skeid->call_function( 'usage.report', {} );
+    my $r2   = $skeid->call_function( 'usage.report', {} );
+    my @keys = map { $_->{api_key_id} } @{ $r1->{by_key} };
+    my @mods = map { $_->{model} } @{ $r1->{by_model} };
+    is_deeply( \@keys, [ sort @ids ],    $name.': by_key ascending by key id at equal cost' );
+    is_deeply( \@mods, [ sort @models ], $name.': by_model ascending by model at equal cost' );
+    is_deeply( [ map { $_->{api_key_id} } @{ $r2->{by_key} } ], \@keys, $name.': by_key stable across runs' );
   }
-  my $r1   = $skeid->call_function( 'usage.report', {} );
-  my $r2   = $skeid->call_function( 'usage.report', {} );
-  my @keys = map { $_->{api_key_id} } @{ $r1->{by_key} };
-  my @mods = map { $_->{model} } @{ $r1->{by_model} };
-  is_deeply( \@keys, [ sort @ids ],    $name.': by_key ascending by key id at equal cost' );
-  is_deeply( \@mods, [ sort @models ], $name.': by_model ascending by model at equal cost' );
-  is_deeply( [ map { $_->{api_key_id} } @{ $r2->{by_key} } ], \@keys, $name.': by_key stable across runs' );
 }
 
 done_testing;
