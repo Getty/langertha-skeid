@@ -1,0 +1,77 @@
+---
+claimed_at: 2026-11-24T22:15:24Z
+claimed_by: ct-1124
+class: standard
+completed: 2026-11-24T22:15:24Z
+created: 2026-11-24T18:49:52Z
+id: 136
+priority: critical
+started: 2026-11-24T22:15:24Z
+status: done
+tags:
+- cpantesters
+- tests
+- bug
+title: 'CPAN Testers: fix the 16 FAIL reports of 0.005'
+updated: 2026-11-24T22:15:30Z
+---
+
+Langertha::Skeid 0.005 on CPAN Testers (2026-11-24): 16 FAIL, 35 PASS.
+
+1. t/61-node-key-fail-closed.t test 100 (9 reports: OpenBSD, FreeBSD, Windows, Haiku): no
+   tests run for subtest "a client X-Api-Key does not travel beside a resolved
+   api_key_env, openai chat".
+2. t/52-jsonlog-collisions.t (7 reports: Android, GNU/Hurd, Solaris, Windows, Haiku).
+3. t/68-audio-transcription.t (5), t/90-realtime-limits.t (4), t/80-swagger-ui.t (4) on
+   Windows, armv6l, Cygwin, Haiku, Android ("a client that does not read the node",
+   "with 1013", "POST /v1/messages").
+4. Windows and armv6l: a row of files once or twice each (t/12, t/16, t/18, t/38, t/42,
+   t/56, t/57, t/59, t/61-proxy-client-abort, t/69, t/70, t/72, t/76, t/82, t/86, t/87,
+   t/88, t/94, t/98, t/200).
+
+Sample reports (GUID): 412b965e-e44e-11f1-8a8d-8bfe5433557d (1, OpenBSD 5.24.4).
+
+Done: each cause fixed with a test red before, or skipped with the reason where the
+platform cannot do it; full suite green; Changes entry for each lib fix.
+
+2026-11-24 19:01 Ursache 1 (t/61, 9 Berichte) behoben, 4cc3260: reine Testkorrektur. Drei Callbacks in build_stack (store_usage_event, Log-Subscriber, $hit) schlossen $stack ein, das Skeid und App hält -> Zyklus, jede der 135 Szenario-Apps blieb mit Listen-Socket und Verbindungen offen (6 fd je Subtest gemessen, lib gibt ohne Zyklus alles frei). Reproduziert mit ulimit -n 256 (Too many open files nach Test 120), nachher grün; neue Schlussprüfung (weak refs auf jede App) ist mit den alten Closures rot. Windows/Haiku 'Connect timeout' ist dieselbe Kurve (Socket-Grenze früher erreicht). Kein Changes-Eintrag (nur Test).
+
+2026-11-24 19:07 Ursache 2 (t/52, 7 Berichte) behoben, b10466b. Drei Teile: (a) Test erwartete glibc-strerror ('Input/output error', 'Bad file descriptor'), Solaris/Haiku/Android sagen 'I/O error'/'Bad file number' -> Erwartung aus demselben errno abgeleitet. (b) GNU/Hurd kann /dev/full nicht flocken -> Skip genau unter dieser Bedingung (flock-Probe). (c) lib: Windows-perl < 5.34 liefert für Handle st_dev 0 und für Pfad die Laufwerksnummer, Inode 0 -> die Identitätsprüfung nach dem Lock hielt jede Datei für ersetzt, file mode speicherte nichts (auch t/16, t/18, t/94-Seed, t/98 auf Windows 5.24). Fix: _holds_file_at, auf MSWin32 ohne Inode gilt die Datei als gehalten (Windows benennt keine offen gehaltene Datei um); überall sonst strenger Vergleich. Entscheidung: Ausnahme nur auf MSWin32, nicht allgemein 'ohne Inode', weil nur dort Ersetzen-während-gehalten ausgeschlossen ist. Neuer t/19 mit Windows-stat-Werten als Eingabe: vorher rot (1-2), nachher grün; dazu eine echte Ersetzung während des Locks (grün vorher und nachher, hält die strenge Hälfte).
+
+R3 (t/68 413/401 'Premature connection close', t/88:415/417, t/88:435 + t/72:942 17 MiB 502 via the in-app fake node): a request answered before its body is read was closed with unread data -> RST, which Windows/Cygwin/Haiku clients turn into a lost answer. Fix: lingering close (half-close, read off, close on EOF / 2 s quiet / 10 s max). Commit 1dfc8b1 on ct-1124; t/68 'a refused upload is drained, not reset' red before (Broken pipe). Full suite green (115 files, 6504 tests).
+
+R6 fixed in 627731f: a realtime session Skeid ends (queue overflow 1013) while the client still sends no longer resets the connection; Proxy::Linger now carries both the refused-upload and the realtime close. Red before: the new t/90-realtime-limits.t subtest broke with Broken pipe against the old lib. Full suite PASS.
+
+R4 fixed in 8f23363 (test-only): the CLI tests joined PERL5LIB with ':', which splits C:\ on Windows (the report's PERL5LIB shows blib\lib:C:\...); now $Config{path_sep}. No Linux red possible: ':' is the separator here. Full suite PASS on 8f23363.
+
+R5 fixed in 500c358 (test-only): t/59 x2, t/68, t/69, t/86 on armv6l gave the CLI child a 30-60 s deadline, and loading Skeid alone takes over 20 s there. The deadline is now 300 s (the run ends by itself), and t/86 waits for 'Listening at' before it sends the stop signal. Red before with a 25 s delay at start (a PERL5OPT module that sleeps in bin/skeid's BEGIN), green after. Full suite PASS on 500c358.
+
+R7a fixed in 11c1a10 (lib + Changes): openapi.cache_dir refused C:\... as not absolute (m{\A/}); now File::Spec->file_name_is_absolute. t/80 checks it under File::Spec::Win32: C:\ProgramData\skeid loads, C:skeid (drive-relative) is refused. Red before. Decision: the platform's own notion of absolute, no hand-made drive regex.
+
+R7b fixed in 9d465ea (test-only): t/80:145 'the loop served another route meanwhile' (Windows, armv6l, Android) raced a fake fetch that answered before /health was asked. The fetch is now held until the other route has answered, then released; this asserts the claim (the loop stays free) instead of a timing window.
+
+R8 fixed in e0491e2 (test-only): t/38 and t/56 on Windows and Haiku. A refused connect there surfaces only when the proxy's 10 s connect_timeout runs out, so the dead node's 502 came after the test's 10 s guard. The guard is now 30 s. Emulated on Linux with a listen backlog of 0 plus two filler connects (Connect timeout after 10.1 s): old tests crashed 'just after 72' and 'just after 50', new ones pass.
+
+R9 fixed in 3d19bcb (test-only): t/12 and t/76 on GNU/Hurd and Haiku died without DBD::SQLite, which is only recommended. Runtime check (eval require) and a SKIP with the count; red then skip with DBD::SQLite hidden via PERL5OPT.
+
+R11 fixed in 02ff7c2 (test-only): t/57 on armv6l waited a fixed 0.5 s for the registry probes; it now runs the loop until both peers are read (30 s guard). No red here (timing on a slow board). The other fixed spin() waits in t/57 (lines 356, 478, 485, 531, 683) were left alone: no report names them.
+
+R12 fixed in 5a1a62b (test-only): t/61-proxy-client-abort:413 on armv6l; 12 MiB through the stream parser takes over 10 s there; run_until is now 120 s. No red here (timing).
+
+R15 platform skip in fb795f3: t/87 on Windows. CustomerSource::DBI fetches in a Mojo::IOLoop subprocess and Mojo refuses one where perl emulates fork (d_pseudofork); the skip uses Mojo's own condition.
+
+R17 platform skip in cf42ebf: t/200 on Windows. Each Virtual node is a Langertha::Virtual::Server->spawn child; with emulated fork it is a thread and its TERM handler's POSIX::_exit ends the test process after the first scenario. Skip on d_pseudofork.
+
+R14 fixed in edb2f99 (lib + Changes): t/82 on Windows. The DBI spool replay renamed and unlinked spool files it still held open, which Windows refuses, so nothing was replayed; perl < 5.34 had no inode, so nothing could be spooled. The claim and the replay close the file first on MSWin32; _same_file takes a Windows stat without inode as the held file. New t/82-usage-dbi-spool-windows.t emulates both rules (refused rename/unlink of an open file, inode-less stat): old lib 15/22 fail, new 22 pass.
+
+R16 fixed in 33cd3b9 (lib + Changes): t/94 on Windows. The jsonlog file-mode purge read the log through a second handle while it held LOCK_EX; Windows locks are mandatory, so it read nothing and deleted nothing (matched 0), and its rename over the open log would have been refused. Now it reads through the locked handle (+>>), and on MSWin32 writes the kept lines back into the locked file after the temporary copy holds them; elsewhere tmp + rename stays. New t/94-usage-purge-windows.t emulates both rules: old lib fails exactly the report's lines (66, 74, 75, 82, 83, 87); with the read alone the rename fails; both halves green. t/94:171 (0600 kept) skips on MSWin32: no Unix permission bits there (report: 0666).
+
+R13 (502 for an upload over 16 MiB: t/72:942 Cygwin, t/88:435 Windows/Haiku/Cygwin) is the same cause as R3 and fixed by 1dfc8b1 (lingering close); t/70 (Windows 5.24) is R2.
+
+R10 open: t/42:257/259 on armv6l (one report): the Ollama stream got no status line and an empty body; the test did not print the transport error and it does not reproduce here. 7e3c66f makes post_json print it (diag only), so the next report names it. A stalled loop racing the 10 s guard does not explain it: without an answer the test dies instead.
+
+Also found (not fixed, out of scope): (1) customer_source dbi cannot fetch on Windows at all: Mojo subprocesses need a real fork, so it always starts degraded there. (2) Langertha::Virtual::Server->spawn on Windows ends the caller's process when its child is stopped (cross-repo, langertha). (3) On Windows and Haiku a refused upstream connect is noticed only at the proxy's 10 s connect_timeout, so each dead node costs 10 s before the next one is tried. (4) SwaggerUI default_cache_dir still tests XDG_CACHE_HOME/HOME with m{\A/}; on Windows it falls back to the temp dir (works, but not the user cache). (5) t/57 keeps five fixed spin() waits (lines 356, 478, 485, 531, 683). (6) jsonlog report and the other readers open the log without the lock: on Windows a read during another process's append meets the mandatory lock and reads nothing, so a report can undercount without an error.
+
+Abschluss (branch ct-1124, 16 commits on main 9511879, no rebase needed). Full offline suite on HEAD 7e3c66f: PASS, 117 files, 6537 tests; skipped only t/90-customer-source-postgresql, t/950-live-docling, t/951-live-speaches (env for live runs unset). Per cause: R1 t/61-node-key-fail-closed fixed 4cc3260 | R2 t/52, t/16, t/18, t/70, t/98, t/94 seed (Windows <5.34, errno texts, Hurd /dev/full) fixed b10466b | R3+R13 t/68 413/401, t/88, t/72 (reset on unread body) fixed 1dfc8b1 | R4 PERL5LIB separator (t/59 x2, t/68, t/69, t/86) fixed 8f23363 | R5 CLI deadline on armv6l fixed 500c358 | R6 t/90-realtime-limits fixed 627731f | R7a cache_dir drive path fixed 11c1a10 | R7b t/80 race fixed 9d465ea | R8 t/38, t/56 connect timeout fixed e0491e2 | R9 t/12, t/76 without DBD::SQLite fixed 3d19bcb | R11 t/57 fixed 02ff7c2 | R12 t/61-proxy-client-abort fixed 5a1a62b | R14 t/82 DBI spool on Windows fixed edb2f99 | R15 t/87 platform skip fb795f3 | R16 t/94 jsonlog purge on Windows fixed 33cd3b9 (t/94:171 platform skip) | R17 t/200 platform skip cf42ebf. Open: R10 t/42:257/259 armv6l (1 report), transport error unknown, diag added 7e3c66f. The Windows fixes are verified here by emulation only; a run on the Windows smoker is still due.
+
+2026-11-24 22:15 Rebased onto origin/main (six skill commits of 2026-11-20), merged to main and pushed. Full suite on the rebased branch: Files=117, Tests=6537, PASS. bin/smoke on main: perl 5.24 and 5.40 PASS. Open: R10 (armv6l t/42, one report, diag added); the Windows fixes still need a run on the Windows smoker.
