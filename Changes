@@ -15,6 +15,10 @@ Revision history for Langertha-Skeid
     - openapi.cache_dir takes a Windows path with its drive (C:\...) as the
       absolute path it is; the config refused it for not starting with a
       slash.
+    - On Windows the usage spool of a DBI store is replayed and emptied once
+      the database is back. Windows refused to rename or remove a spool file
+      the replay still held open, so nothing was ever replayed; with a perl
+      before 5.34 no event could be spooled at all.
 
 0.005     2026-11-19 18:38:03Z
 

@@ -790,11 +790,14 @@ sub _spool_files {
 }
 
 # True when the open $fh is still the file at $path: a replay may have renamed or removed it
-# between the open and the lock.
+# between the open and the lock. stat names a file by device and inode; perl before 5.34 on
+# Windows reports no inode there, and a handle's device differs from its path's, so stat cannot
+# tell -- but Windows refuses to rename or remove a file held open, so nothing can have.
 sub _same_file {
   my ($fh, $path) = @_;
   my @open = stat $fh or return 0;
   my @named = stat $path or return 0;
+  return 1 if $^O eq 'MSWin32' && !$open[1] && !$named[1];
   return $open[0] == $named[0] && $open[1] == $named[1];
 }
 
@@ -857,13 +860,19 @@ sub replay_spool {
   return \%res unless length $self->spool_dir;
   my $dir = $self->spool_dir;
 
-  # Claim: rename every writer file this process can lock right now.
+  # Claim: rename every writer file this process can lock right now -- under the lock, so no
+  # writer is between its check and its append. Windows refuses to rename a file held open, by
+  # this handle as well: there the handle goes first, and a writer that holds the file meanwhile
+  # makes the rename fail, which leaves the file to the next replay.
   for my $name ($self->_spool_files('writer')) {
     my $path = File::Spec->catfile($dir, $name);
     open my $fh, '<', $path or next;
     flock($fh, LOCK_EX | LOCK_NB) or next;
-    rename($path, "$path.replay-" . _host() . "-$$-" . ++$CLAIM_SEQ) if _same_file($fh, $path);
-    close $fh;
+    if (_same_file($fh, $path)) {
+      close $fh if $^O eq 'MSWin32';
+      rename($path, "$path.replay-" . _host() . "-$$-" . ++$CLAIM_SEQ);
+    }
+    close $fh if $^O ne 'MSWin32';
   }
 
   my $budget = $REPLAY_BATCH;
@@ -910,7 +919,10 @@ sub _replay_file {
     unless $written->{ok};
 
   # Committed: only now do the lines leave the spool. Should this fail, they stay and the next
-  # replay skips them as already present.
+  # replay skips them as already present. Windows refuses to replace or remove a file held open:
+  # there the handle goes first, and a replay that takes the file meanwhile finds its committed
+  # lines already present.
+  close $fh if $^O eq 'MSWin32';
   if (@lines) {
     my ($vol, $dir) = File::Spec->splitpath($path);
     my $tmp = File::Spec->catpath($vol, $dir, ".tmp-$$-" . ++$CLAIM_SEQ);
@@ -925,7 +937,7 @@ sub _replay_file {
   } else {
     unlink $path;
   }
-  close $fh;
+  close $fh if $^O ne 'MSWin32';
   return { ok => 1, replayed => $written->{written}, consumed => scalar(@take) };
 }
 
