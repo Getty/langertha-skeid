@@ -12,6 +12,12 @@ use YAML::PP;
 BEGIN {
   eval { require Langertha::Engine::Virtual; require Langertha::Virtual::Server; 1 }
     or plan skip_all => 'needs Langertha::Virtual::Server (a Langertha with Engine::Virtual and its HTTP endpoint)';
+  # Each node is a Langertha::Virtual::Server->spawn child. Where perl only emulates fork
+  # (Windows) the child is a thread of this process, and stopping it -- its TERM handler calls
+  # POSIX::_exit -- ends this process with it, after the first scenario.
+  require Config;
+  plan skip_all => 'the Virtual nodes need a real fork; this perl emulates it'
+    if $Config::Config{d_pseudofork};
 }
 BEGIN { delete @ENV{qw( SKEID_ADMIN_API_KEY SKEID_TRUST_KEY_ID_HEADER SKEID_USAGE_DB OPENBAO_ADDR OPENBAO_ROLE_ID OPENBAO_SECRET_ID )} }
 use Langertha::Skeid;
