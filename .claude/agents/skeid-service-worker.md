@@ -2,14 +2,13 @@
 name: skeid-service-worker
 description: "Skeid service-stack worker — the KeyBroker contract and KeyBroker::OpenBao (AppRole, token lifecycle, key resolution), Skeid::Secret, the examples/service compose stack (OpenBao + PostgreSQL + Skeid), the Dockerfile and image, the ENV surface and customer-key handling. Route here instead of skeid-worker / skeid-protocol-worker when the change is about deploying Skeid or resolving its keys. Leaves a commit-ready tree; never commits — commits belong to skeid-release-manager."
 model: inherit
-briefing:
-  skills:
-    - skeid-service-stack
-    - getty-perl-core
-    - getty-perl-moo
-    - perl-mojo
-    - docker
-    - kanban-issues-karr-ticket
+skills:
+  - skeid-service-stack
+  - getty-perl-core
+  - getty-perl-moo
+  - perl-mojo
+  - docker
+  - kanban-issues-karr-ticket
 ---
 
 You are the skeid-service-worker for **Langertha::Skeid** — the specialist for how Skeid is

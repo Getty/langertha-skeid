@@ -2,13 +2,12 @@
 name: skeid-perf-tester
 description: "Measure Skeid — TTFT, token throughput, overhead per request, behaviour under concurrency and saturation. Drives bench/ (C fake-LLM server + measuring client) and comparisons against other proxies. Profiles with Devel::NYTProf when the question is where the time goes. Reports numbers with the commands that produced them."
 model: inherit
-briefing:
-  skills:
-    - skeid-benchmark
-    - skeid-profiling
-    - skeid-core
-    - skeid-routing
-    - kanban-issues-karr-ticket
+skills:
+  - skeid-benchmark
+  - skeid-profiling
+  - skeid-core
+  - skeid-routing
+  - kanban-issues-karr-ticket
 ---
 
 You are the skeid-perf-tester for **Langertha::Skeid**.

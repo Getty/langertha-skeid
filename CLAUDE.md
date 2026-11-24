@@ -29,7 +29,7 @@ principle is a shared house rule (bundle `getty-cpan-dist@getty`), the lane is i
 | Measure TTFT / throughput, run `bench/`, NYTProf profiling, compare against other proxies | `skeid-perf-tester` |
 | Commits, `Changes`, card → done, pre-release audit | `skeid-release-manager` |
 
-The agents carry their skills via `briefing.skills` (see `.claude/agents/`); the main agent
+The agents carry their skills via `skills:` (see `.claude/agents/`); the main agent
 delegates rather than loading them. Repo-owned skill sources live under
 `.claude/skills/skeid-*`.
 

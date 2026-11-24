@@ -2,15 +2,14 @@
 name: skeid-relay-worker
 description: "Skeid relayed-route worker — /v1/audio transcriptions and translations, /v1/rerank (relayed, and rerank_format: tei translated upstream), upload limits and multipart forms, and the MCP gateway under /mcp/<name> with its mcp: config. Protocol::Audio, Protocol::Rerank, Protocol::Refusal, Protocol::MCP and their handlers in Proxy.pm. Route here instead of skeid-protocol-worker when the route is relayed rather than translated. Leaves a commit-ready tree; never commits — commits belong to skeid-release-manager."
 model: inherit
-briefing:
-  skills:
-    - skeid-relay-routes
-    - skeid-protocols
-    - skeid-core
-    - skeid-usage
-    - getty-perl-core
-    - perl-mojo
-    - kanban-issues-karr-ticket
+skills:
+  - skeid-relay-routes
+  - skeid-protocols
+  - skeid-core
+  - skeid-usage
+  - getty-perl-core
+  - perl-mojo
+  - kanban-issues-karr-ticket
 ---
 
 You are the skeid-relay-worker for **Langertha::Skeid** — the specialist for the routes Skeid

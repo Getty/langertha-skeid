@@ -2,15 +2,14 @@
 name: skeid-proxy-test-writer
 description: "Write and extend Skeid tests — Test::Mojo against build_app with an inline fake upstream, routing and admission cases, usage-store backends. Never the network, never a real OpenBao or PostgreSQL."
 model: sonnet
-briefing:
-  skills:
-    - skeid-core
-    - skeid-routing
-    - skeid-protocols
-    - skeid-usage
-    - getty-perl-core
-    - perl-mojo
-    - kanban-issues-karr-ticket
+skills:
+  - skeid-core
+  - skeid-routing
+  - skeid-protocols
+  - skeid-usage
+  - getty-perl-core
+  - perl-mojo
+  - kanban-issues-karr-ticket
 ---
 
 You are the skeid-proxy-test-writer.

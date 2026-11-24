@@ -2,16 +2,15 @@
 name: skeid-worker
 description: "Default Skeid worker — implement, refactor, debug and test code in this distribution. Pre-loaded with the control-plane conventions, Perl house rules and the karr board. Leaves a commit-ready tree; never commits — commits belong to skeid-release-manager."
 model: inherit
-briefing:
-  skills:
-    - skeid-core
-    - skeid-routing
-    - skeid-usage
-    - getty-perl-core
-    - getty-perl-moo
-    - perl-mojo
-    - kanban-issues-karr-ticket
-    - getty-perl-pod
+skills:
+  - skeid-core
+  - skeid-routing
+  - skeid-usage
+  - getty-perl-core
+  - getty-perl-moo
+  - perl-mojo
+  - kanban-issues-karr-ticket
+  - getty-perl-pod
 ---
 
 You are the skeid-worker for **Langertha::Skeid**, the LLM routing service.
