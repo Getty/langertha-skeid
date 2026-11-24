@@ -4,6 +4,7 @@ use warnings;
 use Test::More;
 use Test::Mojo;
 use Mojo::JSON qw( true false );
+use Scalar::Util qw( weaken );
 use Langertha::Skeid;
 use Langertha::Skeid::KeyBroker;
 use Langertha::Skeid::Proxy;
@@ -55,13 +56,18 @@ my @stream_frames = (
 );
 
 # One app per scenario: the broker belongs to the Skeid, and a scenario is "this Skeid, this node".
+# The callbacks capture the lists, never $stack: $stack holds the Skeid and the app, so a
+# callback holding $stack keeps every scenario's server and sockets open until the descriptor
+# limit ends the test (512 on OpenBSD, fewer sockets on Windows).
+my @released;
 sub build_stack {
   my ( %arg ) = @_;
   my $stack = { events => [], hits => [], log => [] };
+  my ( $events, $hits, $lines ) = @{$stack}{qw( events hits log )};
 
   my $skeid = ($arg{skeid_class} || 'Langertha::Skeid')->new(
     ($arg{broker} ? ( key_broker => $arg{broker} ) : ()),
-    store_usage_event => sub { push @{$stack->{events}}, $_[1]; return { ok => 1 } },
+    store_usage_event => sub { push @$events, $_[1]; return { ok => 1 } },
   );
   my $app = Langertha::Skeid::Proxy->build_app(skeid => $skeid);
   $app->mode('production');
@@ -69,12 +75,12 @@ sub build_stack {
   $app->log->unsubscribe('message');
   $app->log->on(message => sub {
     my ( $log, $level, @lines ) = @_;
-    push @{$stack->{log}}, join(' ', $level, @lines);
+    push @$lines, join(' ', $level, @lines);
   });
 
   my $hit = sub {
     my ( $c ) = @_;
-    push @{$stack->{hits}}, {
+    push @$hits, {
       path          => $c->req->url->path->to_string,
       authorization => $c->req->headers->authorization,
       x_api_key     => $c->req->headers->header('x-api-key'),
@@ -130,6 +136,8 @@ sub build_stack {
   );
 
   @{$stack}{qw( skeid t )} = ( $skeid, $t );
+  push @released, $app;
+  weaken $released[-1];
   return $stack;
 }
 
@@ -371,5 +379,8 @@ for my $face (@faces) {
     unlike $log, qr/\Q$CLIENT_KEY\E/, 'and never the client key';
   };
 }
+
+is scalar(grep { defined } @released), 0,
+  'every scenario released its app, and with it its listen socket and connections';
 
 done_testing;
