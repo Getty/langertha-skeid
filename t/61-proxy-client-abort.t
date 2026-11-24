@@ -410,7 +410,8 @@ subtest 'hanging up while a finished stream is still being written out' => sub {
   my $from = scalar @client_controllers;
   my $events = scalar @usage_events;
   my $client = open_client('/v1/chat/completions', chat('big-stream', stream => \1), deaf => 1);
-  ok run_until(sub { scalar(@usage_events) > $events }, 10), 'the upstream ended and the request was metered';
+  # 12 MiB through the proxy's stream parser: seconds here, over 10 on a slow ARM board.
+  ok run_until(sub { scalar(@usage_events) > $events }, 120), 'the upstream ended and the request was metered';
   is live_since($from), 1, 'the answer is still being written to a client that does not read';
   is $usage_events[-1]{ok}, 1, 'the upstream completed, so the request is metered as ok';
 
