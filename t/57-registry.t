@@ -655,7 +655,14 @@ sub downstream_config {
   $front_daemon->start;
   my $front_port = $front_daemon->ports->[0];
 
-  spin(0.5);   # build_app started the probes; let their first polls land
+  # build_app started the probes: wait for the first poll of each to land, however slow the box.
+  my $read = sub { (($front->capacity_reading($_[0]) || {})->{source} // '') eq 'registry' };
+  my $wait = Mojo::IOLoop->timer(30 => sub { Mojo::IOLoop->stop });
+  my $landed = Mojo::IOLoop->recurring(0.05 => sub {
+    Mojo::IOLoop->stop if $read->('peer-hot') && $read->('peer-cool');
+  });
+  Mojo::IOLoop->start;
+  Mojo::IOLoop->remove($_) for $wait, $landed;
   is_deeply [@{$front->capacity_reading('peer-hot') || {}}{qw(source used limit)}], ['registry', 8, 8],
     'the fronting tier reads the hot downstream as full';
   is_deeply [@{$front->capacity_reading('peer-cool') || {}}{qw(source used limit)}], ['registry', 0, 8],
