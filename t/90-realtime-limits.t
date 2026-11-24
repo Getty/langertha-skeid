@@ -5,7 +5,9 @@ use Test::More;
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use JSON::MaybeXS qw( decode_json );
+use IO::Socket::INET;
 use Mojo::IOLoop;
+use Mojo::WebSocket qw( WS_CLOSE WS_TEXT build_frame parse_frame );
 use Time::HiRes qw( time );
 use RealtimeHarness qw( settle run_until frame );
 
@@ -93,6 +95,53 @@ subtest 'a node that does not read, a client that does not stop: 1013, bounded' 
   paired($h, 'queue overflow');
   is $h->usage->[0]{ok}, 0, 'a failed session';
   is $h->usage->[0]{error_type}, 'realtime_queue_overflow', 'named';
+};
+
+# The same seen from a client of its own: Skeid ends the session while the client still sends.
+# A connection closed then, with that data unread, is reset, and a client on Windows, Cygwin or
+# Haiku loses the close frame on its way: it hears 1006, not 1013. Linux keeps the frame through
+# a reset, so what is seen here is the reset itself: a client that sends on is refused.
+subtest 'a session ended while its client sends is drained, not reset' => sub {
+  my $h = RealtimeHarness->new(config => { realtime => { max_queued_bytes => 100_000, max_message_bytes => 70_000 } });
+  $h->add_node('rt1');
+  $h->mode('stall');
+  local $SIG{PIPE} = 'IGNORE';
+  my $sock = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $h->t->ua->server->nb_url->port)
+    or die "Cannot connect: $!";
+  $sock->blocking(0);
+  syswrite $sock, join("\r\n", "GET $Q HTTP/1.1", 'Host: 127.0.0.1', 'Upgrade: websocket', 'Connection: Upgrade',
+    'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version: 13', '', '');
+
+  my ($in, $out, $close, $refused, $after) = ('', '', undef, undef, 0);
+  my $read = sub {
+    while (defined(my $n = sysread $sock, my $buf, 65536)) { last unless $n; $in .= $buf }
+  };
+  ok run_until(sub { $read->(); $in =~ /\r\n\r\n/ }), 'the handshake is answered';
+  like $in, qr{\AHTTP/1\.1 101 }, 'with 101';
+  $in =~ s/\A.*?\r\n\r\n//s;
+
+  my $frame = build_frame(1, 1, 0, 0, 0, WS_TEXT, frame({ type => 'input_audio_buffer.append', audio => 'A' x 60_000 }));
+  my $send = sub {
+    $out = $frame unless length $out;
+    my $n = syswrite $sock, $out;
+    if (defined $n) { substr($out, 0, $n, ''); $after += $n if defined $close }
+    elsif (!$!{EAGAIN} && !$!{EWOULDBLOCK} && !$!{EINTR}) { $refused //= "$!" }
+  };
+  my $heard = sub {
+    $read->();
+    while (ref(my $f = parse_frame(\$in, 1_000_000))) {
+      $close = unpack 'n', $f->[5] if $f->[4] == WS_CLOSE;
+    }
+  };
+  ok run_until(sub { $heard->(); $send->() unless defined $close; defined $close || $refused }, 20),
+    'the session is ended while the client sends';
+  is $close, 1013, 'the client reads the close frame, 1013';
+  run_until(sub { $send->(); $refused || $after >= 1_048_576 });
+  is $refused, undef, 'a client that sends on after the close frame is not refused';
+  cmp_ok $after, '>=', 1_048_576, 'what it sends is read off';
+  close $sock;
+  ok ended($h), 'the session is over';
+  is $h->usage->[0]{error_type}, 'realtime_queue_overflow', 'ended by the queue limit';
 };
 
 subtest 'a client that does not read the node\'s frames: 1013 as well' => sub {

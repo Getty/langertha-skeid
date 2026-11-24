@@ -5,6 +5,7 @@ use Moo;
 use Scalar::Util qw( weaken );
 use Time::HiRes qw( time );
 use Mojo::IOLoop;
+use Langertha::Skeid::Proxy::Linger;
 use Encode ();
 use Mojo::Util qw( encode );
 use Langertha::Skeid::Protocol::Realtime;
@@ -44,7 +45,8 @@ its usage event run before the worker exits.
 =back
 
 The module does I/O only through the two transactions and L<Mojo::IOLoop> timers, and knows no
-routing and no usage store: the finish callback is the proxy's.
+routing and no usage store: the finish callback is the proxy's. A side it closes lingers (see
+L<Langertha::Skeid::Proxy::Linger>), so a peer still sending reads the close frame.
 
 =cut
 
@@ -329,8 +331,11 @@ sub _end {
     $reason = Encode::decode('UTF-8', $bytes, Encode::FB_QUIET);
   }
   my ($client, $up) = delete @{$s}{qw( client upstream )};
+  # A side may still be sending -- a client that does not stop, a node that floods -- and a
+  # connection closed with its data unread would be reset, taking the close frame with it.
   for my $tx (grep { defined } $client, $up) {
     next if $tx->is_finished;
+    Langertha::Skeid::Proxy::Linger->on_close(Mojo::IOLoop->stream($tx->connection // ''));
     $tx->finish($o{code} // 1000, $reason);
   }
   return;

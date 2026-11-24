@@ -9,6 +9,9 @@ Revision history for Langertha-Skeid
       server ends its side after the answer and reads off what the client
       still sends, so a client on Windows, Cygwin or Haiku receives the
       answer.
+    - A realtime session Skeid ends while the other side still sends reaches
+      that side with its close code on Windows, Cygwin and Haiku as well (1013
+      for a full queue); the connection was reset and the side heard 1006.
 
 0.005     2026-11-19 18:38:03Z
 
