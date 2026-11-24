@@ -153,6 +153,8 @@ sub post_json {
   });
   Mojo::IOLoop->start;
   Mojo::IOLoop->remove($guard);
+  # An answer without a status line says why: the status alone reads as undef.
+  diag "POST $path: no answer: " . ($tx->error // {})->{message} unless defined $tx->res->code;
   return $tx->res;
 }
 
