@@ -2,6 +2,7 @@
 use strict;
 use warnings;
 use Test::More;
+use Config;
 use File::Temp qw(tempdir);
 use IO::Socket::INET;
 use Mojo::IOLoop;
@@ -14,6 +15,10 @@ use Langertha::Skeid::CustomerSource::DBI;
 
 eval { require DBD::SQLite; 1 } or plan skip_all => 'DBD::SQLite is needed';
 eval { require DBD::Pg; 1 }     or plan skip_all => 'DBD::Pg is needed for the hanging connect';
+# The child is a Mojo::IOLoop subprocess, and Mojo refuses one where perl only emulates fork
+# (Windows): the condition below is Mojo's own.
+plan skip_all => 'Mojo::IOLoop subprocesses need a real fork; this perl emulates it'
+  if $Config{d_pseudofork};
 
 my $FETCHER = 'Langertha::Skeid::CustomerSource::DBI';
 my $K1 = 'k_' . ('a' x 40);
