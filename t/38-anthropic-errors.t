@@ -138,7 +138,9 @@ sub post {
   my ($path, @body) = @_;
   my %headers = ('x-api-key' => 'sk-test', (ref($body[0]) eq 'HASH' ? %{shift @body} : ()));
   my $tx;
-  my $guard = Mojo::IOLoop->timer(10 => sub { Mojo::IOLoop->stop });
+  # Longer than the proxy's 10 s connect timeout: on Windows and Haiku a refused connect is
+  # noticed only when that runs out, and the dead node's 502 comes then.
+  my $guard = Mojo::IOLoop->timer(30 => sub { Mojo::IOLoop->stop });
   $ua->post("$base$path" => \%headers => @body => sub {
     (undef, $tx) = @_;
     Mojo::IOLoop->stop;
