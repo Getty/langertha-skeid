@@ -1,6 +1,9 @@
 Revision history for Langertha-Skeid
 
 {{$NEXT}}
+    - The jsonlog file mode stores events on Windows with a perl before 5.34;
+      there every append was refused as a log replaced while it waited for
+      the lock.
 
 0.005     2026-11-19 18:38:03Z
 

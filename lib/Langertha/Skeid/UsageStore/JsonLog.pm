@@ -160,6 +160,19 @@ sub _write_and_close {
   return $error;
 }
 
+# Whether $fh, locked, is still the file at $path: stat names a file by device and inode. perl
+# before 5.34 on Windows reports no inode there, and a handle's device differs from its path's,
+# so stat cannot tell -- but Windows refuses to rename over a file held open, so nothing can
+# have replaced it.
+sub _holds_file_at {
+  my ( $self, $fh, $path ) = @_;
+  my @now = stat $path;
+  return 0 unless @now;
+  my @held = stat $fh;
+  return 1 if $^O eq 'MSWin32' && !$held[1] && !$now[1];
+  return $held[0] == $now[0] && $held[1] == $now[1];
+}
+
 =method store
 
   my $res = $store->store($event);
@@ -210,9 +223,7 @@ sub store {
       close $fh;
       return { ok => 0, error => $error };
     }
-    my @held = stat $fh;
-    my @now  = stat $path;
-    last if @now && $held[0] == $now[0] && $held[1] == $now[1];
+    last if $self->_holds_file_at($fh, $path);
     close $fh;
     undef $fh;
   }
@@ -271,9 +282,7 @@ sub purge {
   for (1 .. $CREATE_ATTEMPTS) {
     open $lock, '>>', $path or return { ok => 0, error => "Cannot open $path: $!" };
     flock($lock, LOCK_EX) or return { ok => 0, error => _io_error('lock', $path, "$!") };
-    my @held = stat $lock;
-    my @now  = stat $path;
-    last if @now && $held[0] == $now[0] && $held[1] == $now[1];
+    last if $self->_holds_file_at($lock, $path);
     close $lock;
     undef $lock;
   }

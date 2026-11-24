@@ -4,9 +4,18 @@ use warnings;
 use Test::More;
 use File::Temp qw(tempdir);
 use JSON::MaybeXS qw(decode_json);
-use Errno qw(EIO);
+use Errno qw(EBADF EIO);
+use Fcntl qw(LOCK_EX LOCK_NB);
 
 use Langertha::Skeid::UsageStore::JsonLog;
+
+# The text of an errno as this platform's C library spells it: glibc says "Input/output error",
+# Solaris, Haiku and Android's bionic say "I/O error".
+sub strerror_of {
+  my ($errno) = @_;
+  local $! = $errno;
+  return "$!";
+}
 
 sub read_event {
   my ($file) = @_;
@@ -138,6 +147,10 @@ sub read_event {
 # be reported as a persisted usage event.
 SKIP: {
   skip '/dev/full is unavailable on this platform', 2 unless -e '/dev/full';
+  # The store locks the log before it appends; GNU/Hurd cannot lock a device.
+  open my $probe, '>>', '/dev/full' or skip "/dev/full cannot be opened for append: $!", 2;
+  flock($probe, LOCK_EX | LOCK_NB) or skip "/dev/full cannot be locked on this platform: $!", 2;
+  close $probe;
 
   my $store = Langertha::Skeid::UsageStore::JsonLog->new(
     path => '/dev/full',
@@ -161,7 +174,8 @@ SKIP: {
 
   my $res = $store->store({ marker => 'sync-failure' });
   ok(!$res->{ok}, 'fsync failure is not reported as persistence success');
-  like($res->{error}, qr/Cannot sync .*: Input\/output error/, 'fsync failure is identified');
+  my $eio = strerror_of(EIO);
+  like($res->{error}, qr/Cannot sync .*: \Q$eio\E/, 'fsync failure is identified');
 }
 
 # Induce a real close(2) failure after a successful flush/sync by closing the
@@ -179,7 +193,8 @@ SKIP: {
 
   my $res = $store->store({ marker => 'close-failure' });
   ok(!$res->{ok}, 'close failure is not reported as persistence success');
-  like($res->{error}, qr/Cannot close .*: Bad file descriptor/, 'close failure is identified');
+  my $ebadf = strerror_of(EBADF);
+  like($res->{error}, qr/Cannot close .*: \Q$ebadf\E/, 'close failure is identified');
 }
 
 # Forked workers inherit generator state. The first child id must detect the PID
