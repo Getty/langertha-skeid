@@ -1124,7 +1124,9 @@ sub run_skeid {
     exec $^X, '-w', $BIN, @args;
     die "exec: $!";
   }
-  my $deadline = time + 20;
+  # Generous: the run ends by itself, and loading Skeid alone takes over 20 seconds on a slow
+  # ARM board.
+  my $deadline = time + 300;
   my $code;
   while (time < $deadline) {
     if (waitpid($pid, WNOHANG) == $pid) { $code = $? >> 8; last }
