@@ -26,15 +26,18 @@ my %BODY = (
 my %DIGEST = map { $_ => sha256_hex($BODY{$_}) } keys %BODY;
 
 my @FETCHED;
+my @HELD;
 my $MODE = 'ok';
 
-# Answers from %BODY, on a timer so the answer is never synchronous.
+# Answers from %BODY, on a timer so the answer is never synchronous -- or, held, only once the
+# test calls what it left in @HELD.
 sub fake_fetcher {
   return sub {
     my ($url, $cb) = @_;
     push @FETCHED, $url;
     my ($name) = $url =~ m{([^/]+)\z};
     return if $MODE eq 'hang';
+    return push @HELD, sub { $cb->($BODY{$name}, undef) } if $MODE eq 'held';
     Mojo::IOLoop->timer(0.05 => sub {
       return $cb->(undef, 'connection refused') if $MODE eq 'fail';
       return $cb->('<html>captive portal</html>', undef) if $MODE eq 'tampered';
@@ -123,26 +126,37 @@ my $NODES = [ { id => 'n1', trust => 'internal', url => 'http://127.0.0.1:1/v1',
 # --- concurrent first requests share one fetch, without blocking the loop ---
 {
   @FETCHED = ();
-  $MODE = 'ok';
+  @HELD = ();
+  $MODE = 'held';
   my $dir = tempdir;
   my $t = app_for({ nodes => $NODES, openapi => { swagger_ui => 1, cache_dir => "$dir" } },
     swagger_ui => ui_object());
   my @status;
-  my $pending = 5;
   for my $i (1 .. 5) {
     $t->ua->get('/docs' => sub {
       my ($ua, $tx) = @_;
       push @status, $tx->res->code;
-      Mojo::IOLoop->stop unless --$pending;
     });
   }
   # The loop is free while the fetch is out: a request for a route that needs no assets answers.
   my $health;
   $t->ua->get('/health' => sub { $health = $_[1]->res->code });
-  Mojo::IOLoop->start;
+  my $until = sub {
+    my ($cond) = @_;
+    my $guard = Mojo::IOLoop->timer(30 => sub { Mojo::IOLoop->stop });
+    my $poll = Mojo::IOLoop->recurring(0.01 => sub { Mojo::IOLoop->stop if $cond->() });
+    Mojo::IOLoop->start;
+    Mojo::IOLoop->remove($_) for $guard, $poll;
+    return $cond->();
+  };
+  ok $until->(sub { @HELD == 2 && defined $health }), 'both files are being fetched';
+  is $health, 200, 'the loop served another route meanwhile';
+  is scalar(@status), 0, 'while every request for the UI waits for the fetch';
+  $_->() for splice @HELD;
+  $MODE = 'ok';
+  ok $until->(sub { @status == 5 }), 'once it is done';
   is_deeply \@status, [ (200) x 5 ], 'every concurrent first request is answered';
   is scalar(@FETCHED), 2, 'and the files were fetched once, not once per request';
-  is $health, 200, 'the loop served another route meanwhile';
 }
 
 # --- a failing fetch: 502, remembered, no retry storm, no cache, then it recovers ---
