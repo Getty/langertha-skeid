@@ -2,6 +2,7 @@
 use strict;
 use warnings;
 use Test::More;
+use Config;
 use File::Temp qw(tempdir);
 use IO::Socket::INET;
 use Path::Tiny qw(path);
@@ -294,7 +295,8 @@ SKIP: {
   $db->do('UPDATE console.api_keys SET revoked_at = now() WHERE key_id = ?', undef, $ID{dave});
 
   my $out = path($tmp)->child('serve.out');
-  local $ENV{PERL5LIB} = join(':', grep { !ref } @INC);
+  # Joined by the platform's separator: on Windows it is ";", and ":" is part of "C:\".
+  local $ENV{PERL5LIB} = join($Config{path_sep}, grep { !ref } @INC);
   local $ENV{SKEID_ADMIN_API_KEY} = 'admin-' . $$;
   my $pid = fork;
   die "fork: $!" unless defined $pid;

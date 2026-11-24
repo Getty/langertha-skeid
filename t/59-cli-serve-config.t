@@ -2,6 +2,7 @@
 use strict;
 use warnings;
 use Test::More;
+use Config;
 use File::Temp qw(tempdir);
 use Path::Tiny qw(path);
 use POSIX qw(WNOHANG);
@@ -21,7 +22,8 @@ my $tmp = tempdir(CLEANUP => 1);
 sub run_skeid {
   my (@args) = @_;
   my $out = path($tmp)->child('out-' . $$ . '-' . int(rand(1e9)));
-  local $ENV{PERL5LIB} = join(':', grep { !ref } @INC);
+  # Joined by the platform's separator: on Windows it is ";", and ":" is part of "C:\".
+  local $ENV{PERL5LIB} = join($Config{path_sep}, grep { !ref } @INC);
   my $pid = fork;
   die "fork: $!" unless defined $pid;
   if (!$pid) {

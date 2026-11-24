@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use utf8;
 use Test::More;
+use Config;
 use Test::Mojo;
 use Mojolicious;
 use Mojo::IOLoop;
@@ -1112,7 +1113,8 @@ my $BIN = path($FindBin::Bin)->parent->child('bin', 'skeid')->stringify;
 sub run_skeid {
   my (@args) = @_;
   my $out = path($TMP)->child('out-' . $$ . '-' . int(rand(1e9)));
-  local $ENV{PERL5LIB} = join(':', grep { !ref } @INC);
+  # Joined by the platform's separator: on Windows it is ";", and ":" is part of "C:\".
+  local $ENV{PERL5LIB} = join($Config{path_sep}, grep { !ref } @INC);
   my $pid = fork;
   die "fork: $!" unless defined $pid;
   if (!$pid) {
