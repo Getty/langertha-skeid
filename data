@@ -1,0 +1,58 @@
+---
+class: standard
+created: 2026-11-04T06:53:30Z
+id: 111
+priority: high
+started: 2026-11-04T06:54:36Z
+status: review
+tags:
+- architecture
+- routing
+- deployment
+title: 'A deployment''s own Skeid class: a dispatch hook, skeid serve --class, and
+  skeid pack to one file'
+updated: 2026-11-25T06:39:58Z
+---
+
+Maintainer idea (2026-11-04): Skeid becomes a frame. A deployment writes its own Skeid class (subclass or role) that carries its dispatch logic — e.g. ask a GPU manager where a model is loaded, wake it, queue or refuse when the card is full — and Skeid offers one simple step to turn that class plus Skeid into a single deployable file.
+Why: every deployment-specific decision so far became a generic config key (route_column, routed_only, node_source, documents) and a capability-pinning dance downstream (capability pins in downstream deployments). A class keeps generic Skeid generic.
+Today: usage hooks are subclassable (documented); Proxy->new accepts skeid => $obj; route.plan/route.next/pick_node are methods but no contract, and synchronous (cannot wait on an outside answer); bin/skeid hardwires Langertha::Skeid->new; ADR 0019 decision 3 rejected a packed binary (PAR measured: equal request path, +0.2/3.7 s start, unpacks 80 MB, needs PAR_VERBATIM=1 and explicit namespaces, still links glibc/libssl).
+Scope: ADR 0030 (proposed) first, then implementation:
+1. Dispatch hook contract: documented, versioned methods a subclass may override (plan, pick, admit/refuse, on_finish), an async variant for pick (promise) so a class can consult an outside service without blocking the loop (ADR 0005), defaults = today's behaviour byte for byte.
+2. skeid serve --class My::Skeid [-I lib] and config key skeid_class; Proxy uses it.
+3. skeid pack --class My::Skeid [-I lib] -o my-skeid: one file. Reference via PAR::Packer with what ADR 0019 recorded; supersedes ADR 0019 decision 3 for this purpose; packaging stays optional, the image stays the default deployment.
+Tests: subclass example under t/ (hook overrides change routing; default unchanged), CLI --class, pack smoke test as release/author test (needs PAR::Packer).
+
+
+Implemented on branch worktree-k111-skeid-class (worktree .claude/worktrees/k111-skeid-class), not pushed: d706c7e hooks + proxy pick, 5472e53 serve --class / skeid_class / skeid pack, a404337 docs (ADR 0030 measured + corrections, bench report, README, CONTEXT, Changes).
+prove -lr t/: Files=108, Tests=6284, PASS.
+Bench (docs/bench/2026-11-04-async-pick.md): a promise-based default pick cost -2.7..-7.6 % req/s, so the proxy calls pick_node directly unless a class overrides pick_node_p; default now = 5a650b5 within noise; overriding pick_node_p costs 3.6-5.7 % req/s.
+Open: skeid pack not run here (PAR::Packer needs libperl-dev, root) -> size / cold / warm start still owed, xt/author/pack.t measures them. ADR 0030 stays proposed for the maintainer.
+
+
+2026-11-04 Leitstand abgenommen (bis auf pack-Lauf): prove -lr -j8 t/ 108 Dateien 6284 Tests PASS selbst gefahren; fast-forward main a404337 lokal (nicht gepusht). skeid pack: echter Lauf in Wegwerf-Container perl:5.40 laeuft (xt/author/pack.t). ADR 0030 bleibt proposed — Annahme durch den Maintainer.
+
+
+2026-11-04 Leitstand: skeid pack ECHT gelaufen (Wegwerf-Container perl:5.40, PAR::Packer 1.064, xt/author/pack.t AUTHOR_TESTING=1): 8/8 Subtests ok — pack exit 0, Datei ausfuehrbar, lauscht, Chat-Anfrage ueber die gepackte Datei beantwortet, vom konfigurierten Knoten, mit der gepackten Klasse. Gemessen: Datei 14,7 MB, Kaltstart bis lauschend 3,23 s. ABER: der Test endet danach mit Exit 9 (wstat 2304) ohne Warmstart-Zeile — vermutlich Aufraeumen/Warmstart-Messung; muss vor der Annahme behoben werden. Warnungen von Module::ScanDeps (uninitialized $mod, Module::Runtime/Module::Implementation) im Log.
+
+pack.t: exit 9 fixed (END lacked local $?), warm start added, ScanDeps noise filtered in skeid pack. Container 17/17 ok; host prove -lr t/ PASS.
+
+Drift, not in scope: the pack holds Moose and Class::MOP (1141 modules, 12.7 MB), apparently pulled in by a dependency; Class::Load::XS is installed but not packed (the PP fallback is). Worth a look for pack size.
+
+2026-11-04 pack.t fixed, f36628f on local main (not pushed). Cause of exit 9: the END block reaped the SIGKILLed fake upstream with waitpid and no local $?, so $? stayed 9. Warm start was never measured; it is now. Container perl:5.40, PAR::Packer 1.064, AUTHOR_TESTING=1 prove -lv xt/author/pack.t: 17/17 ok, exit 0. 12.7 MB, cold 3.03 s, warm 0.96 s. ScanDeps noise (a parser false positive on 'use' inside string literals, plus runtime-loader notices) is filtered out of skeid pack's stderr, with the reason in a comment. prove -lr t/ 108 files / 6284 tests PASS. ADR 0030 Measured has the real numbers; it stays proposed for the maintainer. Possible follow-up: Moose/Class::MOP get into the pack (1141 modules); Class::Load::XS is not packed.
+
+2026-11-04 Leitstand abgenommen f36628f: Diff gelesen (local $? im END, Warmstart-Teil, open3-Filter genau zweier ScanDeps-Meldungen). Selbst gefahren: Host prove -lr -j8 t/ 108 Dateien 6284 Tests PASS; Wegwerf-Container perl:5.40 + PAR::Packer AUTHOR_TESTING=1 prove -lv xt/author/pack.t 17/17 ok, PROVE=0. Bleibt review bis zur Annahme ADR 0030 durch den Maintainer. Nicht gepusht.
+
+Befund cai-admin am 2026-11-19: Die Arbeit dieser Karte ist im Repo nicht mehr auffindbar. Die Commits d706c7e, 5472e53, a404337 und f36628f sind weder auf main noch auf origin, auch nicht unter den 285 verwaisten Commits; der Zweig worktree-k111-skeid-class und ADR 0030 fehlen (Nummern 0029 → 0031). Sie lag nur lokal, nicht gepusht, und ist vermutlich beim Aufräumen der Worktrees verloren gegangen. Zurück auf backlog: neu bauen nach der Beschreibung oben; die Messungen stehen in dieser Karte.
+
+2026-11-25 05:30 2026-11-25 rebuild started in the main tree (no worktree). Plan: hooks = the existing route_plan / pick_node / start_request / finish_request as contract v1 (dispatch_hooks_version), pick_node_p + route.next_p; proxy calls pick_node directly unless picks_async (class overrides pick_node_p). skeid_class read by Proxy->skeid_class (CLI --class wins), skeid pack via pp in a subprocess. pack.t in a throwaway perl:5.40 container.
+
+2026-11-25 05:50 Also found (drift, not in scope): (1) the pack carries Moose/Class::MOP (359 files) and Perl::Tidy, pulled in by some dependency; DBD::SQLite adds ~12 MB uncompressed when installed on the packing host. (2) skeid usage / usage-purge still build Langertha::Skeid, so a class overriding the usage sinks is not used there. (3) share/sql is not packed: a DBI usage store in a pack has no schema file (jsonlog or auto_migrate: false). (4) ADR 0019 has no forward note to 0030; left for the maintainer since 0030 is proposed.
+
+2026-11-25 05:50 Rebuilt in the main tree, not committed. Hooks contract v1 (dispatch_hooks_version): route_plan / pick_node / pick_node_p / start_request / finish_request; picks_async; call_function route.next_p (never dies). The proxy picks through a promise only when the class overrides pick_node_p. A rejected or dying pick answers 502 api_error, logs the reason and admits nothing; a client abort during the pick admits nothing. Proxy->skeid_class + build_app(skeid_class); config key skeid_class; skeid serve --class / -I (precedence: --class > packed class > config); skeid pack (pp in a subprocess, PAR_VERBATIM=1, -M Langertha:: Mojo:: Mojolicious:: YAML::PP::, the two ScanDeps notices filtered, PAR::Packer loaded by string so it is not packed into the pack). cpanfile suggests PAR::Packer. capability skeid_class. ADR 0030 proposed. Verified: prove -lr t/ Files=120 Tests=6638 PASS. Mutation checks: dropping the abort guard or forcing the async path fails t/101. xt/author/pack.t in a throwaway perl:5.40 container (PAR::Packer 1.064, AUTHOR_TESTING=1): 10/10 ok, exit 0; 19.3 MB, cold 3.44/3.52 s, warm 0.98 s. Perf still owed: perf-tester.
+
+2026-11-25 06:37 Review fix (perf-tester finding): the async pick path now calls $c->render_later before route.next_p, so Mojolicious no longer looks up v1chatcompletions.html.ep or logs 'Nothing has been rendered' on each request. The sync path is unchanged. Regression test in t/101 (trace-level log capture) covers OpenAI chat, OpenAI chat stream, OpenAI embeddings, Anthropic, Ollama chat, Ollama embed and rerank, plus the reject and die 502 paths (one error line each). Red without the fix (all 7 faces plus both 502 paths), green with it. Realtime already called render_later; audio and documents go through the same line but are not exercised. prove -lr t/: Files=120 Tests=6639 PASS. Also found: the synchronous capacity-wait path (a request that waits on a timer) has the same log noise today, unchanged by k111.
+
+2026-11-25 06:38 render_later fix on the async pick path, with a regression test (red, then green). prove -lr t/ 120 files / 6639 tests PASS.
+
+2026-11-25 06:39 Committed on main, not pushed: e8772aa code, tests, docs, ADR 0030 (proposed), Changes; 4e47033 bench report. Stays in review until the maintainer accepts ADR 0030.
