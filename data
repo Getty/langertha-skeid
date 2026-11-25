@@ -1,0 +1,24 @@
+---
+claimed_at: 2026-11-25T07:11:07Z
+claimed_by: skeid-release-manager
+class: standard
+completed: 2026-11-25T07:10:58Z
+created: 2026-11-25T06:55:57Z
+id: 139
+priority: low
+started: 2026-11-25T06:57:10Z
+status: done
+tags:
+- pack
+- cli
+title: skeid pack from a checkout fails unless PERL5LIB points at lib/
+updated: 2026-11-25T07:11:07Z
+---
+
+Found in k137 (2026-11-25): run from a checkout (perl bin/skeid pack ...), pp does not see the lib/ that bin/skeid adds to @INC for itself, so it cannot find Langertha::Skeid and the pack fails. xt/author/pack.t passes only because prove -l sets PERL5LIB. Wanted: skeid pack hands its own @INC additions (and -I dirs) to pp (pp -I), with a test that runs pack without PERL5LIB set (in the container, like pack.t).
+
+2026-11-25 07:09 Red (perl:5.40 container, PAR::Packer 1.064, Langertha::Skeid not installed, AUTHOR_TESTING=1 prove -lv xt/author/pack.t, pack run with PERL5LIB/PERLLIB/PERL5OPT unset and no -I for Skeid's lib): worse than the card says -- pack EXITS 0 and writes the file, but without Langertha::Skeid; the packed file dies at start with Can't locate Langertha/Skeid.pm. 4/10 ok, tests 5-10 fail.
+
+2026-11-25 07:09 Done, not committed. bin/skeid: the lib/ it adds for itself is now named once ($OWN_LIB, undef in a packed file) and _run_pack passes it to pp as -I after the user's -I dirs; not all of @INC. xt/author/pack.t: the pack runs as from a checkout -- PERL5LIB/PERLLIB/PERL5OPT deleted, -I"$root/lib" dropped, -I for the class kept. Green in the same container: 10/10, 18.6 MB, pack 14.1 s, cold 3.42 s, warm 1.04 s. Container removed (docker ps -a: 0). Host prove -lr t/: Files=121, Tests=6643, Result: PASS (with k118's uncommitted lib/ changes in the tree).
+
+Committed as 1f1e847
