@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-11-25T06:56:22Z
+claimed_by: skeid-release-manager
+class: standard
+completed: 2026-11-25T06:56:22Z
+created: 2026-11-25T05:52:24Z
+id: 137
+priority: low
+started: 2026-11-25T06:40:29Z
+status: done
+tags:
+- pack
+- deployment
+title: skeid pack carries Moose, Class::MOP and Perl::Tidy — find what pulls them
+  in
+updated: 2026-11-25T06:56:31Z
+---
+
+Found in k111 (2026-11-25): a skeid pack (PAR::Packer, perl:5.40 container) is 19.3 MB and holds Moose, Class::MOP and Perl::Tidy, pulled in by some dependency (the first build measured 1141 modules). Class::Load::XS is installed but not packed (the PP fallback is). Wanted: find which dependency drags them in (Module::ScanDeps output of the pack), and whether -X or a lighter dependency drops them without breaking the packed file (xt/author/pack.t must stay green). Size and cold start before/after.
+
+2026-11-25 06:54 Chain (Module::ScanDeps 1.37 used_by, perl:5.40 container): Moose and Class::MOP <- Langertha::Cost/Usage/ToolCall/Pricing/... (Langertha's 128 classes are Moose) <- Langertha::Skeid. Not excludable. Perl::Tidy (14 files, 2.9 MB uncompressed) <- Eval::Closure::_dump_source <- Moose::Meta::TypeConstraint / Class::MOP::Method::Generated: only under EVAL_CLOSURE_PRINT_SOURCE, in an eval with an untidied fallback -> safe to exclude. Class::Load::XS: chosen at run time via Module::Implementation, no static user, so not packed; packing it with -M measured no gain (cold 3.46/3.53 s), and -M of a missing module makes pp exit 2, so left out. Package::Stash::XS is packed (namespace::clean names it). Also found (drift, not in scope): skeid pack run from a checkout without PERL5LIB fails -- pp does not see the checkout lib that bin/skeid adds with use lib; pack.t passes only because prove -l sets PERL5LIB.
+
+2026-11-25 06:54 Done, not committed: bin/skeid pack passes -X Perl::Tidy (comment + POD sentence); ADR 0030 Measured has the chain and before/after. Container perl:5.40, PAR::Packer 1.064, AUTHOR_TESTING=1 prove -lv xt/author/pack.t: before 19.3 MB, cold 3.44/3.38 s, warm 1.00/0.98 s; after 18.6 MB, cold 3.42/3.44/3.35/3.37 s, warm 0.98/0.98/0.96/0.98 s, 10/10 ok each run. Packed file run with EVAL_CLOSURE_PRINT_SOURCE=1: exit 0, untidied source dumped, no Can't locate. Host prove -lr t/: Files=121, Tests=6643, PASS. Container removed.
+
+2026-11-25 06:56 Committed as 00889ec
