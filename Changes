@@ -41,8 +41,9 @@ Revision history for Langertha-Skeid
       that overrides it; a rejected pick answers 502 and admits nothing.
       skeid serve --class My::Skeid [-I DIR] and the config key skeid_class
       load the class; skeid pack --class My::Skeid -o FILE builds one
-      executable with PAR::Packer (suggested, not required). Capability
-      skeid_class.
+      executable with PAR::Packer (suggested, not required), leaving out
+      Perl::Tidy, which only Moose's Eval::Closure reaches for when printing
+      generated code. Capability skeid_class.
     - A request that waits for capacity on the route wait timer no longer
       makes Mojolicious log a template lookup and "Nothing has been
       rendered".

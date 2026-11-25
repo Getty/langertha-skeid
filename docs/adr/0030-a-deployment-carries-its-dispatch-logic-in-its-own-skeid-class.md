@@ -95,8 +95,22 @@ The rebuild (2026-11-25) ran `xt/author/pack.t` in the same kind of container, w
 runs). The size depends on what the
 packing host has installed — DBD::SQLite alone puts 12 MB, uncompressed, into the archive (its
 `sqlite3.c` and `sqlite3.h` share files and its `.so`) — and the pack also carries Moose and
-Class::MOP (359 files), which some dependency loads. The
-request-path numbers of the rebuild are still to be measured; the defaults' path is the same
+Class::MOP (359 files), which some dependency loads.
+
+k137 (2026-11-25) traced that dependency with Module::ScanDeps: Moose and Class::MOP are
+Langertha's own object system (Langertha's classes, among them `Langertha::Cost`, `Usage`,
+`ToolCall` and `Pricing` that Skeid uses, are Moose classes), so they stay. Perl::Tidy came
+along as Moose → Moose::Meta::TypeConstraint → Eval::Closure, which requires it only to
+pretty-print generated code under `EVAL_CLOSURE_PRINT_SOURCE`, inside an eval that falls back to
+the untidied source; `skeid pack` now passes `-X Perl::Tidy`. Same container, two runs each:
+before **19.3 MB, 3.44 and 3.38 s cold, 1.00 and 0.98 s warm**; after **18.6 MB, 3.42, 3.44
+and 3.35 s cold, 0.98, 0.98 and 0.96 s warm** — 0.7 MB smaller, start unchanged (Perl::Tidy was
+never loaded). Class::Load::XS is not packed because Class::Load picks its implementation at run
+time through Module::Implementation, which no static scan follows; packing it with `-M` was
+measured too (3.46 and 3.53 s cold, 0.98 s warm) and gains nothing, so the pure-Perl fallback
+stays. Package::Stash::XS is packed: namespace::clean names it literally.
+
+The request-path numbers of the rebuild are still to be measured; the defaults' path is the same
 shape as on the first implementation (one boolean per request decides).
 
 ## Alternatives

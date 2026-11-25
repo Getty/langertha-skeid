@@ -384,9 +384,13 @@ sub _run_pack {
 
   # PAR_VERBATIM: PAR's POD stripper breaks the POD commands of [@Author::GETTY]. The -M
   # namespaces are loaded by name at run time, which no static scan sees (ADR 0019).
+  # -X Perl::Tidy (skeid k137): Langertha is Moose, Moose's Eval::Closure requires Perl::Tidy
+  # only to pretty-print generated code under EVAL_CLOSURE_PRINT_SOURCE, inside an eval that
+  # falls back to the untidied source. Nothing else uses it; it is 2.9 MB of the scan.
   local $ENV{PAR_VERBATIM} = 1;
   my @cmd = ($pp, '-o', $output, (map { ('-I', $_) } @inc),
-    (map { ('-M', $_) } qw( Langertha:: Mojo:: Mojolicious:: YAML::PP:: )), $script->to_string);
+    (map { ('-M', $_) } qw( Langertha:: Mojo:: Mojolicious:: YAML::PP:: )),
+    '-X', 'Perl::Tidy', $script->to_string);
 
   my $pid = open3(my $in, '>&STDOUT', my $err = gensym(), @cmd);
   close $in;
@@ -600,6 +604,9 @@ PAR::Packer is not a dependency of Skeid: without it the command ends with an C<
 exit code 2, as it does for a class that cannot be used (see C<--class> of C<serve>), before
 anything is written. When C<pp> fails, its output is passed on and the command exits 2. Two
 notices of L<Module::ScanDeps> that say nothing about the pack are dropped from C<pp>'s output.
+
+L<Perl::Tidy> is left out of the pack: it comes in only through L<Eval::Closure>, which uses it
+to print generated code for debugging and does without it.
 
 =opt --class
 
