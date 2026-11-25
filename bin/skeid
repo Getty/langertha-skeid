@@ -12,7 +12,10 @@ use FindBin;
 # before this line compiles. A packed file loads from its archive, never from a lib/ that
 # happens to sit next to it.
 our $PACKED_CLASS;
-use if !$PACKED_CLASS, lib => "$FindBin::Bin/../lib";
+# The lib/ beside this file, on @INC for a checkout; skeid pack hands it on to pp (skeid k139).
+our $OWN_LIB;
+BEGIN { $OWN_LIB = "$FindBin::Bin/../lib" unless $PACKED_CLASS }
+use if defined $OWN_LIB, lib => $OWN_LIB;
 use IPC::Open3 qw(open3);
 use Symbol qw(gensym);
 use Mojo::File qw(path tempdir);
@@ -387,8 +390,10 @@ sub _run_pack {
   # -X Perl::Tidy (skeid k137): Langertha is Moose, Moose's Eval::Closure requires Perl::Tidy
   # only to pretty-print generated code under EVAL_CLOSURE_PRINT_SOURCE, inside an eval that
   # falls back to the untidied source. Nothing else uses it; it is 2.9 MB of the scan.
+  # -I: the user's dirs, then the lib/ this file put on @INC (skeid k139) -- pp runs as a process
+  # of its own and sees neither; without it, a pack from a checkout has no Langertha::Skeid.
   local $ENV{PAR_VERBATIM} = 1;
-  my @cmd = ($pp, '-o', $output, (map { ('-I', $_) } @inc),
+  my @cmd = ($pp, '-o', $output, (map { ('-I', $_) } @inc, grep { defined } $OWN_LIB),
     (map { ('-M', $_) } qw( Langertha:: Mojo:: Mojolicious:: YAML::PP:: )),
     '-X', 'Perl::Tidy', $script->to_string);
 

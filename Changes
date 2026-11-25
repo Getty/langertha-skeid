@@ -43,7 +43,9 @@ Revision history for Langertha-Skeid
       load the class; skeid pack --class My::Skeid -o FILE builds one
       executable with PAR::Packer (suggested, not required), leaving out
       Perl::Tidy, which only Moose's Eval::Closure reaches for when printing
-      generated code. Capability skeid_class.
+      generated code. Run from a checkout without PERL5LIB, it packs Skeid
+      itself too, passing the lib/ it put on @INC on to pp after any -I.
+      Capability skeid_class.
     - A request that waits for capacity on the route wait timer no longer
       makes Mojolicious log a template lookup and "Nothing has been
       rendered".

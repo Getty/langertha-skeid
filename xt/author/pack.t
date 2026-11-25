@@ -79,9 +79,14 @@ nodes:
   - { id: b, url: "http://127.0.0.1:$up_port/v1", model: m, trust: internal, tags: [packed] }
 YAML
 
+# Run as from a checkout (skeid k139): no PERL5LIB, no -I for Skeid's lib. bin/skeid finds its
+# own lib/ itself, and pp sees it only when skeid pack passes it on; -I "$lib" is the user's.
 my $packed = $tmp->child('my-skeid');
 my $started = time;
-my $output = `"$^X" -I"$root/lib" "$bin" pack --class Pack::Skeid -I "$lib" -o "$packed" 2>&1`;
+my $output = do {
+  delete local @ENV{qw( PERL5LIB PERLLIB PERL5OPT )};
+  `"$^X" "$bin" pack --class Pack::Skeid -I "$lib" -o "$packed" 2>&1`;
+};
 my $pack_status = $?;
 my $pack_seconds = time - $started;
 is $pack_status, 0, 'skeid pack exits 0' or diag $output;
