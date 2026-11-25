@@ -6,10 +6,12 @@ use warnings;
 use Carp qw(croak);
 use Mojolicious;
 use Mojo::IOLoop;
+use Mojo::Loader qw(load_class);
 use Time::HiRes qw(time);
 use JSON::MaybeXS qw(decode_json);
 use Scalar::Util qw(blessed weaken);
 use Mojo::Util qw(decode encode);
+use YAML::PP;
 use Langertha::Skeid;
 use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::OpenAPI;
@@ -510,6 +512,9 @@ Builds the L<Mojolicious> application. Options:
 =item * C<skeid> -- an existing L<Langertha::Skeid> to serve instead; C<config_file> and the
 OpenBao detection below are then not used.
 
+=item * C<skeid_class> -- the class to build instead of L<Langertha::Skeid>, a subclass of it;
+without it, the config file's C<skeid_class>. See L</skeid_class>.
+
 =item * C<admin_api_key> -- the explicit admin API key (L<Langertha::Skeid/set_admin_api_key>):
 it wins over the config's, on every reload. Empty leaves the key to the config and
 C<SKEID_ADMIN_API_KEY>.
@@ -557,6 +562,49 @@ The app has a C<skeid> helper returning the control plane.
 # (100 lines of 8 KiB). The body alone is checked exactly when the route runs.
 my $UPLOAD_HEAD_ALLOWANCE = 1048576;
 
+=method skeid_class
+
+  my $class = Langertha::Skeid::Proxy->skeid_class(
+    skeid_class => 'My::Skeid',            # wins, else the config file's skeid_class
+    config_file => '/etc/skeid/skeid.yaml',
+  );
+
+The control-plane class L</build_app> builds: C<skeid_class> when given, else the config file's
+L<Langertha::Skeid/skeid_class>, else L<Langertha::Skeid>. The class is loaded unless it is
+already defined (L<Mojo::Loader/load_class>). Croaks when the name is not a Perl class name,
+when the class is not found or fails to compile, and when it is not a Langertha::Skeid
+subclass. A config file that does not parse is left to L<Langertha::Skeid> to report.
+
+=cut
+
+sub skeid_class {
+  my ($class, %opts) = @_;
+  my $name = $opts{skeid_class};
+  $name = $class->_config_skeid_class($opts{config_file}) unless defined($name) && length($name);
+  return 'Langertha::Skeid' unless defined($name) && length($name);
+
+  croak "skeid_class '$name' is not a Perl class name"
+    unless !ref($name) && $name =~ /\A[A-Za-z_]\w*(?:::\w+)*\z/;
+  if (my $error = load_class($name)) {
+    croak ref($error)
+      ? "skeid_class '$name' failed to load: $error"
+      : "skeid_class '$name' not found in \@INC";
+  }
+  croak "skeid_class '$name' is not a Langertha::Skeid subclass"
+    unless $name->isa('Langertha::Skeid');
+  return $name;
+}
+
+# The config file's skeid_class, read once at start. A file that is missing or does not parse
+# says nothing here: Langertha::Skeid reads it next and reports it as it always did.
+sub _config_skeid_class {
+  my ($class, $file) = @_;
+  return unless defined($file) && -f $file;
+  my $cfg = eval { YAML::PP->new->load_file($file) };
+  return unless ref($cfg) eq 'HASH';
+  return $cfg->{skeid_class};
+}
+
 sub build_app {
   my ($class, %opts) = @_;
 
@@ -588,7 +636,7 @@ sub build_app {
   # (a registry block checks for it); an existing Skeid gets it set (skeid k64).
   push @skeid_opts, admin_api_key => $opts{admin_api_key}
     if defined($opts{admin_api_key}) && length($opts{admin_api_key});
-  my $skeid = $opts{skeid} || Langertha::Skeid->new(@skeid_opts);
+  my $skeid = $opts{skeid} || $class->skeid_class(%opts)->new(@skeid_opts);
   $skeid->set_admin_api_key($opts{admin_api_key}) if exists $opts{admin_api_key};
   # How many processes share these nodes. Set before anything reads max_conns or starts a
   # timer, since both are divided by it (ADR 0010).
@@ -2270,7 +2318,9 @@ sub _begin_route_async {
   my $index = 0;
   my $tier_deadline = 0;
 
-  my $tick;
+  my $async_pick = $c->skeid->picks_async;
+
+  my ($tick, $picked, $next_tier);
   my $wait_timer;
   my $fail = sub {
     # Nothing eligible can mean two different things once a policy is in play: the model is
@@ -2321,29 +2371,66 @@ sub _begin_route_async {
     );
 
     my $state = $c->skeid->call_function('route.state', \%selector);
-    if (ref($state) eq 'HASH' && $state->{has_eligible}) {
-      $saw_eligible = 1;
+    return $next_tier->() unless ref($state) eq 'HASH' && $state->{has_eligible};
+    $saw_eligible = 1;
 
-      my $route = $c->skeid->call_function('route.next', \%selector)->{node};
-      if ($route && ref($route) eq 'HASH') {
-        my $node_id = $route->{id};
-        $last_node_id = $node_id if defined $node_id;
-        if ($c->skeid->call_function('request.start', { id => $node_id })->{ok}) {
-          # Break the recursive callback's self-reference before control moves into the upstream
-          # lifecycle. The active call frame keeps it alive until this invocation returns.
-          undef $tick;
-          $cb->($route, $node_id, $started, $tier);
-          return;
-        }
-      }
+    # A class that asks somebody outside the process picks through a promise (ADR 0030); every
+    # other pick stays synchronous, because a promise costs each request a turn of the loop.
+    return $picked->($c->skeid->call_function('route.next', \%selector)->{node}, $tier)
+      unless $async_pick;
 
-      # Eligible but nothing free: this tier is worth waiting on, up to its own window.
-      if (time < $tier_deadline) {
-        $wait_timer = Mojo::IOLoop->timer($wait_poll_ms / 1000, $tick);
+    # The answer comes from the pick's callback, after the action has returned: without this,
+    # Mojolicious looks for a template first and logs that nothing was rendered, per request.
+    # Only flags the request; a render after it (the 502 below, the route's own) still answers.
+    $c->render_later;
+    $c->skeid->call_function('route.next_p', \%selector)->then(sub {
+      # The client may have left while the pick was out: then nothing is admitted.
+      $picked->($_[0]{node}, $tier) if $tick;
+      return;
+    }, sub {
+      my ($err) = @_;
+      return unless $tick;
+      $c->app->log->error("Picking a node for model '$model' failed: " . ($err // 'unknown error'));
+      _render_error($c, 502, "Node selection failed for model '$model'", 'api_error');
+      undef $tick;
+      $cb->();
+      return;
+    })->catch(sub {
+      # What runs after the pick (admission, the upstream call) runs in this promise's callback;
+      # an exception there would otherwise vanish with the promise.
+      my ($err) = @_;
+      $c->app->log->error("Routing a request for model '$model' failed: $err");
+      $c->reply->exception($err) unless _client_gone($c) || $c->res->code;
+      return;
+    });
+    return;
+  };
+
+  # The node a pick gave: admitted, the request goes on; refused or none, the tier is waited on
+  # or left. One path for both kinds of pick.
+  $picked = sub {
+    my ($route, $tier) = @_;
+    if ($route && ref($route) eq 'HASH') {
+      my $node_id = $route->{id};
+      $last_node_id = $node_id if defined $node_id;
+      if ($c->skeid->call_function('request.start', { id => $node_id })->{ok}) {
+        # Break the recursive callback's self-reference before control moves into the upstream
+        # lifecycle. The active call frame keeps it alive until this invocation returns.
+        undef $tick;
+        $cb->($route, $node_id, $started, $tier);
         return;
       }
     }
 
+    # Eligible but nothing free: this tier is worth waiting on, up to its own window.
+    if (time < $tier_deadline) {
+      $wait_timer = Mojo::IOLoop->timer($wait_poll_ms / 1000, $tick);
+      return;
+    }
+    return $next_tier->();
+  };
+
+  $next_tier = sub {
     $index++;
     $tier_deadline = time + (($plan->[$index] ? ($plan->[$index]{wait_ms} // 0) : 0) / 1000);
     $tick->();

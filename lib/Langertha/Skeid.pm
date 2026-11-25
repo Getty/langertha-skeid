@@ -10,6 +10,7 @@ use Digest::SHA qw(sha1_hex sha256_hex);
 use File::Spec;
 use Scalar::Util qw(blessed looks_like_number refaddr reftype weaken);
 use Time::HiRes ();
+use Mojo::Promise;
 use YAML::PP;
 use Langertha ();
 use Langertha::Skeid::UsageStore;
@@ -178,6 +179,74 @@ With no sink at all, L</record_usage> builds no event and answers
 C<< { ok => 0, enabled => 0, error => 'usage_store not configured' } >>. A sink that fails answers
 C<< { ok => 0, error => ... } >> (or dies); the proxy logs that at C<error> level as a lost usage
 event, naming the request id and the store backend.
+
+=head2 Dispatch Hooks
+
+A deployment's own dispatch logic -- ask a GPU manager where a model is loaded, refuse a node
+whose card is full -- goes into a subclass, which C<skeid serve --class My::Skeid> or the
+config's L</skeid_class> runs, and C<skeid pack> packs into one file with Skeid (ADR 0030 in the
+distribution repository). The methods below are the contract a subclass may override, version 1
+of L</dispatch_hooks_version>. Their defaults are what Skeid does without a subclass.
+
+  package My::Skeid;
+  use Moo;
+  extends 'Langertha::Skeid';
+
+  # Prefer the nodes tagged `warm`, else whatever the tier selects.
+  around pick_node => sub {
+    my ($orig, $self, %selector) = @_;
+    return $self->$orig(%selector, tags => [@{$selector{tags} || []}, 'warm'])
+      // $self->$orig(%selector);
+  };
+
+  # Or ask somebody outside the process, without blocking the loop.
+  sub pick_node_p {
+    my ($self, %selector) = @_;
+    return $self->gpu_manager->where_p($selector{model})->then(sub {
+      my ($id) = @_;
+      my ($node) = grep { $_->{id} eq $id } @{$self->list_nodes};
+      return $node;
+    });
+  }
+
+=over 4
+
+=item plan -- L</route_plan>
+
+The tiers a request walks, once per request, with C<model>, C<engine>, C<api_key_id> and
+C<kind>. C<permitted> false is a C<403>.
+
+=item pick -- L</pick_node>
+
+One node of a tier's selector (C<model>, C<engine>, C<tags>, C<deny_tags>, C<kind>), or nothing,
+which the proxy treats like a full tier: it waits within the tier's C<wait_ms>, asking again,
+and then falls through. It runs on the event loop and must not block (ADR 0005).
+
+=item pick, asynchronous -- L</pick_node_p>
+
+The same pick as a L<Mojo::Promise>, for an answer that comes from outside the process. The
+proxy calls it only for a class that overrides it (L</picks_async>), and L</pick_node> directly
+otherwise: a promise costs every request an event-loop turn. It resolves with a node as
+L</pick_node> returns it -- a copy of an inventory node (L</list_nodes>), whose C<id>, C<url> and
+C<engine> the proxy uses -- or with nothing. A promise that rejects, or a C<pick_node_p> that
+dies, answers the client C<502> C<api_error> and admits nothing; the reason goes to the log.
+
+=item admit or refuse -- L</start_request>
+
+1 admits the request to the node picked and takes its slot; 0 refuses it, and the proxy goes on
+as for a full node. An override that admits must call the original: it is what counts the slot.
+
+=item on finish -- L</finish_request>
+
+Runs exactly once for every request L</start_request> admitted, on every path -- answered,
+failed, timed out, abandoned by its client. An override must call the original: it is what
+gives the slot back.
+
+=back
+
+A change to the arguments, the return values or the order of these calls raises
+L</dispatch_hooks_version>, so a class can refuse to run on a contract it was not written for.
+Everything else in this class may change between releases without notice.
 
 =head2 Per-Key Routing Policy
 
@@ -868,6 +937,18 @@ are appended to a JSON Lines file in that directory -- key ids, never a key or t
 password -- instead of being reported lost, and written once the database is back, without a second row for an event already in the
 table. With it, Skeid also starts while the database is down. See
 L<Langertha::Skeid::UsageStore::DBI/spool_dir> and ADR 0027.
+
+=head2 skeid_class
+
+  skeid_class: My::Skeid
+
+The class L<Langertha::Skeid::Proxy/build_app> builds instead of Langertha::Skeid: a
+deployment's own subclass carrying its dispatch logic (L</Dispatch Hooks>, ADR 0030). Read by
+the proxy once, at start, from the config file; C<skeid serve --class> wins over it, and a
+reload does not change the class of a running Skeid. A name that is not a Perl class name, a
+class that is not found in C<@INC> (C<skeid serve -I> adds to it) or fails to compile, and a
+class that is not a Langertha::Skeid subclass stop the start. Skeid itself does not read the
+key.
 
 =head1 ENVIRONMENT
 
@@ -1802,6 +1883,17 @@ has _usage_store_obj => (
   is      => 'rw',
   default => sub { undef },
 );
+
+# Whether the class overrides pick_node_p; see picks_async. Fixed per class, so asked once.
+has _picks_async => (
+  is       => 'lazy',
+  init_arg => undef,
+);
+
+sub _build__picks_async {
+  my ($self) = @_;
+  return $self->can('pick_node_p') == __PACKAGE__->can('pick_node_p') ? 0 : 1;
+}
 
 my %FALLBACK_ENGINE_IDS = map { $_ => 1 } qw(
   aki
@@ -4631,13 +4723,16 @@ line). A name is added when its feature ships and never removed or renamed:
 
 =item * C<catch_all> -- C<routing.catch_all> and C<routed_model> on usage events (ADR 0033)
 
+=item * C<skeid_class> -- the dispatch hooks (L</Dispatch Hooks>), C<skeid serve --class>, the
+config's C<skeid_class> and C<skeid pack> (ADR 0030)
+
 =back
 
 =cut
 
 my @CAPABILITIES = qw(
   documents ollama_embed node_files key_rate customer_source_rate usage_contract usage_purge
-  openbao_token_file catch_all
+  openbao_token_file catch_all skeid_class
 );
 
 sub capabilities { return @CAPABILITIES }
@@ -5365,6 +5460,45 @@ sub pick_node {
   return;
 }
 
+=method pick_node_p
+
+  $skeid->pick_node_p(model => 'qwen3-32b', tags => ['local'])->then(sub {
+    my ($node) = @_;   # as pick_node, or nothing
+  });
+
+The asynchronous pick of the dispatch hooks (L</Dispatch Hooks>): a L<Mojo::Promise> of what
+L</pick_node> returns for the same selector, which is the default. A subclass overrides it to
+consult a service outside the process without blocking the loop (ADR 0005). The C<route.next_p>
+function calls it.
+
+=cut
+
+sub pick_node_p {
+  my ($self, %args) = @_;
+  return Mojo::Promise->resolve($self->pick_node(%args));
+}
+
+=method picks_async
+
+  my $async = $skeid->picks_async;   # 1 when the class overrides pick_node_p
+
+True when the class overrides L</pick_node_p>; the proxy then picks through it, and through
+L</pick_node> otherwise.
+
+=cut
+
+sub picks_async { $_[0]->_picks_async }
+
+=method dispatch_hooks_version
+
+  die "written for dispatch hooks 1\n" unless My::Skeid->dispatch_hooks_version == 1;
+
+The version of the dispatch hook contract (L</Dispatch Hooks>) this Skeid implements: 1.
+
+=cut
+
+sub dispatch_hooks_version { 1 }
+
 =method route_state
 
   my $state = $skeid->route_state(model => 'qwen3-32b', tags => ['local']);
@@ -5901,6 +6035,7 @@ function names a required argument.
   policy.for_key      api_key_id                            { policy }
   route.plan          model, engine, api_key_id, kind       route_plan
   route.next          model, engine, tags, deny_tags, kind  { node } (pick_node)
+  route.next_p        model, engine, tags, deny_tags, kind  a promise of { node } (pick_node_p)
   route.state         model, engine, tags, deny_tags, kind  route_state
   capacity.set        id, and the reading                   { capacity }
   capacity.get        id                                    { capacity }
@@ -5989,6 +6124,21 @@ sub call_function {
       kind   => $args->{kind},
     );
     return { node => $node };
+  }
+  if ($name eq 'route.next_p') {
+    # Never dies: a pick_node_p that dies, or returns nothing, is a rejected promise, so the
+    # caller has one failure path to handle.
+    my $picked = eval {
+      $self->pick_node_p(
+        model  => ($args->{model} // ''),
+        engine => $self->normalize_engine_id($args->{engine} // ''),
+        tags   => $args->{tags},
+        deny_tags => $args->{deny_tags},
+        kind   => $args->{kind},
+      );
+    };
+    return Mojo::Promise->reject($@ || 'pick_node_p returned nothing') unless defined $picked;
+    return Mojo::Promise->resolve($picked)->then(sub { +{ node => $_[0] } });
   }
   if ($name eq 'route.state') {
     my $engine = $self->normalize_engine_id($args->{engine} // '');

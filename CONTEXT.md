@@ -494,6 +494,25 @@ state; the file is one of its sources, the admin API is the other — and a chan
 section replaces whatever the admin API pushed.
 _Avoid_: hot reload, restart, refresh.
 
+**Skeid class** (`skeid_class`, `skeid serve --class`):
+A deployment's own `Langertha::Skeid` subclass that carries its routing logic — ask a GPU
+manager where a model is loaded, refuse a full card — by overriding **Dispatch hooks**, instead
+of growing a config key in Skeid (ADR 0030, proposed). Chosen once at start; a reload keeps it.
+_Avoid_: plugin, extension, driver.
+
+**Dispatch hook**:
+One of the methods a **Skeid class** may override, under a versioned contract
+(`dispatch_hooks_version`): plan (`route_plan`), pick (`pick_node`, or `pick_node_p` when the
+answer comes from outside the process), admit or refuse (`start_request`), on finish
+(`finish_request`). The defaults are **Routing** and **Admission** as Skeid does them. Only a
+class that overrides `pick_node_p` picks through a promise.
+_Avoid_: callback, middleware; bare "dispatch" (that is **Function dispatch**).
+
+**Pack** (`skeid pack`):
+One executable made with PAR::Packer from `skeid` and a **Skeid class**, serving that class.
+Not static, and not the default deployment — the image is.
+_Avoid_: binary, static build.
+
 ## Relationships
 
 - A **Node** carries exactly one **Engine ID** and at most one **Model**; **Routing** groups
@@ -583,5 +602,7 @@ _Avoid_: hot reload, restart, refresh.
 - **"registry"** names two things: the Skeid-to-Skeid **Registry snapshot** (`registry:` config,
   `Langertha::Skeid::Registry`, ADR 0017), and — in ADR 0011 and `key_id_for_name` — the
   `names:` section. The bare word means the snapshot; the other is the **Customer name** map.
+- **"dispatch"** names two things: **Function dispatch** (`call_function`, the command surface)
+  and the **Dispatch hooks** of a **Skeid class** (ADR 0030). **Routing** is never "dispatch".
 - **"backend"** appears both as the usage-store driver name (`backend: postgresql`, correct)
   and colloquially for an upstream node (wrong). Upstream side is **Node**.

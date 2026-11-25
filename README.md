@@ -1343,6 +1343,42 @@ multiplies with `--workers`
 frontend that forgets it over-admits by that factor. A capacity probe makes every frontend see
 the node's real occupancy; the division still applies.
 
+### Your own Skeid class
+
+Dispatch logic that only one deployment needs — ask a GPU manager where a model is loaded,
+refuse a card that is full — goes into a subclass of `Langertha::Skeid` rather than into a
+config key. The class overrides the dispatch hooks: plan (`route_plan`), pick (`pick_node`, or
+`pick_node_p` returning a `Mojo::Promise` when the answer comes from outside the process),
+admit or refuse (`start_request`) and on finish (`finish_request`). The contract is versioned
+(`dispatch_hooks_version`, now 1) and documented in `perldoc Langertha::Skeid` under
+"Dispatch Hooks"; the defaults are Skeid's own routing. See
+[ADR 0030](docs/adr/0030-a-deployment-carries-its-dispatch-logic-in-its-own-skeid-class.md)
+(proposed).
+
+```perl
+package My::Skeid;
+use Moo;
+extends 'Langertha::Skeid';
+
+around pick_node => sub {          # the node tagged `warm` first
+  my ($orig, $self, %selector) = @_;
+  return $self->$orig(%selector, tags => [@{$selector{tags} || []}, 'warm'])
+    // $self->$orig(%selector);
+};
+1;
+```
+
+```bash
+skeid serve --class My::Skeid -I lib --config skeid.yaml   # or skeid_class: My::Skeid in the config
+skeid pack  --class My::Skeid -I lib -o my-skeid           # one file, needs PAR::Packer
+./my-skeid serve --config skeid.yaml
+```
+
+Only a class that overrides `pick_node_p` picks through a promise; a pick that rejects answers
+`502` and admits nothing. A packed file serves its class, unpacks into a PAR cache on its first
+start, and still needs the host's libc (and libssl for TLS): build it where it will run. The
+image stays the default deployment.
+
 ### Building the image
 
 ```bash
@@ -1581,6 +1617,8 @@ removal of) the config's `nodes:` section, and reach only one worker under `--wo
 
 ```
 skeid serve [--listen host:port] [--config skeid.yaml] [--admin-api-key KEY] [--workers N]
+            [--class My::Skeid] [-I DIR ...]
+skeid pack --class My::Skeid [-I DIR ...] -o FILE
 skeid usage [--config skeid.yaml] [--since ISO8601] [--limit N] [--json]
             [--backend jsonlog|sqlite|postgresql] [--log-path /path/to/events/]
             [--db /path/to.sqlite] [--dsn dbi:Pg:...]
@@ -1597,6 +1635,11 @@ skeid keyid [KEY ...]
   without `--config`, `./skeid.yaml` is read when it exists, and Skeid otherwise starts with
   no config and no nodes. A config file that disappears while Skeid runs keeps the config in
   force and is warned about once.
+  `--class` (with `-I` for where it lives) serves a `Langertha::Skeid` subclass and wins over
+  the config's `skeid_class`; a class that is not found or not a subclass is an error (exit 2).
+  See [Your own Skeid class](#your-own-skeid-class).
+- `pack` writes one executable of `skeid` and the class with PAR::Packer, which Skeid does not
+  depend on; without it the command exits 2.
 - `usage` prints a report from the configured usage store; the
   `--backend`/`--log-path`/`--db`/`--dsn` options override it (`--log-path` implies jsonlog,
   `--db` sqlite, `--dsn` postgresql). `--config` behaves as for `serve`.
@@ -1606,7 +1649,7 @@ skeid keyid [KEY ...]
   and exits `2` when the purge failed. See [Purging usage events](#purging-usage-events).
 - `capabilities` prints what this Skeid can do, one name per line (`documents`, `ollama_embed`,
   `node_files`, `key_rate`, `customer_source_rate`, `usage_contract`, `usage_purge`,
-  `openbao_token_file`, `catch_all`). A name is added when its feature ships and never removed,
+  `openbao_token_file`, `catch_all`, `skeid_class`). A name is added when its feature ships and never removed,
   so a deployment can check one before it relies on a feature; the same list is
   `Langertha::Skeid->capabilities`.
 - `keyid` prints the customer key id for each key, or for each line of stdin.

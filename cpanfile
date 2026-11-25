@@ -14,6 +14,10 @@ recommends 'DBD::Pg';
 recommends 'DBD::SQLite', '1.66';
 recommends 'DBI', '1.643';
 
+# Only `skeid pack` needs it (ADR 0030). Not a recommendation: the image installs those, and a
+# packer has no place in it.
+suggests 'PAR::Packer';
+
 on test => sub {
   requires 'Test2::Suite';
   requires 'Test::File::ShareDir';
