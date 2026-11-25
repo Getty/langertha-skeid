@@ -2276,7 +2276,7 @@ sub pricing_for_model {
 # from an emptied manifest map while routing already ran on the new policies.
 my @CONFIG_STATE = qw(
   model_aliases policies default_policy key_policies key_names nodes
-  route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count catch_all
+  route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count correlation_header catch_all
   admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
   documents_max_bytes documents_allow_remote_sources

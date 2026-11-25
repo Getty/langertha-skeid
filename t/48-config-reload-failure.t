@@ -139,6 +139,41 @@ sub broken_cfg {
     'an explicit config.reload still reports the failure to its caller';
 }
 
+# --- a load that fails after the routing section rolls the routing section back too (k130) ---
+# The routing keys are applied before the registry and the manifest: a config that croaks in
+# either must not leave its routing settings in force while the rest is rolled back.
+{
+  my %new_routing = (
+    wait_timeout_ms     => 4321,
+    wait_poll_ms        => 17,
+    trust_key_id_header => 1,
+    frontend_count      => 3,
+    correlation_header  => 'X-Correlation-ID',
+    catch_all           => { chat => 'm' },
+  );
+  my %breaks = (
+    registry => sub { $_[0]->{registry} = { ttl_s => 0 } },
+    manifest => sub { $_[0]->{manifest} = { enabled => 1 } },
+  );
+  for my $section (sort keys %breaks) {
+    my $cfg   = good_cfg();
+    my $skeid = Langertha::Skeid->new(config_reload_interval => 0, config_loader => sub { $cfg });
+    my %kept  = map { $_ => $skeid->$_ } qw(
+      route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count
+      correlation_header catch_all
+    );
+
+    $cfg = good_cfg();
+    $cfg->{routing} = { %new_routing };
+    $breaks{$section}->($cfg);
+    ok !eval { $skeid->reload_config; 1 }, "$section: the config fails to load";
+    like $@, qr/\A\Q$section\E[.:]/, "$section: in that section, after routing";
+    for my $attr (sort keys %kept) {
+      is_deeply $skeid->$attr, $kept{$attr}, "$section: $attr is rolled back";
+    }
+  }
+}
+
 # --- through the proxy: requests keep working, the failure is visible ---
 my %served;
 my $upstream = Mojolicious->new;
