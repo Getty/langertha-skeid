@@ -1,0 +1,26 @@
+---
+claimed_at: 2026-11-25T05:38:32Z
+claimed_by: skeid-release-manager
+class: standard
+completed: 2026-11-25T05:38:32Z
+created: 2026-11-19T04:56:58Z
+id: 131
+priority: medium
+started: 2026-11-25T05:25:12Z
+status: done
+tags:
+- usage
+title: 'jsonlog usage store: one file per event grows without bound — retention or
+  rotation'
+updated: 2026-11-25T05:46:16Z
+---
+
+Measured on synapse 2026-11-19 04:56 UTC (cai-fleet): /var/log/skeid/events/ holds one file per usage event, ~28k files / 113 MB after five days of light traffic; 'ls events/*' fails with 'Argument list too long'. Disk is fine (11 %), but the directory grows without bound. Decide: daily files or rotation, and let usage_store.retention_days / skeid usage-purge --retention cover the jsonlog store with a schedule (Changes says both built-in stores purge — check that jsonlog honours it in this layout). Test with a directory of many files.
+
+2026-11-25 05:33 Layout: dir mode writes <path>/YYYY-MM-DD/<id>.json, the UTC day of the id's time (= write time; created_at may be caller-supplied, e.g. backfilled). Day dir cached per store object (_ready_day): one mkdir per day, EEXIST ok; sysopen ENOENT (a purge removed the dir) clears the cache and retries. report/purge list via readdir (not glob) over day dirs + legacy flat *.json, sorted by id. Purge rmdirs a day dir it leaves without events; ENOTEMPTY/EEXIST/ENOENT ignored, other errors fail the purge (repeatable). New t/99-usage-jsonlog-day-dirs.t red (events landed flat) then green, 49 tests incl. 5000-file case (~1s). Updated layout assertions in t/16, t/18, t/52 (collision seed pinned into a day dir), t/68, t/69, t/88 (read events from day dirs).
+
+2026-11-25 05:36 Done, not committed. jsonlog mode dir writes <path>/YYYY-MM-DD/<id>.json (UTC day of the id's time); report/purge read day dirs + legacy flat *.json; purge rmdirs day dirs it empties. New t/99-usage-jsonlog-day-dirs.t (49 tests, red before, green after); layout assertions updated in t/16,18,52,68,69,88. prove -lr t/: Files=118, Tests=6606, Result: PASS (skipped: 90-customer-source-postgresql, 950-live-docling, 951-live-speaches, env-gated). Contract note: report()'s log_path still names the base dir; the on-disk layout of dir mode is now part of what operators see (ADR candidate, maintainer's call).
+
+2026-11-25 05:38 Committed as 2de6bf5
+
+2026-11-25 05:46 ADR 0034 committed as b03e801 (docs/adr/0034-jsonlog-dir-mode-writes-one-directory-per-utc-day.md). Not pushed.
