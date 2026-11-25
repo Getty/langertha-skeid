@@ -1,0 +1,56 @@
+---
+class: standard
+created: 2026-11-05T23:41:17Z
+id: 118
+priority: high
+started: 2026-11-25T06:57:09Z
+status: review
+tags:
+- filter
+- pii
+- architecture
+- downstream
+title: 'Filter seam: extract request texts, ask a filter, substitute into JSON strings,
+  translate the answer back (incl. SSE and tool-call arguments)'
+updated: 2026-11-25T09:16:38Z
+---
+
+Why: a deployment wants a privacy filter (PII) on any Skeid layer it runs (edge, per-org, GPU-side, sidecars). Decision by the maintainer (2026-11-05). Keep Skeid generic: Skeid knows texts, spans and placeholders, not PII. The deployment keeps its own design notes.
+
+Scope:
+1. ADR (new): for a request the filter handled, the body goes upstream re-encoded with only JSON string values replaced. This is an exception to ADR 0023 (bytes as the client spelled them), scoped to filtered requests. Key order is kept by substituting into the original bytes at the string-token offsets, not by decode/encode.
+2. Contract (versioned, like ADR 0030):
+   - filter_request_p($ctx) on the Skeid class, default no-op. $ctx holds the face, the route, node.tags, the customer key id, the configured organization, the incoming mark header, and texts[{id: json-path, text}].
+   - It returns { decision: pass|replace|local|refuse, texts, map[{text,start,end,placeholder}], headers{}, usage{} }.
+   - It runs after the node pick. local re-plans with the denied tag (cloud) or answers 503 with the documented message.
+   - Shipped implementation Langertha::Skeid::Filter::HTTP, config filter: { url, token_env, timeout_ms, when: [tags], organization, pass_headers }. Every non-200, a timeout or bad JSON means refuse (fail-closed).
+3. Texts are extracted per face:
+   - chat: messages[].content (string and text parts), name, tool results, string values inside tool_calls[].function.arguments, system;
+   - embeddings: input.
+   Never keys, schemas, tools[] or function names. Non-text parts and relayed routes (audio, documents, rerank, realtime, MCP, stateful Responses) towards a node in when are refuse/local.
+4. Back-translation: Skeid builds the reverse table from the original text plus map, in memory only, and drops it at the end of the answer.
+   - Lenient forms ([X_tag], ⟦X tag⟧, inner spaces) are accepted only for known tags; unknown ones are counted (pii_unknown).
+   - Non-stream and SSE: hold back from the last ⟦ or [ for up to 40 chars until it is closed.
+   - Tool-call argument fragments are tracked per call; values are inserted JSON-escaped.
+   - This sits before the face translators (OpenAI/Anthropic/Ollama). Once a filter has replaced text, the OpenAI stream is no longer relayed untouched (Proxy.pm read loop).
+5. Usage: merge usage{} from the filter into the usage event, only allowlisted pii_*/filter_* scalar/hash fields. Never log bodies, maps or placeholders.
+6. Without a filter: section and without an overriding class, behaviour stays byte for byte unchanged (tests).
+
+Tests:
+- a fake filter under t/;
+- substitution keeps key order and escapes;
+- SSE holdback across chunk borders;
+- tool-call fragments;
+- refuse paths and the refused relayed routes;
+- usage allowlist.
+Test vectors: placeholder vectors supplied by the deployment (copied in, for lenient matching).
+
+Release: downstream deployments pin the version that ships it.
+
+2026-11-25 07:13 Progress: ADR 0035 written (proposed). Implemented: RawBody::string_values (string-token scanner with paths), Langertha::Skeid::Filter (extract/check_result/set_texts/substitute/usage_fields), ::Filter::Restore (reverse table, lenient forms, 40-char holdback per channel, frames split, restore_bytes/payload), ::Filter::HTTP (Mojo::UserAgent non-blocking, fail-closed). Skeid.pm: filter: config (strict), filter_request_p/filter_tags/filters_requests/filter_applies/filter_hooks_version, capability 'filter', record_usage allowlist. Proxy.pm: filter step after admission in _begin_route_async (pass/replace/local/refuse/fail-closed, slot released on every path incl. client abort), relayed-route gate (filter_local), back-translation in JSON + SSE paths. Existing suite still green; writing t/104, t/105 next.
+
+2026-11-25 07:26 Done: filter seam per card. ADR 0035 (proposed): exception to ADR 0023 for replaced requests only, contract filter_hooks_version 1 (filter_request_p, filter_tags), fail-closed, back-translation rules. New: Langertha::Skeid::Filter, ::Filter::Restore, ::Filter::HTTP; RawBody::string_values. Skeid.pm: filter: config (strict), hooks, capability 'filter', record_usage allowlist (pii_*/filter_*). Proxy.pm: filter step after admission in _begin_route_async (pass/replace/local/refuse; 503 filter_unavailable on failure; request.finish on every path incl. client abort), relayed-route gate (audio, documents, rerank, realtime -> planned away from when-tags), back-translation in JSON and SSE (40-char holdback, per-call tool args, JSON-escaped). Tests: t/104-filter-seam.t, t/105-filter-restore.t, t/lib/Test/Skeid/Filter.pm; default path byte-for-byte proven. prove -lr t/: Files=123, Tests=6667, Result: PASS. Open: MCP gateway not gated (servers have no tags); DBI stores drop pii_*/filter_* (no columns); the deployment's placeholder vectors were not supplied, so the tests use my own; mark header name X-Skeid-Filter and the refuse statuses 403/503 are my choice. Not touched: bin/skeid, Changes, README, CONTEXT.
+
+2026-11-25 09:15 Review fixes: (1) TTFT check no longer autovivifies reasoning/reasoning_content keys (grep aliased hash elements) -- regression test in t/104 was red, now green; (2) Restore::feed returns early for a chunk with no [/⟦ and nothing held when every placeholder is bracketed, _frame set once; t/105 gains held-chunk-without-bracket and unbracketed-placeholder cases; (3) extraction is lazy: on the first admission on a node the filter applies to; an unfilterable request gives the slot back (aborted) and is planned away like local; client bytes read only on replace. ADR 0035 updated (lazy extraction, brief slot + aborted count + rr cursor for unfilterable, feed fast path). prove -lr t/: Files=123, Tests=6668, Result: PASS.
+
+2026-11-25 09:16 Committed: 13d460e (code, tests, ADR 0035 proposed, README/CONTEXT, Changes), 5908149 (bench report). Left in review until the maintainer accepts ADR 0035.
