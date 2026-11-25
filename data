@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-11-25T09:50:09Z
+claimed_by: skeid-release-manager
+class: standard
+completed: 2026-11-25T09:50:09Z
+created: 2026-11-25T09:12:50Z
+id: 140
+priority: medium
+started: 2026-11-25T09:17:02Z
+status: done
+tags:
+- performance
+- protocols
+title: RawBody::with_top_level matches JSON strings one character at a time — 3x req/s
+  on large bodies
+updated: 2026-11-25T09:50:18Z
+---
+
+Measured in the k118 bench (docs/bench/2026-11-25-filter-seam.md, 2026-11-25), predates k118 (since k104, 98541df): lib/Langertha/Skeid/Protocol/RawBody.pm with_top_level, lines ~75/125/130, match JSON strings with a per-character alternation. The unrolled pattern string_values in the same file already uses gave 3.1x req/s at a 209 KB body and +33 % at 21 KB (c=64), on every OpenAI chat and embeddings request, filtered or not; a 20-message conversation spends ~1.7 ms of ~6.4 ms in it. 17 related test files passed against the scratch copy; full suite not run. Wanted: switch to the unrolled pattern, tests for escapes / long strings / pathological input (no catastrophic backtracking), and a bench before/after. Do after k118 is committed (same file).
+
+2026-11-25 09:21 Tests first: t/106-raw-body-strings.t (escapes, 1 MB strings, 20k small strings, pathological unterminated/backslash runs time-boxed at 2 s, and a 1220-body corpus compared byte for byte against a verbatim copy of the old functions). Green against the old code, green after the change; a mutated token ("[^"]*") fails 13 of its 59 checks, so the comparison is not vacuous. Change: $STRING_TOKEN moved up and used in _top_level_spans and both _skip_value matches.
+
+2026-11-25 09:24 Done: RawBody _top_level_spans and _skip_value (both matches) use the unrolled $STRING_TOKEN that string_values already used; definition moved above with_top_level. New t/106-raw-body-strings.t (59 checks). prove -lr t/: Files=124, Tests=6727, 231 wallclock secs, Result: PASS. Not committed, Changes untouched; bench before/after left to skeid-perf-tester.
+
+2026-11-25 09:50 Committed: d8df9cb (code, test, Changes), 87284fc (bench report)
