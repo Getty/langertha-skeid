@@ -1379,6 +1379,51 @@ Only a class that overrides `pick_node_p` picks through a promise; a pick that r
 start, and still needs the host's libc (and libssl for TLS): build it where it will run. The
 image stays the default deployment.
 
+### A filter in front of some nodes
+
+A deployment can put its own filter (a PII filter, for example) between Skeid and the nodes
+carrying certain tags. Skeid knows nothing about PII. It hands the filter the texts of a request,
+puts the filtered texts back where they came from, and turns the filter's placeholders in the
+answer back into the originals. See
+[ADR 0035](docs/adr/0035-a-filtered-request-has-its-json-strings-replaced-and-its-answer-translated-back.md)
+(proposed).
+
+```yaml
+filter:
+  url: http://pii-filter.internal:8080/filter
+  token_env: SKEID_FILTER_TOKEN     # the variable holding its bearer token, never the token
+  timeout_ms: 2000                  # default 5000
+  when: [cloud]                     # node tags it applies to; empty: every node
+  organization: acme                # passed on to the filter
+  pass_headers: [x-tenant]          # client headers passed on to the filter
+```
+
+- **When it is asked:** after the node pick, only for a node carrying a `when` tag, while that
+  node's slot is held.
+- **What it gets:** the texts of the request, each with a JSON path as its id. For chat these
+  are message contents, names and the string values in tool-call arguments. For embeddings it
+  is the input.
+- **What it answers:** `pass`, `replace` (with new texts and a placeholder map), `local` or
+  `refuse`.
+  - `local` plans the request again, away from the `when` nodes.
+  - `refuse` answers `403 filter_refused`.
+- **Fail-closed:** a filter that errors, times out or answers malformed JSON refuses the request
+  with `503 filter_unavailable`.
+- **What changes upstream:** in a replaced request only the named JSON string values change.
+  They are replaced in place, so key order and the rest of the client's bytes stay as they were.
+- **Back-translation:** placeholders in the answer are translated back in JSON answers, in SSE
+  streams (even when a placeholder is cut across chunks) and in tool-call arguments. Common
+  misspellings of a placeholder are recognized too.
+- **Never filtered:** requests with non-text parts and the relayed routes (audio, documents,
+  rerank, realtime) never reach a `when` node. The MCP gateway is not gated.
+- **Usage:** the filter's `pii_*` and `filter_*` usage fields go into the usage event
+  (allowlisted). Bodies, maps and placeholders are never logged.
+- **Your own class:** instead of the HTTP filter, a [Skeid class](#your-own-skeid-class) can
+  override `filter_request_p` (contract `filter_hooks_version` 1, `perldoc Langertha::Skeid`,
+  "Filter Hooks").
+- **Without a filter:** with no `filter:` section and no such class, every request goes through
+  byte for byte as before.
+
 ### Building the image
 
 ```bash

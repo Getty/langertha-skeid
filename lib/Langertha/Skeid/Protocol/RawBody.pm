@@ -226,4 +226,76 @@ sub encode_with_schemas {
   return $encoded;
 }
 
+=func string_values
+
+  my $scan = Langertha::Skeid::Protocol::RawBody::string_values($bytes);
+  # { strings => [{ path => [[0, 'messages'], [1, 0], [0, 'content']], start, length }, ...],
+  #   duplicate => 0 }
+
+Every string B<value> of a JSON text -- not the keys -- with its path and its span, for the
+filter seam (ADR 0035): a filtered text is put back at the offsets its token had, so nothing else
+in the body changes. A path is a list of C<[0, $key]> (an object member) and C<[1, $index]> (an
+array element). C<duplicate> is true when an object spells a key twice: the decoder read one of
+them, and a node may read the other. C<$chars> true reads a character string (the JSON inside a
+decoded string), else bytes. Returns C<undef> for a text this scanner cannot follow.
+
+=cut
+
+my $CHARS = JSON::MaybeXS->new(allow_nonref => 1);
+
+sub string_values {
+  my ($json, $chars) = @_;
+  return undef unless defined $json;
+  my %state = (strings => [], duplicate => 0, decoder => ($chars ? $CHARS : $STRING));
+  pos($json) = 0;
+  $json =~ /\G\s*/gc;
+  _scan_value(\$json, [], \%state, 0) or return undef;
+  $json =~ /\G\s*\z/gc or return undef;
+  return { strings => $state{strings}, duplicate => $state{duplicate} };
+}
+
+# One JSON string token, unrolled so a long string is one match and not one per character.
+my $STRING_TOKEN = qr/"[^"\\]*+(?:\\.[^"\\]*+)*+"/s;
+
+sub _scan_value {
+  my ($ref, $path, $state, $depth) = @_;
+  return 0 if $depth > 512;
+  my $start = pos($$ref);
+  if ($$ref =~ /\G$STRING_TOKEN/gc) {
+    push @{$state->{strings}}, { path => [@$path], start => $start, length => pos($$ref) - $start };
+    return 1;
+  }
+  if ($$ref =~ /\G\{\s*/gc) {
+    return 1 if $$ref =~ /\G\}/gc;
+    my %seen;
+    while (1) {
+      $$ref =~ /\G($STRING_TOKEN)\s*:\s*/gc or return 0;
+      my $key = eval { $state->{decoder}->decode($1) };
+      return 0 unless defined $key;
+      $state->{duplicate} = 1 if $seen{$key}++;
+      push @$path, [0, $key];
+      _scan_value($ref, $path, $state, $depth + 1) or return 0;
+      pop @$path;
+      $$ref =~ /\G\s*/gc;
+      next if $$ref =~ /\G,\s*/gc;
+      return 1 if $$ref =~ /\G\}/gc;
+      return 0;
+    }
+  }
+  if ($$ref =~ /\G\[\s*/gc) {
+    return 1 if $$ref =~ /\G\]/gc;
+    my $index = 0;
+    while (1) {
+      push @$path, [1, $index++];
+      _scan_value($ref, $path, $state, $depth + 1) or return 0;
+      pop @$path;
+      $$ref =~ /\G\s*/gc;
+      next if $$ref =~ /\G,\s*/gc;
+      return 1 if $$ref =~ /\G\]/gc;
+      return 0;
+    }
+  }
+  return $$ref =~ /\G[^\s,\]\}"\[\{]+/gc ? 1 : 0;
+}
+
 1;

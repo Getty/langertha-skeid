@@ -513,6 +513,28 @@ One executable made with PAR::Packer from `skeid` and a **Skeid class**, serving
 Not static, and not the default deployment — the image is.
 _Avoid_: binary, static build.
 
+**Filter** (`filter:`, `filter_request_p`):
+A deployment's service or hook that is asked about a request after the pick, for a node carrying
+one of its **Filter tags**, and answers `pass`, `replace`, `local` or `refuse` (ADR 0035,
+proposed). It fails closed. Skeid knows texts, spans and **Placeholders**, never what they mean.
+_Avoid_: PII filter (that is one deployment's use), sanitizer, middleware.
+
+**Filter tags** (`filter.when`):
+The node tags a **Filter** applies to. An empty list means every node. A request the filter
+cannot read (non-text parts, **Relayed routes**) is planned away from these nodes, as is one the
+filter answers `local`.
+_Avoid_: zone (in code), filter scope.
+
+**Placeholder**:
+The text a **Filter** puts in place of a span of a request text, e.g. `⟦PERSON_1⟧`. A
+`replace` answer maps each placeholder to its span in the original text.
+_Avoid_: token (that is the model's unit), mask.
+
+**Reverse table**:
+Placeholder → original text, built per request from the filter's map, held in memory only and
+dropped with the answer. It translates the answer back, including lenient forms and SSE chunks.
+_Avoid_: map (that is the filter's answer), cache.
+
 ## Relationships
 
 - A **Node** carries exactly one **Engine ID** and at most one **Model**; **Routing** groups

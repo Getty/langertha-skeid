@@ -13,6 +13,7 @@ use Scalar::Util qw(blessed weaken);
 use Mojo::Util qw(decode encode);
 use YAML::PP;
 use Langertha::Skeid;
+use Langertha::Skeid::Filter;
 use Langertha::Skeid::CapacityProbe;
 use Langertha::Skeid::OpenAPI;
 use Langertha::Skeid::Registry;
@@ -1416,7 +1417,7 @@ sub _handle_openai_chat {
   my ($model, %names) = _catch_all($c, $body->{model} // '', 'chat');
   my $api_key_id = _request_api_key_id($c);
   _begin_route_async($c, $model, $api_key_id, sub {
-    my ($route, $node_id, $started, $tier) = @_;
+    my ($route, $node_id, $started, $tier, $filtered) = @_;
     return unless $route;
 
     # The alias layer means the model the client asked for and the model the node is asked for
@@ -1437,7 +1438,8 @@ sub _handle_openai_chat {
       route_url        => ($route->{url} // ''),
     };
 
-    my $relay = _verbatim_relay($c, $served_model);
+    my $relay = _verbatim_relay($c, $served_model, $filtered);
+    $relay = _with_filter($relay, $filtered) if $filtered;
 
     if ($body->{stream}) {
       _proxy_openai_stream($c, $url, $body, $node_id, $started, $meta, undef, $relay);
@@ -1450,7 +1452,7 @@ sub _handle_openai_chat {
       return if $err;
       _render_upstream_response($c, $res, $node_id);
     }, undef, $relay);
-  }, %names);
+  }, %names, ($c->skeid->filters_requests ? _filter_route($c, 'openai', 'chat', $body, 1) : ()));
 }
 
 sub _handle_openai_embeddings {
@@ -1465,7 +1467,7 @@ sub _handle_openai_embeddings {
   my ($model, %names) = _catch_all($c, $body->{model} // '', 'embeddings');
   my $api_key_id = _request_api_key_id($c);
   _begin_route_async($c, $model, $api_key_id, sub {
-    my ($route, $node_id, $started, $tier) = @_;
+    my ($route, $node_id, $started, $tier, $filtered) = @_;
     return unless $route;
 
     # The alias layer means the model the client asked for and the model the node is asked for
@@ -1490,8 +1492,10 @@ sub _handle_openai_embeddings {
       my ($res, $err, $status) = @_;
       return if $err;
       _render_upstream_response($c, $res, $node_id);
-    }, undef, _verbatim_relay($c, $served_model));
-  }, %names);
+    }, undef, ($filtered
+      ? _with_filter(_verbatim_relay($c, $served_model, $filtered), $filtered)
+      : _verbatim_relay($c, $served_model)));
+  }, %names, ($c->skeid->filters_requests ? _filter_route($c, 'openai', 'embeddings', $body, 1) : ()));
 }
 
 # Runs once per request, when its head is parsed and its body is still on the wire (the request
@@ -1656,7 +1660,7 @@ sub _handle_openai_audio {
       return if $err;
       _render_upstream_response($c, $res, $node_id);
     }, undef, $relay);
-  });
+  }, ($c->skeid->filters_requests ? (filter_local => 1) : ()));
 }
 
 # POST /v1/convert/file and POST /v1/convert/source (skeid k94, ADR 0028): docling-serve's
@@ -1760,7 +1764,7 @@ sub _handle_documents {
       return if $err;
       _render_upstream_response($c, $res, $node_id);
     }, undef, $relay);
-  }, kind => 'documents');
+  }, kind => 'documents', ($c->skeid->filters_requests ? (filter_local => 1) : ()));
 }
 
 # GET /v1/realtime (skeid k95, ADR 0029): live transcription over the OpenAI realtime protocol.
@@ -1928,7 +1932,7 @@ sub _handle_openai_realtime {
         );
       });
     });
-  });
+  }, ($c->skeid->filters_requests ? (filter_local => 1) : ()));
   return;
 }
 
@@ -2011,7 +2015,7 @@ sub _handle_openai_rerank {
       $c->res->headers->header('x-skeid-node' => $node_id);
       $c->render(json => $payload);
     }, undef, $relay);
-  });
+  }, ($c->skeid->filters_requests ? (filter_local => 1) : ()));
 }
 
 sub _handle_anthropic_messages {
@@ -2043,7 +2047,7 @@ sub _handle_anthropic_messages {
   my $api_key_id = _request_api_key_id($c);
 
   _begin_route_async($c, $model, $api_key_id, sub {
-    my ($route, $node_id, $started, $tier) = @_;
+    my ($route, $node_id, $started, $tier, $filtered) = @_;
     return unless $route;
 
     # The alias layer means the model the client asked for and the model the node is asked for
@@ -2072,7 +2076,7 @@ sub _handle_anthropic_messages {
       $openai_body->{stream_options} = { include_usage => \1 };
       _proxy_openai_stream($c, $url, $openai_body, $node_id, $started, $meta,
         Langertha::Skeid::Protocol::Anthropic::Stream->new(model => $model),
-        _schema_relay($c, $openai_body, 'input_schema'));
+        _with_filter(_schema_relay($c, $openai_body, 'input_schema'), $filtered));
       return;
     }
 
@@ -2088,8 +2092,8 @@ sub _handle_anthropic_messages {
       # response_from_openai reads a decoded OpenAI response ($upstream->{choices}, ...); the
       # raw Mojo $res would read as all-undef and yield a well-formed but empty envelope (karr #26).
       return Langertha::Skeid::Protocol::Anthropic->response_from_openai($_[0], $model);
-    }, _schema_relay($c, $openai_body, 'input_schema'));
-  }, %names);
+    }, _with_filter(_schema_relay($c, $openai_body, 'input_schema'), $filtered));
+  }, %names, ($c->skeid->filters_requests ? _filter_route($c, 'anthropic', 'chat', $openai_body) : ()));
 }
 
 # Serves both Ollama completion routes. /api/chat and /api/generate differ only at the edge --
@@ -2138,7 +2142,7 @@ sub _handle_ollama {
   my $api_key_id = _request_api_key_id($c);
 
   _begin_route_async($c, $model, $api_key_id, sub {
-    my ($route, $node_id, $started, $tier) = @_;
+    my ($route, $node_id, $started, $tier, $filtered) = @_;
     return unless $route;
 
     # The alias layer means the model the client asked for and the model the node is asked for
@@ -2164,7 +2168,7 @@ sub _handle_ollama {
       $openai_body->{stream_options} = { include_usage => \1 };
       _proxy_openai_stream($c, $url, $openai_body, $node_id, $started, $meta,
         Langertha::Skeid::Protocol::Ollama::Stream->new(model => $model, shape => $face->{shape}),
-        _schema_relay($c, $openai_body, 'function', 'parameters'));
+        _with_filter(_schema_relay($c, $openai_body, 'function', 'parameters'), $filtered));
       return;
     }
 
@@ -2181,8 +2185,8 @@ sub _handle_ollama {
       # Mojo response object, or every field reads undef and the client gets empty content (karr #26).
       my $response_method = $face->{response};
       return Langertha::Skeid::Protocol::Ollama->$response_method($_[0]);
-    }, _schema_relay($c, $openai_body, 'function', 'parameters'));
-  }, %names);
+    }, _with_filter(_schema_relay($c, $openai_body, 'function', 'parameters'), $filtered));
+  }, %names, ($c->skeid->filters_requests ? _filter_route($c, 'ollama', 'chat', $openai_body) : ()));
 }
 
 # POST /api/embed and /api/embeddings (skeid k116). Both go to the node's OpenAI /embeddings and
@@ -2222,7 +2226,7 @@ sub _handle_ollama_embeddings {
   my $api_key_id = _request_api_key_id($c);
 
   _begin_route_async($c, $model, $api_key_id, sub {
-    my ($route, $node_id, $started, $tier) = @_;
+    my ($route, $node_id, $started, $tier, $filtered) = @_;
     return unless $route;
 
     my $served_model = _served_model($tier, $model);
@@ -2250,8 +2254,8 @@ sub _handle_ollama_embeddings {
     }, sub {
       my $response_method = $face->{response};
       return Langertha::Skeid::Protocol::Ollama->$response_method($_[0], $model);
-    });
-  }, %names);
+    }, _with_filter(undef, $filtered));
+  }, %names, ($c->skeid->filters_requests ? _filter_route($c, 'ollama', 'embeddings', $openai_body) : ()));
 }
 
 # The catch-all (skeid k129, ADR 0033): on a chat or an embeddings route -- $route_kind, the kind
@@ -2277,7 +2281,15 @@ sub _catch_all {
 # some did means everything was busy (429).
 #
 # $cb is called with ($route, $node_id, $started, $tier) on success and with nothing on failure,
-# after the error has been rendered.
+# after the error has been rendered. A request a filter changed (ADR 0035) gets a fifth argument,
+# what the filter answered for it (see _filtered).
+#
+# The filter seam, only with a filter configured: `filter` is the request (_filter_route), and a
+# node the filter applies to is asked about once it is admitted, holding its slot. The texts are
+# found then, on the first such admission, so a request served by nodes outside the filter's
+# zone never pays for it. A request no filter can read gives that slot back and is planned again
+# away from the filter's nodes, as a filter's `local` is; `filter_local` -- a relayed route --
+# plans it so from the start.
 sub _begin_route_async {
   my ($c, $model, $api_key_id, $cb, %route) = @_;
   $cb ||= sub { };
@@ -2320,9 +2332,41 @@ sub _begin_route_async {
 
   my $async_pick = $c->skeid->picks_async;
 
+  # The filter seam (ADR 0035). $filter_deny is set once the request has to stay away from the
+  # filter's nodes; $filter_slot while a filter is out for an admitted node, whose slot it holds.
+  my $filter = $route{filter};
+  my ($filter_deny, $filter_slot, $ask_filter, $stay_local);
+  if ($route{filter_local}) {
+    $filter_deny = $c->skeid->filter_tags;
+    unless ($filter_deny) {
+      _render_filter_local($c, $model);
+      $cb->();
+      return;
+    }
+  }
+
   my ($tick, $picked, $next_tier);
   my $wait_timer;
   my $fail = sub {
+    # Kept away from the filter's nodes and nothing else could serve it: that is the answer,
+    # not a missing model or a policy that forbids it.
+    if (!$saw_eligible && $filter_deny) {
+      for my $tier (@$plan) {
+        my $state = $c->skeid->call_function('route.state', {
+          model     => ($tier->{model} // ''),
+          tags      => ($tier->{tags} || []),
+          deny_tags => ($tier->{deny_tags} || []),
+          (length($tier->{engine} // '') ? (engine => $tier->{engine}) : ()),
+          @kind,
+        });
+        next unless ref($state) eq 'HASH' && $state->{has_eligible};
+        _render_filter_local($c, $model);
+        undef $tick;
+        $cb->();
+        return;
+      }
+    }
+
     # Nothing eligible can mean two different things once a policy is in play: the model is
     # unroutable, or it is routable and this key is not allowed at the nodes that serve it.
     # Only the failure path pays for telling them apart.
@@ -2365,7 +2409,7 @@ sub _begin_route_async {
     my %selector = (
       model     => ($tier->{model} // ''),
       tags      => ($tier->{tags} || []),
-      deny_tags => ($tier->{deny_tags} || []),
+      deny_tags => ($filter_deny ? [@{$tier->{deny_tags} || []}, @$filter_deny] : ($tier->{deny_tags} || [])),
       (length($tier->{engine} // '') ? (engine => $tier->{engine}) : ()),
       @kind,
     );
@@ -2414,6 +2458,9 @@ sub _begin_route_async {
       my $node_id = $route->{id};
       $last_node_id = $node_id if defined $node_id;
       if ($c->skeid->call_function('request.start', { id => $node_id })->{ok}) {
+        # A node the filter applies to: the filter decides first, while the slot is held.
+        return $ask_filter->($route, $node_id, $tier)
+          if $filter && !$filter_deny && $c->skeid->filter_applies($node_id);
         # Break the recursive callback's self-reference before control moves into the upstream
         # lifecycle. The active call frame keeps it alive until this invocation returns.
         undef $tick;
@@ -2441,6 +2488,112 @@ sub _begin_route_async {
     return;
   };
 
+  # Away from the filter's nodes, planned again from the first tier with the request as the
+  # client sent it; with no tags to avoid, every node is the filter's and the answer is a 503.
+  $stay_local = sub {
+    $filter_deny = $c->skeid->filter_tags;
+    unless ($filter_deny) {
+      _render_filter_local($c, $model);
+      undef $tick;
+      $cb->();
+      return;
+    }
+    ($index, $saw_eligible) = (0, 0);
+    $tier_deadline = time + ((@$plan ? ($plan->[0]{wait_ms} // 0) : 0) / 1000);
+    $tick->();
+    return;
+  };
+
+  # The filter's answer for an admitted node (ADR 0035). Every way out gives the slot back or
+  # hands it on: pass and replace go upstream, local plans again away from the filter's nodes,
+  # refuse and a failed filter answer the client. A client that left meanwhile was let go by
+  # the finish handler below, which gave the slot back; the late answer then does nothing.
+  $ask_filter = sub {
+    my ($route, $node_id, $tier) = @_;
+    $filter_slot = $node_id;
+    my $release = sub {
+      $c->skeid->call_function('request.finish', {
+        id => $node_id, ok => 0, aborted => 1, duration_ms => _duration_ms($started),
+      });
+      undef $filter_slot;
+    };
+    # The texts, found once, on the first admission the filter applies to. What no filter can
+    # read goes no further on this node: the slot is given back at once and the request planned
+    # again away from the filter's nodes, as for `local`.
+    $filter->{texts} //= Langertha::Skeid::Filter->extract($filter->{body}, $filter->{kind});
+    if ($filter->{texts}{unfilterable}) {
+      $release->();
+      return $stay_local->();
+    }
+    $c->render_later if $c->can('render_later');
+    my $refuse = sub {
+      my ($status, $type, $message, $reason, $usage) = @_;
+      $release->();
+      $c->app->log->warn("Filter refused a request for model '$model' on node '$node_id': $reason")
+        if $type eq 'filter_unavailable';
+      _record_usage_event($c, {
+        api_format    => ($c->stash('skeid.error_format') || 'openai'),
+        endpoint      => $c->req->url->path->to_string,
+        api_key_id    => $api_key_id,
+        provider      => 'skeid',
+        engine        => ($route->{engine} // 'openaibase'),
+        model         => _served_model($tier, $model),
+        requested_model => ($route{requested_model} // $model),
+        (defined($route{routed_model}) ? (routed_model => $route{routed_model}) : ()),
+        node_id       => $node_id,
+        route_url     => ($route->{url} // ''),
+        status_code   => $status,
+        ok            => 0,
+        duration_ms   => _duration_ms($started),
+        error_type    => $type,
+        error_message => $message,
+        metrics       => {},
+        ($usage ? (filter_usage => $usage) : ()),
+      });
+      _render_error($c, $status, $message, $type);
+      undef $tick;
+      $cb->();
+      return;
+    };
+
+    my $answer = eval { $c->skeid->filter_request_p(_filter_context($c, $filter, $model, $api_key_id, $node_id)) };
+    my $promise = (blessed($answer) && $answer->can('then'))
+      ? Mojo::Promise->resolve($answer)
+      : Mojo::Promise->reject(defined($answer) ? 'the filter answered no promise' : 'the filter died');
+    $promise->then(sub {
+      my ($given) = @_;
+      return unless $tick && defined $filter_slot;
+      my ($result, $error) = Langertha::Skeid::Filter->check_result($given, $filter->{texts});
+      return $refuse->(503, 'filter_unavailable', 'The filter is not available; request refused', $error)
+        unless $result;
+      my $decision = $result->{decision};
+      return $refuse->(403, 'filter_refused', 'Request refused by the filter', 'refused', $result->{usage})
+        if $decision eq 'refuse';
+      if ($decision eq 'local') {
+        $release->();
+        return $stay_local->();
+      }
+      undef $filter_slot;
+      my $filtered = _filtered($c, $filter, $result);
+      undef $tick;
+      $cb->($route, $node_id, $started, $tier, $filtered ? $filtered : ());
+      return;
+    }, sub {
+      my ($err) = @_;
+      return unless $tick && defined $filter_slot;
+      $refuse->(503, 'filter_unavailable', 'The filter is not available; request refused',
+        (defined($err) && !ref($err) && length($err) <= 200 ? $err : 'rejected'));
+      return;
+    })->catch(sub {
+      # What runs after the filter (the upstream call) runs in this promise's callback.
+      my ($err) = @_;
+      $c->app->log->error("Routing a filtered request for model '$model' failed: $err");
+      $c->reply->exception($err) unless _client_gone($c) || $c->res->code;
+      return;
+    });
+    return;
+  };
+
   # A client that hangs up while its request waits for capacity stops waiting: the next poll
   # would take a slot for nobody and never give it back. $tick is set exactly as long as
   # admission is undecided, which tells this finish from the one every answered request emits
@@ -2454,6 +2607,13 @@ sub _begin_route_async {
     $tx->on(finish => sub {
       return unless $tick;
       Mojo::IOLoop->remove($wait_timer) if defined $wait_timer;
+      # The client left while the filter was out: the slot it held is given back now.
+      if (defined $filter_slot) {
+        $c->skeid->call_function('request.finish', {
+          id => $filter_slot, ok => 0, aborted => 1, duration_ms => _duration_ms($started),
+        });
+        undef $filter_slot;
+      }
       undef $tick;
       $cb->();
     });
@@ -2461,6 +2621,101 @@ sub _begin_route_async {
 
   $tier_deadline = time + ((@$plan ? ($plan->[0]{wait_ms} // 0) : 0) / 1000);
   $tick->();
+  return;
+}
+
+# The filter seam's part of a route (ADR 0035): the request in the OpenAI shape -- $body is the
+# client's body on the OpenAI face, the translated one on the others -- and on the OpenAI face
+# the client's bytes ($raw true), where filtered texts are put at the offsets of their string
+# tokens -- read off the request only when a text is replaced. Its
+# texts are found only when a node the filter applies to admits it (_begin_route_async). Called
+# only with a filter configured.
+sub _filter_route {
+  my ($c, $face, $kind, $body, $raw) = @_;
+  return (filter => { face => $face, kind => $kind, body => $body, raw => ($raw ? 1 : 0) });
+}
+
+# What the filter is told about a request for an admitted node (the filter hooks, version 1).
+sub _filter_context {
+  my ($c, $filter, $model, $api_key_id, $node_id) = @_;
+  my $skeid = $c->skeid;
+  my $cfg = $skeid->filter_config || {};
+  my $node = _node_by_id($skeid, $node_id) || {};
+  my %headers;
+  for my $name (@{$cfg->{pass_headers} || []}) {
+    my $value = $c->req->headers->header($name);
+    $headers{$name} = $value if defined $value;
+  }
+  return {
+    version      => $skeid->filter_hooks_version,
+    face         => $filter->{face},
+    route        => $c->req->url->path->to_string,
+    kind         => $filter->{kind},
+    model        => $model,
+    node         => { id => $node_id, tags => [ @{$node->{tags} || []} ] },
+    api_key_id   => $api_key_id,
+    organization => $cfg->{organization},
+    mark         => scalar($c->req->headers->header('X-Skeid-Filter')),
+    headers      => \%headers,
+    texts        => [ map { +{ id => $_->{id}, text => $_->{text} } } @{$filter->{texts}{texts}} ],
+  };
+}
+
+# What a pass or replace answer means for the request going upstream, or undef when nothing
+# changes: the texts set in the decoded body (what the translated faces encode, and the OpenAI
+# face's fallback) and, on the OpenAI face, in the client's bytes; the reverse table that
+# translates the answer back; the headers to add; the usage fields. The usage hash is shared with
+# the reverse table, which counts into it until the answer is done.
+sub _filtered {
+  my ($c, $filter, $result) = @_;
+  my $usage = { %{$result->{usage}} };
+  my %filtered = (headers => $result->{headers}, usage => $usage);
+  if ($result->{decision} eq 'replace') {
+    if (%{$result->{texts}}) {
+      Langertha::Skeid::Filter->set_texts($filter->{body}, $filter->{texts}, $result->{texts});
+      $filtered{replaced} = 1;
+      $filtered{bytes} = Langertha::Skeid::Filter->substitute($c->req->body, $filter->{texts},
+        $result->{texts}) if $filter->{raw};
+    }
+    $filtered{restore} = Langertha::Skeid::Filter->restore($result->{map}, $usage);
+  }
+  return ($filtered{replaced} || $filtered{restore} || %$usage || %{$filtered{headers}})
+    ? \%filtered : undef;
+}
+
+# A relay hash ($relay as for _proxy_openai_json_async) that also carries what the filter
+# answered.
+sub _with_filter {
+  my ($relay, $filtered) = @_;
+  return $relay unless $filtered;
+  return { %{$relay || {}}, filter => $filtered };
+}
+
+# The filter's part of an upstream call: its headers replace the client's of the same name, its
+# usage fields go into every usage event of the request (the reverse table counts into them).
+sub _filter_upstream {
+  my ($filter, $headers, $meta) = @_;
+  for my $name (keys %{$filter->{headers} || {}}) {
+    delete @{$headers}{ grep { lc($_) eq lc($name) } keys %$headers };
+    $headers->{$name} = $filter->{headers}{$name};
+  }
+  $meta->{filter_usage} = $filter->{usage} if $filter->{usage};
+  return;
+}
+
+# Stream frames as SSE events, each ended by its blank line.
+my $SSE_JSON = JSON::MaybeXS->new(utf8 => 1, canonical => 1);
+
+sub _sse_frames {
+  return join '', map { 'data: ' . $SSE_JSON->encode($_) . "\n\n" } @_;
+}
+
+# The answer to a request that must stay away from the filter's nodes when no other node can
+# serve it (ADR 0035). 503: the deployment, not the client, has no node for it.
+sub _render_filter_local {
+  my ($c, $model) = @_;
+  _render_error($c, 503, "This request must stay local, and no node outside the filter's zone "
+    . "can serve model '$model'", 'filter_local_unavailable');
   return;
 }
 
@@ -2540,6 +2795,10 @@ sub _proxy_openai_json_async {
   $relay ||= {};
 
   my %fwd_headers = _forward_headers($c, $node_id);
+  # A request the filter answered for (ADR 0035): its headers go upstream, its usage fields into
+  # the event, and the answer is translated back before anything else reads it.
+  my $filter = $relay->{filter};
+  _filter_upstream($filter, \%fwd_headers, $meta) if $filter;
   _inject_node_auth_async(\%fwd_headers, $c->skeid, $node_id, sub {
   my ($no_key) = @_;
 
@@ -2631,6 +2890,16 @@ sub _proxy_openai_json_async {
     my $payload = (defined($relay->{max_parse_bytes}) && ($res->body_size // 0) > $relay->{max_parse_bytes})
       ? undef : eval { $res->json };
 
+    if (my $restore = $filter && $filter->{restore}) {
+      # A translated face reads the decoded answer; the OpenAI face is relayed as bytes, which
+      # keep every byte but the translated strings.
+      if ($translate || $relay->{answer}) {
+        $restore->restore_payload($payload) if ref($payload) eq 'HASH';
+      } elsif (defined(my $restored = $restore->restore_bytes($res->body))) {
+        $res->body($restored);
+      }
+    }
+
     my $translated;
     if ($translate || $relay->{answer}) {
       $translated = eval {
@@ -2706,6 +2975,14 @@ sub _proxy_openai_stream {
   $relay ||= {};
 
   my %fwd_headers = _forward_headers($c, $node_id);
+  # A request the filter replaced texts in (ADR 0035): each frame is translated back before the
+  # face translator sees it, and on the OpenAI face the stream is no longer relayed untouched --
+  # a frame whose text changed or was held back is encoded again, every other line goes as it
+  # came ($rewrite).
+  my $filter = $relay->{filter};
+  _filter_upstream($filter, \%fwd_headers, $meta) if $filter;
+  my $restore = $filter ? $filter->{restore} : undef;
+  my $rewrite = ($restore && !$stream) ? 1 : 0;
 
   # render_later before the key resolution, not after: a cold cache means the callback runs on
   # a later tick, and Mojolicious would have rendered an empty response by then.
@@ -2889,25 +3166,40 @@ sub _proxy_openai_stream {
     while ($pending =~ s/\A([^\n]*)\n//) {
       my $line = $1;
       # SSE makes the space after the colon optional: `data:{...}` is as valid as `data: {...}`.
-      next unless $line =~ /^data:\s?(.*?)\s*$/;
+      unless ($line =~ /^data:\s?(.*?)\s*$/) {
+        $translated .= "$line\n" if $rewrite;
+        next;
+      }
       my $payload = $1;
-      next unless length $payload;
+      unless (length $payload) {
+        $translated .= "$line\n" if $rewrite;
+        next;
+      }
 
       # OpenAI closes with a literal [DONE] sentinel, which is not JSON and has no equivalent
       # in either target format -- the translated stream ends with its own closing events.
-      next if $payload eq '[DONE]';
+      if ($payload eq '[DONE]') {
+        # What the filter's channels still hold goes out before it.
+        $translated .= _sse_frames($restore->flush_frames) . "$line\n" if $rewrite;
+        next;
+      }
 
       my $json = eval { decode_json($payload) };
-      next unless $json && ref($json) eq 'HASH';
+      unless ($json && ref($json) eq 'HASH') {
+        $translated .= "$line\n" if $rewrite;
+        next;
+      }
 
       my $choice = ref($json->{choices}) eq 'ARRAY' ? $json->{choices}[0] : undef;
       if (ref($choice) eq 'HASH' && (my $delta = $choice->{delta})) {
         if (my $delta_content = $delta->{content}) {
           $accumulated_content_bytes += Langertha::Skeid::Protocol::utf8_length($delta_content);
         }
+        # Read through a slice copy: grep aliases what it is given, and a hash element handed to
+        # it is created, which a re-encoded frame would then carry as a null (k118).
         $ttft_ms //= _duration_ms($started)
           if ref($delta) eq 'HASH' && grep { defined($_) && length($_) }
-            $delta->{content}, $delta->{reasoning_content}, $delta->{reasoning},
+            (map { $delta->{$_} } grep { exists $delta->{$_} } qw( content reasoning_content reasoning )),
             (ref($delta->{tool_calls}) eq 'ARRAY' && @{$delta->{tool_calls}} ? 'tool_calls' : undef);
       }
       $finish_reason = $choice->{finish_reason}
@@ -2924,6 +3216,24 @@ sub _proxy_openai_stream {
         $upstream_usage = _merge_usage($upstream_usage, $json->{usage});
       }
 
+      # A filtered stream: the frame translated back first, possibly as two (ADR 0035).
+      if ($restore) {
+        my ($restored, $changed) = $restore->frames($json);
+        if ($rewrite) {
+          $translated .= $changed ? _sse_frames(@$restored) =~ s/\n\z//r : "$line\n";
+          next;
+        }
+        for my $frame (@$restored) {
+          my $out = eval { $stream->delta($frame) };
+          unless (defined $out) {
+            $c->app->log->error('Translating a stream chunk failed for node ' . $node_id);
+            return $fail_translation->();
+          }
+          $translated .= $out;
+        }
+        next;
+      }
+
       if ($stream) {
         my $out = eval { $stream->delta($json) };
         unless (defined $out) {
@@ -2937,7 +3247,7 @@ sub _proxy_openai_stream {
     # The first read event fires with an empty chunk as soon as the upstream headers are
     # parsed, and writing an empty chunk finalizes a Mojolicious response. Relaying it would
     # end the stream before its first token -- headers, no body, no error.
-    if ($stream) {
+    if ($stream || $rewrite) {
       return unless length $translated;
       $wrote = 1;
       push @queue, $translated;
@@ -3062,10 +3372,22 @@ sub _proxy_openai_stream {
     # are coming. Its tail is queued like any other chunk so it still lands after deltas already
     # in flight. Keep an unexpected finalizer exception inside the callback boundary and use the
     # translator's existing in-band error shape without reflecting internal details.
+    # What the filter's channels still hold, for a stream that ended without saying so; on the
+    # OpenAI face with the rest of a last line that had no newline.
+    if ($rewrite && $headers_sent) {
+      my $tail = _sse_frames($restore->flush_frames) . $pending;
+      $pending = '';
+      if (length $tail) {
+        push @queue, $tail;
+        $drain->() unless $draining;
+      }
+    }
+
     if ($stream && $headers_sent) {
       my $tail = '';
       my $finalized = eval {
-        $tail = $stream->finish;
+        $tail = join '', map { $stream->delta($_) // '' } $restore->flush_frames if $restore;
+        $tail .= $stream->finish;
         1;
       };
       unless ($finalized) {
@@ -3126,10 +3448,14 @@ sub _proxy_openai_stream {
 # tool definitions into the prompt in the order they arrive -- so it would hand the model a
 # prompt the client did not write, and its prompt cache a prefix it has not seen.
 #
-# undef, and with it the encoded body, only for bytes the scanner cannot follow.
+# undef, and with it the encoded body, only for bytes the scanner cannot follow -- and for a
+# request a filter replaced texts in (ADR 0035) whose bytes could not take them: its decoded
+# body, with the texts set, is encoded then.
 sub _verbatim_relay {
-  my ($c, $served_model) = @_;
-  my $bytes = Langertha::Skeid::Protocol::RawBody::with_top_level($c->req->body, model => $served_model);
+  my ($c, $served_model, $filtered) = @_;
+  my $source = ($filtered && $filtered->{replaced}) ? $filtered->{bytes} : $c->req->body;
+  return undef unless defined $source;
+  my $bytes = Langertha::Skeid::Protocol::RawBody::with_top_level($source, model => $served_model);
   return undef unless defined $bytes;
   return { request => sub {
     my ($ua, $url, $headers) = @_;
@@ -3978,6 +4304,9 @@ sub _record_usage_event {
       (defined($args->{routed_model}) ? (routed_model => $args->{routed_model}) : ()),
       (defined($args->{ttft_ms}) ? (ttft_ms => 0 + $args->{ttft_ms}) : ()),
       _correlation_field($c),
+      # What the filter reported, allowlisted again by usage.record (skeid k118, ADR 0035).
+      (ref($args->{filter_usage}) eq 'HASH' && %{$args->{filter_usage}}
+        ? (filter_usage => $args->{filter_usage}) : ()),
       metrics       => $safe_metrics,
     });
   };

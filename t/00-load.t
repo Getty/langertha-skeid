@@ -5,6 +5,9 @@ use Test::More;
 
 my @modules = qw(
   Langertha::Skeid
+  Langertha::Skeid::Filter
+  Langertha::Skeid::Filter::HTTP
+  Langertha::Skeid::Filter::Restore
   Langertha::Skeid::Proxy
   Langertha::Skeid::Proxy::Realtime
   Langertha::Skeid::Proxy::RelayContent

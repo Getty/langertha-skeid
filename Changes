@@ -1,6 +1,18 @@
 Revision history for Langertha-Skeid
 
 {{$NEXT}}
+    - Filter seam (ADR 0035, proposed): a filter: section (url, token_env,
+      timeout_ms, when, organization, pass_headers) or a class overriding
+      filter_request_p is asked after the node pick, for nodes carrying a
+      `when` tag. It may pass, replace texts, keep the request local or
+      refuse it, and it fails closed. Replaced texts are put into the
+      client's bytes at their string offsets and nothing else changes;
+      placeholders in the answer (JSON, SSE, tool-call arguments) are
+      translated back, lenient forms included. Relayed routes and non-text
+      parts never reach a filtered node. Usage events carry the filter's
+      pii_*/filter_* fields. New Langertha::Skeid::Filter, ::Filter::Restore,
+      ::Filter::HTTP; capability `filter`. Without a filter, requests are
+      unchanged byte for byte.
     - The jsonlog usage store in mode dir writes events to
       <path>/YYYY-MM-DD/<id>.json (the UTC day of the event id) instead of
       one flat directory that grew without bound. Reports and purges also

@@ -14,6 +14,8 @@ use Mojo::Promise;
 use YAML::PP;
 use Langertha ();
 use Langertha::Skeid::UsageStore;
+use Langertha::Skeid::Filter;
+use Langertha::Skeid::Filter::HTTP;
 use Langertha::Skeid::CustomerSource;
 use Langertha::Skeid::NodeFiles;
 use Langertha::Skeid::Rate;
@@ -247,6 +249,61 @@ gives the slot back.
 A change to the arguments, the return values or the order of these calls raises
 L</dispatch_hooks_version>, so a class can refuse to run on a contract it was not written for.
 Everything else in this class may change between releases without notice.
+
+=head2 Filter Hooks
+
+A filter -- a privacy filter that puts placeholders where a request names a person -- is asked
+for the requests going to the nodes it applies to, after the node is picked and admitted (ADR
+0035 in the distribution repository). Skeid finds the texts, hands them out, puts the filtered
+texts back into the request and translates the placeholders in the answer back; what the filter
+looks for is the filter's. The config's L</filter> section asks a service over HTTP
+(L<Langertha::Skeid::Filter::HTTP>); a subclass can override the hook instead. Version 1 of
+L</filter_hooks_version>:
+
+=over 4
+
+=item L</filter_request_p>
+
+  sub filter_request_p {
+    my ($self, $ctx) = @_;
+    # $ctx: { version => 1, face => 'openai', route => '/v1/chat/completions', kind => 'chat',
+    #         model, node => { id, tags }, api_key_id, organization, mark, headers,
+    #         texts => [{ id => '$.messages[0].content', text => 'I am Max' }] }
+    return Mojo::Promise->resolve({
+      decision => 'replace',                   # pass | replace | local | refuse
+      texts    => [{ id => '$.messages[0].content', text => 'I am ⟦PERSON_1⟧' }],
+      map      => [{ text => 'Max', start => 5, end => 8, placeholder => '⟦PERSON_1⟧' }],
+      headers  => { 'X-Skeid-Filter' => 'done' },  # added to the upstream request
+      usage    => { pii_found => 1 },              # into the usage event, pii_* / filter_*
+    });
+  }
+
+C<face> is C<openai>, C<anthropic> or C<ollama>, C<kind> C<chat> or C<embeddings>, C<model> the
+model the client asked for, C<mark> the client's C<X-Skeid-Filter> header, C<headers> the client
+headers the config's C<pass_headers> names, C<organization> the config's. A text's C<id> is a
+JSON path into the request in the OpenAI shape; inside tool-call arguments it goes on into their
+JSON. The texts are C<messages[].content> (strings and text parts), C<messages[].name>, the
+string values of C<messages[].tool_calls[].function.arguments>, and an embeddings C<input>; never
+keys, schemas, C<tools> or function names.
+
+C<pass> forwards the request unchanged, C<replace> with the texts replaced, C<local> plans it
+again away from the nodes of L</filter_tags> (or answers C<503 filter_local_unavailable>), and
+C<refuse> answers C<403 filter_refused>. An answer that breaks the contract, and a promise that
+rejects, refuse the request with C<503 filter_unavailable>: the filter fails closed. Each map
+entry is a placeholder and the original it stands for -- C<text>, or the span C<start> to C<end>
+of the text C<id> names; the placeholders are translated back in the answer, also in their
+lenient forms (L<Langertha::Skeid::Filter::Restore>).
+
+=item L</filter_tags>
+
+The node tags the filter applies to: the config's C<filter.when>; none means every node. A
+request that cannot be filtered -- a content part that is not text, and every relayed route
+(audio, documents, rerank, realtime) -- is planned away from these nodes.
+
+=back
+
+Without a C<filter:> section and without a class that overrides L</filter_request_p>, nothing of
+this runs: the request goes upstream as before, byte for byte.
 
 =head2 Per-Key Routing Policy
 
@@ -938,6 +995,24 @@ password -- instead of being reported lost, and written once the database is bac
 table. With it, Skeid also starts while the database is down. See
 L<Langertha::Skeid::UsageStore::DBI/spool_dir> and ADR 0027.
 
+=head2 filter
+
+  filter:
+    url: http://pii-filter.internal:8080/filter
+    token_env: SKEID_FILTER_TOKEN
+    timeout_ms: 2000
+    when: [cloud]
+    organization: acme
+    pass_headers: [x-tenant]
+
+The filter the requests to some nodes go through (L</Filter Hooks>, ADR 0035): C<url> is the
+service L<Langertha::Skeid::Filter::HTTP> POSTs the filter context to (required, C<http> or
+C<https>); C<token_env> the environment variable holding its bearer token (the token never
+stands in the file); C<timeout_ms> how long it may take (default 5000); C<when> the node tags it
+applies to (none: every node); C<organization> a name the filter is told; C<pass_headers> the
+client headers it is told. Strict: an unknown key or a wrong value fails the load. Removed from
+the file, no request is filtered again.
+
 =head2 skeid_class
 
   skeid_class: My::Skeid
@@ -1297,6 +1372,18 @@ C<documents.allow_remote_sources>. See L</documents>.
 has documents_allow_remote_sources => (
   is      => 'rw',
   default => sub { 0 },
+);
+
+=attr filter_config
+
+The config's L</filter> section, checked, or undef: then only a class that overrides
+L</filter_request_p> filters.
+
+=cut
+
+has filter_config => (
+  is      => 'rw',
+  default => sub { undef },
 );
 
 =attr realtime_idle_timeout
@@ -2371,7 +2458,7 @@ my @CONFIG_STATE = qw(
   route_wait_timeout_ms route_wait_poll_ms trust_key_id_header frontend_count correlation_header catch_all
   admin_api_key _config_admin_api_key
   manifest_enabled manifest_available key_manifests client_auth_keys upload_max_bytes
-  documents_max_bytes documents_allow_remote_sources
+  documents_max_bytes documents_allow_remote_sources filter_config
   mcp_servers mcp_public_url mcp_max_request_bytes openapi_swagger_ui openapi_cache_dir
   realtime_idle_timeout realtime_max_session_seconds realtime_max_message_bytes
   realtime_max_queued_bytes
@@ -2828,6 +2915,14 @@ sub _apply_config {
     $self->_load_documents($cfg->{documents});
   } elsif ($before->{documents}) {
     $self->documents_allow_remote_sources(0);
+  }
+
+  # The filter (skeid k118, ADR 0035). Removed from the file, no request is filtered again.
+  if (exists $cfg->{filter}) {
+    $declared{filter} = 1;
+    $self->filter_config($self->_load_filter($cfg->{filter}));
+  } elsif ($before->{filter}) {
+    $self->filter_config(undef);
   }
 
   # The limits of a realtime session (skeid k95). Removed from the file, the defaults again.
@@ -3841,7 +3936,10 @@ C<metrics> the token counts (C<input_tokens>, C<output_tokens>, C<total_tokens>,
 C<cached_tokens>, C<cache_write_tokens>), C<tool_calls> and the costs (C<cost_input_usd>,
 C<cost_output_usd>, C<cost_total_usd>, C<cost_cache_read_usd>, C<cost_cache_write_usd>). Costs
 arrive already priced; nothing is priced here. C<content_bytes>, C<audio_seconds>,
-C<documents> and C<pages> are set only when given. The C<usage.record> function calls it.
+C<documents> and C<pages> are set only when given. C<filter_usage>, what a filter reported
+(L</Filter Hooks>), adds its C<pii_*> and C<filter_*> fields that pass
+L<Langertha::Skeid::Filter/usage_fields>, never over a field of the event's own. The
+C<usage.record> function calls it.
 
 =cut
 
@@ -3939,6 +4037,14 @@ sub record_usage {
   # request has it: an event without the key was not bent.
   $event{routed_model} = "$args{routed_model}"
     if defined($args{routed_model}) && !ref($args{routed_model}) && length($args{routed_model});
+
+  # What a filter reported for the request (skeid k118, ADR 0035): pii_* and filter_* fields
+  # only, numbers, short token strings or flat hashes of numbers, so nothing can carry a text or
+  # a placeholder into the store. Never over a field of the event's own.
+  if (ref($args{filter_usage}) eq 'HASH') {
+    my $fields = Langertha::Skeid::Filter->usage_fields($args{filter_usage});
+    exists($event{$_}) or $event{$_} = $fields->{$_} for keys %$fields;
+  }
 
   return $self->_store_usage_event(\%event);
 }
@@ -4726,13 +4832,16 @@ line). A name is added when its feature ships and never removed or renamed:
 =item * C<skeid_class> -- the dispatch hooks (L</Dispatch Hooks>), C<skeid serve --class>, the
 config's C<skeid_class> and C<skeid pack> (ADR 0030)
 
+=item * C<filter> -- the filter hooks (L</Filter Hooks>), the config's L</filter> and the
+C<pii_*> / C<filter_*> fields of a usage event (ADR 0035)
+
 =back
 
 =cut
 
 my @CAPABILITIES = qw(
   documents ollama_embed node_files key_rate customer_source_rate usage_contract usage_purge
-  openbao_token_file catch_all skeid_class
+  openbao_token_file catch_all skeid_class filter
 );
 
 sub capabilities { return @CAPABILITIES }
@@ -5111,6 +5220,45 @@ sub _load_documents {
   }
   $self->documents_allow_remote_sources($allow);
   return;
+}
+
+# The filter section (skeid k118, ADR 0035). Strict like documents: an unknown key or a value of
+# the wrong kind fails the load, since a filter that is quietly not asked lets through what it
+# was there to stop.
+my @FILTER_KEYS = qw( organization pass_headers timeout_ms token_env url when );
+
+sub _load_filter {
+  my ($self, $section) = @_;
+  croak 'filter must be a hash, as in filter: { url: http://filter:8080/filter, when: [cloud] }'
+    unless ref($section) eq 'HASH';
+  my %known = map { $_ => 1 } @FILTER_KEYS;
+  for my $key (sort keys %$section) {
+    croak "filter: unknown key '$key' (known: " . join(', ', @FILTER_KEYS) . ')' unless $known{$key};
+  }
+  my $url = $section->{url};
+  croak 'filter.url is required, an http or https URL'
+    unless defined($url) && !ref($url) && $url =~ m{\Ahttps?://[^\s/]+}i;
+  my %cfg = (url => "$url", timeout_ms => 5000, when => [], pass_headers => []);
+  if (defined(my $ms = $section->{timeout_ms})) {
+    croak 'filter.timeout_ms must be an integer of at least 1 (milliseconds)'
+      unless !ref($ms) && $ms =~ /\A[0-9]+\z/ && $ms >= 1;
+    $cfg{timeout_ms} = 0 + $ms;
+  }
+  for my $key (qw( token_env organization )) {
+    my $v = $section->{$key};
+    next unless defined $v;
+    croak "filter.$key must be a string" if ref($v) || !length($v);
+    $cfg{$key} = "$v";
+  }
+  for my $key (qw( when pass_headers )) {
+    my $v = $section->{$key};
+    next unless defined $v;
+    $v = [$v] unless ref $v;
+    croak "filter.$key must be a list of names"
+      unless ref($v) eq 'ARRAY' && !grep { !defined($_) || ref($_) || !length($_) } @$v;
+    $cfg{$key} = [ map { $key eq 'pass_headers' ? lc("$_") : "$_" } @$v ];
+  }
+  return \%cfg;
 }
 
 # The realtime section (skeid k95, ADR 0029). Strict like uploads: a misspelled key or a value
@@ -5498,6 +5646,108 @@ The version of the dispatch hook contract (L</Dispatch Hooks>) this Skeid implem
 =cut
 
 sub dispatch_hooks_version { 1 }
+
+=method filter_request_p
+
+  $skeid->filter_request_p($ctx)->then(sub { my ($answer) = @_; ... });
+
+The filter hook (L</Filter Hooks>): a L<Mojo::Promise> of the filter's answer for the request
+C<$ctx> describes. The default asks L<Langertha::Skeid::Filter::HTTP> when the config has a
+L</filter> section, and answers C<< { decision => 'pass' } >> otherwise. The proxy calls it only
+when L</filters_requests> is true, for a node L</filter_applies> to.
+
+=cut
+
+sub filter_request_p {
+  my ($self, $ctx) = @_;
+  my $client = $self->_filter_client;
+  return $client ? $client->request_p($ctx) : Mojo::Promise->resolve({ decision => 'pass' });
+}
+
+# The HTTP filter of the config in force, made again when a reload changed the section.
+has _filter_http => (is => 'rw', init_arg => undef);
+
+sub _filter_client {
+  my ($self) = @_;
+  my $cfg = $self->filter_config or return undef;
+  my $held = $self->_filter_http;
+  return $held->[1] if $held && $held->[0] == $cfg;
+  my $client = Langertha::Skeid::Filter::HTTP->new(
+    url        => $cfg->{url},
+    timeout_ms => $cfg->{timeout_ms},
+    (defined($cfg->{token_env}) ? (token_env => $cfg->{token_env}) : ()),
+  );
+  $self->_filter_http([$cfg, $client]);
+  return $client;
+}
+
+=method filter_tags
+
+  my $tags = $skeid->filter_tags;   # [ 'cloud' ], or undef: every node
+
+The node tags the filter applies to (L</Filter Hooks>): the config's C<filter.when>, undef when it
+names none. A subclass may override it.
+
+=cut
+
+sub filter_tags {
+  my ($self) = @_;
+  my $cfg = $self->filter_config;
+  my $when = $cfg ? $cfg->{when} : undef;
+  return (ref($when) eq 'ARRAY' && @$when) ? $when : undef;
+}
+
+=method filters_requests
+
+  my $on = $skeid->filters_requests;
+
+True when requests are filtered at all: the config has a L</filter> section, or the class
+overrides L</filter_request_p>. False, and the proxy does nothing of the filter seam.
+
+=cut
+
+sub filters_requests {
+  my ($self) = @_;
+  return ($self->_filter_overridden || $self->filter_config) ? 1 : 0;
+}
+
+has _filter_overridden => (is => 'lazy', init_arg => undef);
+
+sub _build__filter_overridden {
+  my ($self) = @_;
+  return $self->can('filter_request_p') == __PACKAGE__->can('filter_request_p') ? 0 : 1;
+}
+
+=method filter_applies
+
+  my $ask = $skeid->filter_applies($node);
+
+True when the filter applies to C<$node> (a node of the inventory, or its id): requests are
+filtered (L</filters_requests>) and the node carries one of L</filter_tags>, or there are none.
+
+=cut
+
+sub filter_applies {
+  my ($self, $node) = @_;
+  return 0 unless $self->filters_requests;
+  my $tags = $self->filter_tags or return 1;
+  unless (ref $node) {
+    my $id = $node;
+    ($node) = grep { ($_->{id} // '') eq ($id // '') } @{$self->nodes};
+  }
+  my %has = map { $_ => 1 } @{(ref($node) eq 'HASH' ? $node->{tags} : undef) || []};
+  return (grep { $has{$_} } @$tags) ? 1 : 0;
+}
+
+=method filter_hooks_version
+
+  die "written for filter hooks 1\n" unless My::Skeid->filter_hooks_version == 1;
+
+The version of the filter hook contract (L</Filter Hooks>) this Skeid implements: 1.
+
+=cut
+
+sub filter_hooks_version { 1 }
 
 =method route_state
 
