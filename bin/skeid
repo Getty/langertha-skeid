@@ -308,8 +308,6 @@ sub _config_file {
   exit 2;
 }
 
-# Prints the key id a customer key routes and bills under. Needed because a config names
-# customers in keys:, and must be able to do that without holding their keys.
 # skeid usage-purge (skeid k122): delete usage events of key ids, or past the retention, through
 # the config's usage store. Meant for an erasure step and for a cron job; prints the result as
 # JSON so the caller can record it. Exit 0 when it succeeded, 2 when not.
@@ -325,14 +323,19 @@ sub _run_usage_purge {
     'dry-run'        => \$dry_run,
   ) or die _usage_text();
   push @ids, @argv;
-  die "skeid usage-purge: --before and --retention exclude each other\n" if defined($before) && $retention;
+  if (defined($before) && $retention) {
+    print STDERR "ERROR: skeid usage-purge: --before and --retention exclude each other\n";
+    return 2;
+  }
 
   my $config_file = _config_file($config);
   my $skeid = Langertha::Skeid->new(defined($config_file) ? (config_file => $config_file) : ());
   if ($retention) {
     $before = $skeid->usage_retention_before;
-    die "skeid usage-purge: --retention needs usage_store.retention_days in the config\n"
-      unless defined $before;
+    unless (defined $before) {
+      print STDERR "ERROR: skeid usage-purge: --retention needs usage_store.retention_days in the config\n";
+      return 2;
+    }
   }
 
   my $result = $skeid->purge_usage(
@@ -345,6 +348,8 @@ sub _run_usage_purge {
   return $result->{ok} ? 0 : 2;
 }
 
+# Prints the key id a customer key routes and bills under. Needed because a config names
+# customers in keys:, and must be able to do that without holding their keys.
 sub _run_keyid {
   my (@argv) = @_;
 
@@ -533,7 +538,8 @@ C<usage_store.retention_days> with C<--retention>, the purge run a cron job make
 only counts. Prints the result as JSON, for the caller to record, and exits 0 when it succeeded,
 2 when not (the spool still holds events, the database is down) -- run it again then, it is
 idempotent. C<--before> together with C<--retention>, and C<--retention> without a
-C<retention_days>, end the command with a message before anything is deleted.
+C<retention_days>, are usage errors: an C<ERROR:> line on standard error and exit code 2, before
+anything is deleted.
 
 =opt --config, -c
 

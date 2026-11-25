@@ -165,6 +165,19 @@ SKIP: {
   $out = qx{$^X -Ilib $bin usage-purge --config $config 2>&1};
   is $? >> 8, 2, 'without key ids or a time it refuses (exit 2)';
 
+  # Conflicting options are a usage error, exit 2 like a missing --config -- not die's 255.
+  $out = qx{$^X -Ilib $bin usage-purge --config $config --retention --before 2020-01-01T00:00:00Z 2>&1};
+  is $? >> 8, 2, '--before with --retention is a usage error (exit 2)';
+  like $out, qr/\AERROR: .*--before and --retention exclude each other/, 'and says why';
+
+  my $bare = "$dir/cli-no-retention.yaml";
+  open my $bfh, '>', $bare or die $!;
+  print {$bfh} "usage_store:\n  backend: jsonlog\n  log_path: $log\n  mode: file\n";
+  close $bfh;
+  $out = qx{$^X -Ilib $bin usage-purge --config $bare --retention 2>&1};
+  is $? >> 8, 2, '--retention without retention_days is a usage error (exit 2)';
+  like $out, qr/\AERROR: .*--retention needs usage_store\.retention_days/, 'and says why';
+
   SKIP: {
     skip 'Windows keeps no Unix permission bits: chmod only sets a file read-only', 1
       if $^O eq 'MSWin32';
