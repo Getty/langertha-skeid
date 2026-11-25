@@ -2424,6 +2424,10 @@ sub _begin_route_async {
 
     # Eligible but nothing free: this tier is worth waiting on, up to its own window.
     if (time < $tier_deadline) {
+      # The answer now comes from the timer, after the action has returned: without this,
+      # Mojolicious looks for a template and logs that nothing was rendered (skeid k138). Only
+      # here, so a request that does not wait pays nothing. A stand-in controller lacks it.
+      $c->render_later if $c->can('render_later');
       $wait_timer = Mojo::IOLoop->timer($wait_poll_ms / 1000, $tick);
       return;
     }

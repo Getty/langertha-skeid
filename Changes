@@ -43,6 +43,9 @@ Revision history for Langertha-Skeid
       load the class; skeid pack --class My::Skeid -o FILE builds one
       executable with PAR::Packer (suggested, not required). Capability
       skeid_class.
+    - A request that waits for capacity on the route wait timer no longer
+      makes Mojolicious log a template lookup and "Nothing has been
+      rendered".
 
 0.005     2026-11-19 18:38:03Z
 
