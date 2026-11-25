@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-11-25T05:24:15Z
+claimed_by: orchestrator
+class: standard
+completed: 2026-11-25T05:24:06Z
+created: 2026-11-19T03:45:03Z
+id: 130
+priority: low
+started: 2026-11-25T05:12:43Z
+status: done
+tags:
+- config
+- reload
+title: correlation_header is not rolled back when a config load fails after the routing
+  section
+updated: 2026-11-25T05:24:15Z
+---
+
+Found during k129 (2026-11-19), predates it: routing.correlation_header is not in @CONFIG_STATE in lib/Langertha/Skeid.pm, so a load or reload that croaks after the routing section (registry, manifest) leaves a changed correlation_header in force while the rest of the config is rolled back. Reported by skeid-worker from reading the code; not reproduced with a test yet. Wanted: a failing test in the style of t/48-config-reload-failure.t, then the attribute in the rolled-back state.
+
+2026-11-25 05:16 Reproduced: new block in t/48-config-reload-failure.t sets all six routing keys, then breaks registry (ttl_s 0) or manifest (enabled without public_url). Before fix: 2/63 failed (tests 35, 43): correlation_header stayed 'X-Correlation-ID' instead of undef, for both registry and manifest. The other five routing attrs (route_wait_timeout_ms, route_wait_poll_ms, trust_key_id_header, frontend_count, catch_all) already roll back, so no other routing gap. Fix: correlation_header added to @CONFIG_STATE. t/48 now 63/63 green.
+
+2026-11-25 05:17 Done: correlation_header added to @CONFIG_STATE in lib/Langertha/Skeid.pm (one word). Regression block in t/48-config-reload-failure.t breaks the registry and then the manifest after a routing section that sets all six keys, and checks each routing attr is rolled back. Red before the fix: 2/63 failed (correlation_header, registry and manifest cases). Green after: 63/63. prove -lr t/: Files=117, Tests=6557, Result: PASS. No other routing attribute has the gap: all six %ROUTING_SETTINGS targets are now in @CONFIG_STATE. Not committed. Tree also carries an unrelated t/94-usage-purge.t change that is not mine.
+
+Committed 14cf57d (not pushed).
