@@ -32,6 +32,9 @@ spelled in the order the function-calling wire spells it.
 
 my $STRING = JSON::MaybeXS->new(utf8 => 1, allow_nonref => 1);
 
+# One JSON string token, unrolled so a long string is one match and not one per character.
+my $STRING_TOKEN = qr/"[^"\\]*+(?:\\.[^"\\]*+)*+"/s;
+
 =func with_top_level
 
   my $bytes = Langertha::Skeid::Protocol::RawBody::with_top_level($body, model => $served);
@@ -72,7 +75,7 @@ sub _top_level_spans {
   $json =~ /\G\s*/gc;
   unless ($json =~ /\G\}/gc) {
     while (1) {
-      $json =~ /\G\s*("(?:[^"\\]|\\.)*")\s*:\s*/gcs or return undef;
+      $json =~ /\G\s*($STRING_TOKEN)\s*:\s*/gc or return undef;
       my $key = eval { $STRING->decode($1) };
       return undef unless defined $key;
       my $start = pos($json);
@@ -122,12 +125,12 @@ sub _member {
 # Moves pos() of the referenced string past one JSON value.
 sub _skip_value {
   my ($ref) = @_;
-  return 1 if $$ref =~ /\G"(?:[^"\\]|\\.)*"/gcs;
+  return 1 if $$ref =~ /\G$STRING_TOKEN/gc;
   if ($$ref =~ /\G[\[\{]/gc) {
     my $depth = 1;
     while ($depth) {
       if    ($$ref =~ /\G[^"\[\]\{\}]+/gc)       { }
-      elsif ($$ref =~ /\G"(?:[^"\\]|\\.)*"/gcs)   { }
+      elsif ($$ref =~ /\G$STRING_TOKEN/gc)       { }
       elsif ($$ref =~ /\G[\[\{]/gc)              { $depth++ }
       elsif ($$ref =~ /\G[\]\}]/gc)              { $depth-- }
       else                                       { return 0 }
@@ -253,9 +256,6 @@ sub string_values {
   $json =~ /\G\s*\z/gc or return undef;
   return { strings => $state{strings}, duplicate => $state{duplicate} };
 }
-
-# One JSON string token, unrolled so a long string is one match and not one per character.
-my $STRING_TOKEN = qr/"[^"\\]*+(?:\\.[^"\\]*+)*+"/s;
 
 sub _scan_value {
   my ($ref, $path, $state, $depth) = @_;

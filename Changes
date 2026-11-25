@@ -61,6 +61,12 @@ Revision history for Langertha-Skeid
     - A request that waits for capacity on the route wait timer no longer
       makes Mojolicious log a template lookup and "Nothing has been
       rendered".
+    - OpenAI chat and embeddings requests match a JSON string in one step
+      instead of one character at a time when relaying the body: the scan of
+      a 21–209 KB body is 10–25× faster, raising single-process throughput
+      by 18–42 % at ~21 KB and 2.4–4.1× at ~209 KB; small bodies are
+      unchanged. A single 1 MB string no longer blocks the process for ~250
+      ms.
 
 0.005     2026-11-19 18:38:03Z
 
