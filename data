@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-11-25T06:47:25Z
+claimed_by: skeid-release-manager
+class: standard
+completed: 2026-11-25T06:47:17Z
+created: 2026-11-25T06:39:25Z
+id: 138
+priority: low
+started: 2026-11-25T06:40:23Z
+status: done
+tags:
+- proxy
+- routing
+title: A request that waits on a timer for capacity logs 'Nothing has been rendered'
+  — render_later missing on the sync wait path
+updated: 2026-11-25T06:47:25Z
+---
+
+Found in k111 (2026-11-25), predates it: on the synchronous pick path, a request that has to wait for free capacity (route wait timer in _begin_route_async, Proxy.pm) is answered from a timer callback after the action returned, without render_later. Mojolicious then logs Template "...html.ep" not found and "Nothing has been rendered, expecting delayed response" per waiting request (responses are correct). k111 fixed the same for the async pick path. Wanted: a regression test in the style of the k111 one in t/101-dispatch-hooks.t (log captured at trace level) for a request that waits, then render_later before the wait timer is armed.
+
+2026-11-25 06:46 Red first: t/103-route-wait-render-later.t, node max_conns 1 occupied, log at trace. Wait-then-served and wait-then-429 both logged 'Template "v1chatcompletions.html.ep" not found' + 'Nothing has been rendered'; no-wait and 503 were clean. Fix: Proxy.pm $picked, $c->render_later right before the wait timer is armed (guarded by can(), t/13 uses a stand-in controller without it). Green; 429 after timeout and 503 log exactly one status line for the client request.
+
+2026-11-25 06:46 Done: render_later only where the route wait timer is armed (lib/Langertha/Skeid/Proxy.pm, _begin_route_async $picked); new t/103-route-wait-render-later.t (waits+served, waits+429 rendered once, 503 rendered once, no-wait). prove -lr t/: Files=121, Tests=6643, Result: PASS; skipped (env unset): t/90-customer-source-postgresql.t, t/950-live-docling.t, t/951-live-speaches.t. Not committed.
+
+Committed as c226710
