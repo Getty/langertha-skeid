@@ -1,0 +1,24 @@
+---
+claimed_at: 2026-11-25T05:24:43Z
+claimed_by: orchestrator
+class: standard
+completed: 2026-11-25T05:24:34Z
+created: 2026-11-19T06:12:38Z
+id: 134
+priority: low
+started: 2026-11-25T05:12:47Z
+status: done
+tags:
+- cli
+title: 'skeid usage-purge: option errors exit 255 via die, and _run_keyid comment
+  sits above _run_usage_purge'
+updated: 2026-11-25T05:24:43Z
+---
+
+Found in k132 (POD audit): in bin/skeid, usage-purge option conflicts (--before with --retention; --retention without usage_store.retention_days) end through die (exit 255), not a usage error (exit 2) like the other subcommands. The comment block for _run_keyid sits above _run_usage_purge. The POD now only says they "end the command with a message".
+
+2026-11-25 05:17 Convention: an option error in bin/skeid is 'ERROR: ...' + exit 2 (_config_file to STDERR; skeid usage returns 2). usage-purge's two conflicts now print 'ERROR: skeid usage-purge: ...' to STDERR and return 2. Red test in t/94-usage-purge.t (4 failures: got 255, no ERROR prefix), green after the fix. _run_keyid comment moved above _run_keyid; POD states the exit code. Also found: a GetOptions failure (unknown option) still ends through 'die _usage_text()' (exit 255) in serve, usage and usage-purge, and so does an unknown command or keyid without a key. The POD says only 'exits non-zero', so this is consistent but not exit 2. Left out of scope.
+
+2026-11-25 05:18 Done: bin/skeid usage-purge conflicts (--before with --retention; --retention without usage_store.retention_days) now print 'ERROR: skeid usage-purge: ...' to STDERR and return 2, the same convention as _config_file. The _run_keyid comment now sits above _run_keyid. The POD states the ERROR line and exit 2. Regression test in t/94-usage-purge.t: 4 new assertions, red (got 255) before the fix, green after. prove -lr t/: Files=117, Tests=6557, Result: PASS. My files: bin/skeid and t/94-usage-purge.t. The dist.ini, Skeid.pm and t/48 changes in the tree belong to the parallel agent.
+
+Committed 151fbee (not pushed).
