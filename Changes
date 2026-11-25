@@ -1,6 +1,11 @@
 Revision history for Langertha-Skeid
 
 {{$NEXT}}
+    - The jsonlog usage store in mode dir writes events to
+      <path>/YYYY-MM-DD/<id>.json (the UTC day of the event id) instead of
+      one flat directory that grew without bound. Reports and purges also
+      read the flat files of an existing directory, so nothing needs
+      migrating; a purge removes a day directory it empties.
     - skeid usage-purge with --before together with --retention, or with
       --retention and no usage_store.retention_days, is a usage error: an
       ERROR: line on stderr and exit code 2, before anything is deleted.

@@ -102,7 +102,7 @@ sub read_event {
   ok($second->{ok}, 'second colliding event retries successfully');
   isnt($second->{id}, $first->{id}, 'retry returns the id it actually stored');
 
-  my @files = sort glob("$dir/*.json");
+  my @files = sort glob("$dir/*/*.json");
   is(scalar(@files), 2, 'both usage events remain on disk');
   is_deeply(
     [ sort map { read_event($_)->{marker} } @files ],
@@ -115,7 +115,9 @@ sub read_event {
 # byte-for-byte intact.
 {
   my $dir = tempdir(CLEANUP => 1);
-  my $file = "$dir/occupied-id.json";
+  # The day directory is pinned so the seeded file is where the store writes (skeid k131).
+  mkdir "$dir/2026-11-25" or die "Cannot seed $dir/2026-11-25: $!";
+  my $file = "$dir/2026-11-25/occupied-id.json";
   my $original = qq({"id":"occupied-id","marker":"original"}\n);
   open my $fh, '>', $file or die "Cannot seed $file: $!";
   print {$fh} $original or die "Cannot seed $file: $!";
@@ -128,6 +130,7 @@ sub read_event {
     $attempts++;
     return 'occupied-id';
   };
+  local *Langertha::Skeid::UsageStore::JsonLog::strftime = sub { '2026-11-25' };
 
   my $res = $store->store({ marker => 'replacement' });
   ok(!$res->{ok}, 'exhausted collisions are reported as a failure');
@@ -139,7 +142,7 @@ sub read_event {
   local $/;
   is(<$saved_fh>, $original, 'exhausted retries never overwrite the existing event');
   close $saved_fh or die "Cannot close $file: $!";
-  my @files = glob("$dir/*.json");
+  my @files = glob("$dir/*/*.json");
   is(scalar(@files), 1, 'exhausted retries create no replacement file');
 }
 

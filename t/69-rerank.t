@@ -1008,7 +1008,7 @@ subtest 'jsonlog writes documents and reports them' => sub {
   my $dir = "$TMP/jsonlog";
   my $skeid = Langertha::Skeid->new(usage_store => { backend => 'jsonlog', path => $dir, mode => 'dir' });
   record_events($skeid, @EVENTS);
-  my @lines = map { decode_json($_) } map { path($_)->lines_utf8 } grep { -f } path($dir)->children;
+  my @lines = map { decode_json($_) } map { path($_)->lines_utf8 } grep { -f } map { $_->children } path($dir)->children;  # events sit in day directories (skeid k131)
   is scalar(@lines), 4, 'four events on disk';
   is_deeply [ sort { $a <=> $b } map { $_->{documents} } grep { exists $_->{documents} } @lines ],
     [ 3, 40 ], 'the two answered rerank events carry their count';

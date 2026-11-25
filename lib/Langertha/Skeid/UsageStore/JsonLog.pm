@@ -7,7 +7,7 @@ use warnings;
 use POSIX qw(strftime);
 use IO::Handle;
 use Fcntl qw(O_WRONLY O_CREAT O_EXCL LOCK_EX);
-use Errno qw(EEXIST EINTR);
+use Errno qw(EEXIST EINTR ENOENT ENOTEMPTY);
 use Digest::SHA qw(sha256_hex);
 use Time::HiRes ();
 use File::Basename qw(dirname);
@@ -33,7 +33,12 @@ Required. Directory (C<mode> C<dir>) or file (C<mode> C<file>) the events are wr
 =attr mode
 
 C<dir> (the default) writes one C<< <id>.json >> per event, created exclusively, which never needs
-a lock and is safe with several writers. C<file> appends one JSON line per event under an
+a lock and is safe with several writers. The files go into a directory per UTC day,
+C<< <path>/YYYY-MM-DD/<id>.json >>, the day of the time in the event's id (when it was written;
+C<created_at> may say otherwise). A day directory is made when its first event is written; a
+store remembers the last one it made, so an event costs no extra system call. Reports and purges
+also read the C<< <path>/*.json >> files of a store from before the day directories, which need
+no migration. C<file> appends one JSON line per event under an
 exclusive C<flock>; any value other than C<dir> behaves as C<file>. The event id --
 UTC time, process id, a per-process random nonce and a sequence number -- is stored in the event
 as C<id>.
@@ -53,6 +58,9 @@ crash losing an already-answered request's event is unacceptable.
 =cut
 
 has fsync => (is => 'ro', default => sub { 0 });
+
+# The day directory (YYYY-MM-DD) this store last made or found, so the write path skips mkdir.
+has _ready_day => (is => 'rw', init_arg => undef);
 
 =method backend
 
@@ -119,6 +127,7 @@ sub _new_process_nonce {
 }
 
 sub _event_id {
+  my ($now) = @_;
   my $pid = $$;
   if (!defined($EVENT_ID_STATE{pid}) || $EVENT_ID_STATE{pid} != $pid) {
     %EVENT_ID_STATE = (
@@ -128,7 +137,7 @@ sub _event_id {
     );
   }
   my $sequence = ++$EVENT_ID_STATE{sequence};
-  my $ts = strftime('%Y%m%d-%H%M%S', gmtime());
+  my $ts = strftime('%Y%m%d-%H%M%S', gmtime($now // time));
   return sprintf('%s-%d-%s-%010d', $ts, $pid, $EVENT_ID_STATE{nonce}, $sequence);
 }
 
@@ -173,6 +182,39 @@ sub _holds_file_at {
   return $held[0] == $now[0] && $held[1] == $now[1];
 }
 
+# The day directory for $day, made unless this store already made or found it.
+sub _day_dir {
+  my ( $self, $day ) = @_;
+  my $dir = File::Spec->catdir($self->path, $day);
+  return $dir if ($self->_ready_day // '') eq $day;
+  mkdir $dir or $! == EEXIST or return (undef, "Cannot create $dir: $!");
+  $self->_ready_day($day);
+  return $dir;
+}
+
+# The event files in dir mode, oldest id first -- the day directories' and the flat ones a store
+# before them wrote -- each as [ $file, $day_dir ] ($day_dir undef for a flat file), and the day
+# directories. readdir, not glob: a glob splits a path with a space in it.
+sub _event_files {
+  my ( $self ) = @_;
+  my ( @files, @days );
+  opendir(my $dh, $self->path) or return ( [], [] );
+  for my $name (readdir $dh) {
+    next if $name =~ /\A\./;
+    if ($name =~ /\A\d{4}-\d\d-\d\d\z/) {
+      my $day = File::Spec->catdir($self->path, $name);
+      opendir(my $ddh, $day) or next;
+      push @days, $day;
+      push @files, map { [ $_, File::Spec->catfile($day, $_), $day ] } grep { /\.json\z/ && !/\A\./ } readdir $ddh;
+      closedir $ddh;
+    } elsif ($name =~ /\.json\z/) {
+      push @files, [ $name, File::Spec->catfile($self->path, $name), undef ];
+    }
+  }
+  closedir $dh;
+  return ( [ map { [ $_->[1], $_->[2] ] } sort { $a->[0] cmp $b->[0] } @files ], [ sort @days ] );
+}
+
 =method store
 
   my $res = $store->store($event);
@@ -188,12 +230,17 @@ sub store {
 
   if ($self->mode eq 'dir') {
     for (1 .. $CREATE_ATTEMPTS) {
-      my $id = _event_id();
+      my $now = time;
+      my ($dir, $mkdir_error) = $self->_day_dir(strftime('%Y-%m-%d', gmtime $now));
+      return { ok => 0, error => $mkdir_error } unless defined $dir;
+      my $id = _event_id($now);
       my $json = encode_json({ %$event, id => $id });
-      my $file = File::Spec->catfile($self->path, "${id}.json");
+      my $file = File::Spec->catfile($dir, "${id}.json");
       my $fh;
       unless (sysopen $fh, $file, O_WRONLY | O_CREAT | O_EXCL, 0666) {
         next if $! == EEXIST;
+        # A purge removed the day directory it emptied: make it again.
+        if ($! == ENOENT) { $self->_ready_day(undef); next }
         return { ok => 0, error => "Cannot write $file: $!" };
       }
       my $error = _write_and_close($self, $fh, $file, $json, 'write');
@@ -240,8 +287,10 @@ sub store {
 
 Deletes the events a request from L<Langertha::Skeid::UsageStore/purge_request> matches; see
 L<Langertha::Skeid::UsageStore/The store contract> for the answer. In directory mode each
-matching event's file is removed. In file mode the file is rewritten without them under the
-same lock appends take, to a temporary file renamed over it, so no event appended meanwhile is
+matching event's file is removed, in the day directories and among the flat files alike, and a
+day directory the purge leaves without events is removed too -- unless a writer put an event
+into it meanwhile; a writer whose day directory a purge removed makes it again. In file mode
+the file is rewritten without them under the same lock appends take, to a temporary file renamed over it, so no event appended meanwhile is
 lost and a crash leaves either the old file or the new one. Windows refuses to rename over a
 file held open: there the kept events are written back into the locked file itself once the
 temporary file holds them, and a crash meanwhile leaves that copy, F<PATH.purge-PID>. An
@@ -263,16 +312,25 @@ sub purge {
   };
 
   if ($self->mode eq 'dir') {
-    my ($matched, $deleted) = (0, 0);
-    for my $file (sort glob(File::Spec->catfile($self->path, '*.json'))) {
+    my ($matched, $deleted, %kept) = (0, 0);
+    my ($files, $days) = $self->_event_files;
+    for my $entry (@$files) {
+      my ($file, $day) = @$entry;
       my $text = eval { Langertha::Skeid::UsageStore::read_text_file($file) };
-      next unless defined $text;
-      my $ev = eval { decode_json($text) };
-      next unless $matches->($ev);
+      my $ev = defined($text) ? eval { decode_json($text) } : undef;
+      unless ($matches->($ev)) { $kept{$day}++ if defined $day; next }
       $matched++;
-      next if $request->{dry_run};
+      if ($request->{dry_run}) { $kept{$day}++ if defined $day; next }
       unlink($file) or return { ok => 0, error => "Cannot remove $file: $!", matched => $matched, deleted => $deleted };
       $deleted++;
+    }
+    # A day directory the purge left without events goes too. A writer may have put an event
+    # into it meanwhile: then it is not empty, and stays.
+    unless ($request->{dry_run}) {
+      for my $day (grep { !$kept{$_} } @$days) {
+        next if rmdir($day) || $! == ENOTEMPTY || $! == EEXIST || $! == ENOENT;
+        return { ok => 0, error => "Cannot remove $day: $!", matched => $matched, deleted => $deleted };
+      }
     }
     return { ok => 1, matched => $matched, deleted => $deleted };
   }
@@ -342,8 +400,9 @@ sub purge {
 
   my $report = $store->report(\%filters);
 
-Reads every event, applies the C<since> / C<api_key_id> / C<model> filters, and aggregates
-totals plus per-key and per-model breakdowns, the C<audio_seconds> of the audio routes and the
+Reads every event -- in directory mode those of the day directories and the flat files of a
+store from before them, ordered by id -- applies the C<since> / C<api_key_id> / C<model>
+filters, and aggregates totals plus per-key and per-model breakdowns, the C<audio_seconds> of the audio routes and the
 C<documents> of the rerank and documents routes and the C<pages> of the documents routes
 among them. C<recent> holds the newest C<limit> events
 (default 20). Unreadable files and lines are skipped. The shape is described in
@@ -358,8 +417,8 @@ sub report {
 
   my @events;
   if ($self->mode eq 'dir') {
-    my @files = sort glob(File::Spec->catfile($self->path, '*.json'));
-    for my $file (@files) {
+    my ($files) = $self->_event_files;
+    for my $file (map { $_->[0] } @$files) {
       my $text = eval { Langertha::Skeid::UsageStore::read_text_file($file) };
       next unless defined $text;
       my $ev = eval { decode_json($text) };

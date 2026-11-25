@@ -48,7 +48,7 @@ use Langertha::Skeid::UsageStore::JsonLog;
     $r;
   };
 
-  my @files = glob("$dir/*.json");
+  my @files = glob("$dir/*/*.json");
   is(scalar(@files), 1, 'fsync on: exactly one event file');
   my $ev = decode_json(do { open my $fh, '<', $files[0] or die $!; local $/; <$fh> });
   is($ev->{input_tokens}, 7, 'fsync on: the written event is intact');

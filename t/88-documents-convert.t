@@ -866,7 +866,7 @@ subtest 'pages is a nullable column of both schemas and summed by every store' =
   is $jr->{totals}{pages}, 5, 'jsonlog: totals.pages';
   is $jr->{by_key}[0]{pages}, 5, 'jsonlog: by_key.pages';
   is $jr->{by_model}[0]{pages}, 5, 'jsonlog: by_model.pages';
-  my $lines = join '', map { $_->slurp } path($dir)->children;
+  my $lines = join '', map { $_->slurp } map { $_->children } path($dir)->children;  # events sit in day directories (skeid k131)
   my @events = map { decode_json($_) } grep { length } split /\n/, $lines;
   my %by = map { $_->{request_id} => $_ } @events;
   is $by{j1}{pages}, 5, 'jsonlog writes the key';

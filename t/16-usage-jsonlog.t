@@ -37,7 +37,7 @@ use Langertha::Skeid;
   ok($r2->{ok}, 'dir mode: record 2 ok');
 
   # Check files were created
-  my @files = glob("$dir/*.json");
+  my @files = glob("$dir/*/*.json");
   is(scalar(@files), 2, 'dir mode: two json files created');
 
   # Report — all events
@@ -115,7 +115,7 @@ use Langertha::Skeid;
     metrics => { usage => { input => 1, output => 1, total => 2 } },
   });
 
-  my @files = glob("$path*.json");
+  my @files = glob("$path*/*.json");
   is(scalar(@files), 1, 'trailing slash: event written as file');
 }
 
@@ -144,8 +144,8 @@ use Langertha::Skeid;
     metrics => { usage => { input => 1, output => 1, total => 2 } },
   });
 
-  my @first_files  = glob("$first/*.json");
-  my @second_files = glob("$second/*.json");
+  my @first_files  = glob("$first/*/*.json");
+  my @second_files = glob("$second/*/*.json");
   is(scalar(@first_files), 1, 'reconfigure: first location keeps its event');
   is(scalar(@second_files), 1, 'reconfigure: new event lands in the new location');
   is($skeid->usage_store->{path}, $second, 'reconfigure: store config points at the new path');

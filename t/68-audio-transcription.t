@@ -1078,7 +1078,7 @@ subtest 'jsonlog writes audio_seconds and reports it' => sub {
   my $dir = "$TMP/jsonlog";
   my $skeid = Langertha::Skeid->new(usage_store => { backend => 'jsonlog', path => $dir, mode => 'dir' });
   record_events($skeid, @AUDIO_EVENTS);
-  my @lines = map { decode_json($_) } map { path($_)->lines_utf8 } grep { -f } path($dir)->children;
+  my @lines = map { decode_json($_) } map { path($_)->lines_utf8 } grep { -f } map { $_->children } path($dir)->children;  # events sit in day directories (skeid k131)
   is scalar(@lines), 4, 'four events on disk';
   is_deeply [ sort { $a <=> $b } map { $_->{audio_seconds} } grep { exists $_->{audio_seconds} } @lines ],
     [ 7.25, 12 ], 'the two events that had a duration carry it';
