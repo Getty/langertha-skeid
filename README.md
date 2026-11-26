@@ -61,10 +61,6 @@ Optional modules:
 
 - `DBI` + `DBD::SQLite` for the `sqlite` usage store, `DBI` + `DBD::Pg` for `postgresql`.
   The `jsonlog` store needs neither.
-- A Langertha newer than 0.503 (`Langertha::Tool->classify`, `Langertha::Manifest`,
-  cache-aware `Langertha::Cost`). With the released 0.503 Skeid runs, but a `/v1/messages`
-  request that carries `tools` is answered with `400`, the manifest route answers `404`, and
-  pricing cache rates are ignored with a warning.
 
 ## Quick start
 
@@ -878,8 +874,7 @@ Rules are looked up by the served model and applied when the event is recorded, 
 price change never rewrites history. With the two cache rates, cache reads and writes are
 priced into `cost_cache_read_usd` and `cost_cache_write_usd` (both part of `cost_total_usd`)
 and `cost_input_usd` covers only the uncached input; without them cached tokens bill at
-`input_per_million`. The cache rates need a Langertha newer than 0.503; an older one ignores
-them with a warning. A rate that is not a number >= 0 fails the load
+`input_per_million`. A rate that is not a number >= 0 fails the load
 ([ADR 0013](docs/adr/0013-cached-tokens-are-recorded-pricing-is-deferred.md)).
 
 ### Admin API key
@@ -1065,7 +1060,7 @@ after it, else as its own user message — so chat templates that want the syste
 or strict role alternation accept it, and the prompt prefix stays the same from turn to turn.
 Not supported: images from the Files API and provider built-in tools (`web_search_*`,
 `bash_*`, `text_editor_*`, `computer_*`, `mcp_toolset`, ...), both answered with `400`. Tools
-on this face need a Langertha newer than 0.503 (see [Install](#install)).
+on this face need Langertha 0.506, which Skeid requires.
 
 **Ollama** (`/api/chat`, `/api/generate`). Streams newline-delimited JSON unless the request
 says `"stream": false`, as Ollama does. `tools` and replayed tool round-trips are translated

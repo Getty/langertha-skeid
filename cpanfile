@@ -2,7 +2,7 @@ requires 'Digest::SHA', '6.02';
 requires 'File::ShareDir', '1.118';
 requires 'HTTP::Tiny', '0.080';
 requires 'JSON::MaybeXS', '1.004004';
-requires 'Langertha', '0.503';
+requires 'Langertha', '0.506';
 requires 'Mojolicious', '9.0';
 requires 'Moo', '2.005005';
 requires 'namespace::clean', '0.27';
