@@ -1,0 +1,15 @@
+---
+class: standard
+created: 2026-11-26T18:43:30Z
+id: 144
+priority: low
+status: backlog
+tags:
+- test
+- openai
+title: 'Regressionstest: unbekannte Chat-Felder (z.B. chat_template_kwargs) erreichen
+  den Knoten'
+updated: 2026-11-26T18:43:30Z
+---
+
+Von Langertha k385. Code-Lesung: _handle_openai_chat ersetzt nur model und reicht den Rest durch, additionalProperties ist erlaubt; es fehlt ein Test, der ein unbekanntes Top-Level-Feld im Upstream-Body prueft (JSON und Stream). Zu klaeren: (a) Regressionstest, (b) fasst ein aktiver Request-Filter Top-Level-Felder je an, (c) Messlauf durch Skeid gegen einen echten Knoten (tensorfold). Ob chat_template_kwargs wirkt, haengt zusaetzlich vom Modell/Chat-Template ab.
