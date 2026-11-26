@@ -1,0 +1,23 @@
+---
+class: standard
+created: 2026-11-26T11:35:28Z
+id: 142
+priority: medium
+status: backlog
+tags:
+- routing
+- errors
+title: Clear 'node unavailable' error when no node for a model is reachable (fast
+  fail, per-format body)
+updated: 2026-11-26T11:38:10Z
+---
+
+When every node that serves a requested model is down (connection refused, unreachable host, failed health probe), Skeid should answer at once with a clear, documented error instead of a slow timeout or a bare 5xx.
+Proposal (needs an ADR):
+- HTTP 503 with Retry-After.
+- Body per API format: OpenAI-style {"error":{"type":"model_unavailable","code":"node_down","message":"model <m> is unavailable: no reachable node"}}; Ollama-style {"error":"model <m> is unavailable: no reachable node"}; Anthropic-style error object analogous.
+- Node health: a short connect timeout (configurable per node, e.g. connect_timeout_ms) separate from the request/upstream timeout, so a dead node is detected in milliseconds, plus a light health probe that marks a node unhealthy until it answers again.
+- Chained Skeids: a 503 from an upstream Skeid node with this body is passed through unchanged (no retry storm across layers).
+Downstream users want to show "unavailable" to callers and alert on it; nothing should fail over automatically to another site.
+
+2026-11-26 11:38 Required node field: connect_timeout_ms (positive integer, applied to the upstream connect of that node only; absent = today's fixed 10 s from Proxy build_app). Optionally a global default routing.connect_timeout_ms / SKEID_UPSTREAM_CONNECT_TIMEOUT_MS. Must stay separate from SKEID_UPSTREAM_TIMEOUT (request/inactivity), which has to stay long for slow first tokens. A refused or timed-out connect should count toward the fast 503 described above. Note: add_node currently drops unknown node fields silently.
