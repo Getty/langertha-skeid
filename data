@@ -1,0 +1,23 @@
+---
+class: standard
+created: 2026-11-26T14:20:32Z
+id: 143
+priority: medium
+status: backlog
+tags:
+- usage
+title: 'Usage event: node_kind (gpm, forward, static) like finish_reason/ttft_ms/correlation_id
+  (k121)'
+updated: 2026-11-26T14:20:32Z
+---
+
+From platform#275 (cai-platform). The usage contract (cai-gpm docs/vertrag/nutzung.md, section node_kind) lists four per-request fields; the usage event already carries finish_reason, ttft_ms and correlation_id (k121), but not node_kind.
+
+Wanted: node_kind on every usage event that has a node:
+- gpm: the node came from the GPM node list (id starts with gpm-), also static engines the GPM publishes;
+- forward: forwarded to another Skeid (node_id starts with org-skeid-);
+- static: the node is configured directly in Skeid;
+- absent: no node (request dropped before routing).
+node_kind and the id prefix must agree.
+
+The platform reads it tolerantly (unknown value = empty) and will then count forwarded rows and ttft_ms by node_kind instead of the prefix.
