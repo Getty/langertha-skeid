@@ -1,0 +1,28 @@
+---
+class: standard
+created: 2026-11-26T01:30:33Z
+id: 141
+priority: high
+status: backlog
+tags:
+- filter
+- pii
+- downstream
+title: 'Filter seam vs. CAI''s PII design: what the contract (ADR 0035) lacks before
+  CAI can use it'
+updated: 2026-11-26T01:30:33Z
+---
+
+Found in a read-only comparison of the k118 filter seam with the PII design of the CAI deployment (hive hexel-pii.md, cai-pii sidecar), 2026-11-26. ADR 0035 is still proposed, so these can go in before it is accepted and released.
+
+Mismatches:
+1. Mark header: Skeid reads ctx.mark only from X-Skeid-Filter; CAI uses its own header name. Workaround pass_headers works, but the mark field stays empty. Make the header name configurable (filter.mark_header)?
+2. CAI signs the mark over request_id + org + sha256(body). ctx has no request id and no body hash, and the sidecar never sees the final upstream bytes (Skeid substitutes and rewrites model afterwards). Needs ctx fields or a different signature design: contract v2?
+3. Map entries: Skeid cuts the original only with id+start+end, otherwise it uses text. CAI design sends no values and normalises (NFKC) before detection, so offsets may point into the normalised text. Agree on offsets into the text exactly as Skeid sent it.
+4. No language field in ctx (CAI design lists one).
+5. pii_unknown: Skeid adds its own count onto the key the sidecar sends, so the stored value is a sum. Separate key (filter_unknown_placeholders)?
+6. MCP gateway is not gated (ADR 0035 consequence); CAI wants local/503 there.
+7. Default timeout 5000 ms vs CAI 2000 ms: fine if CAI writes timeout_ms; just note.
+Matches already: filter keys, token_env Bearer, fail-closed, local/refuse semantics, placeholder forms, X-* only upstream, pii_*/filter_* allowlist.
+
+Decision for the maintainer: which of 1-6 go into the contract now.
